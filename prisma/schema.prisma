@@ -1,0 +1,132 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // url      = env("DATABASE_URL")
+  
+}
+
+// 1. 教師大倉庫
+model Teacher {
+  id           Int      @id @default(autoincrement())
+  name         String   @unique
+  google_account String?
+  type         String   // homeroom(導師), subject(專任), admin(行政)
+  max_periods  Int?     // CSV 匯入的法定上限
+  reduction    Int      @default(0) // 減課
+  overtime     Int      @default(0) // 超鐘點
+  expertise    String?  // 專長科目 (存成 JSON 字串)
+  unavailable_slots String?  // 儲存老師不排課時段 (JSON)
+  gradePreferences String? // 年級志願 (JSON 字串)
+  assignedClass String? // 🆕 帶領班級 (CSV 匯入解析)
+
+  homeroom_class Class? @relation("HomeroomTeacher")
+}
+
+// 2. 班級表
+model Class {
+  id                  Int      @id @default(autoincrement())
+  name                String   @unique
+  grade               Int
+  isArtsClass         Boolean  @default(false) // 🚀 新增：標記是否為特殊藝才班
+  timetable           String?  // 🆕 關鍵：儲存 AI 排出來 of 5x7 課表結果 (JSON)
+  conflicts           String?  // 🆕 新增：儲存手動調整或系統目前存在的衝堂資訊 (JSON)
+
+  homeroom_teacher_id Int?     @unique
+  homeroom_teacher    Teacher? @relation("HomeroomTeacher", fields: [homeroom_teacher_id], references: [id])
+
+  course_requirements CourseRequirement[]
+}
+
+// 3：專科教室管理 (對應您原本的 classrooms 區塊)
+model Classroom {
+  id               Int      @id @default(autoincrement())
+  name             String   @unique
+  subject          String?  // 所屬科目
+  primaryTeacher   String?  // 主要負責教師
+  allowSharing     Boolean  @default(true) // 是否允許共享
+  gradePreferences String?  // 優先年級 (JSON 字串，如 "[6]" 表示6年級優先，"[]" 表示共享)
+}
+
+// 4：特殊專案與抽離 (升級版：支援 AI 參數與多班級)
+model SpecialCourse {
+  id              Int      @id @default(autoincrement())
+  type            String   // 'pullout' 或 'swimming'
+  name            String
+  targetSubject   String?  // 對應學科
+  teacher         String?  // 特教/負責教師
+  targetClasses   String?  // 參與班級 (JSON 陣列)
+  lockedSlots     String?  // 鎖定時段 (JSON 陣列)
+  isAutoTime      Boolean  @default(false)
+  isAutoClass     Boolean  @default(false)
+  autoClassConfig String?  // AI 湊班設定 (JSON 物件)
+}
+
+// 5. 課程需求與配課表 
+model CourseRequirement {
+  id             Int     @id @default(autoincrement())
+  class_id       Int
+  class          Class   @relation(fields: [class_id], references: [id], onDelete: Cascade)
+
+  subject        String
+  periods        Float
+  teacher_name   String?
+  defaultTeacher String
+  // 🚀 新增：鎖定標記，支援手動預排
+  isLocked       Boolean @default(false)
+}
+
+// 6. 系統全域設定 (108 矩陣永不遺失)
+model SystemSetting {
+  id                 Int    @id @default(1)
+  academic_year      String @default("115")
+  semester           String @default("上學期")
+  grade_settings     String
+  period_defaults    String
+  alternative_matrix String
+  standard_domain_settings String @default("[]")
+  class_exceptions   String @default("[]")
+  // 🚀 關鍵新增：儲存 AI 演算法開關設定 (預設為空物件字串)
+  ai_settings        String @default("{}")
+  // 🚀 新增：專科教室預設容量上限 (JSON 字串，如 {"自然":3,"英語":3,...})
+  classroom_limits   String @default("{}")
+  // 🚀 新增：AI 系統設定 (Ollama 連線等) - 持久化到資料庫
+  aiSystemSettings   String @default("{}")
+  // 🆕 新增：科任科目分配專科教室之適用年級配置 (JSON String)
+  subjectClassroomGrades String @default("{}")
+}
+
+// 8. 管理員使用者 (Setup Wizard 專用)
+model AdminUser {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  password  String   // bcrypt 加密後的密碼
+  role      String   @default("admin")
+  createdAt DateTime @default(now())
+}
+
+// 9. 系統初始化狀態
+model SystemStatus {
+  id              Int      @id @default(1)
+  isSetupComplete Boolean  @default(false)
+  schoolName      String   @default("")
+  updatedAt       DateTime @updatedAt
+}
+
+// 7.定義用來儲存排課任務的資料表。這將負責記錄前端輪詢 (Polling) 所需的狀態。
+model ScheduleJob {
+  id              String    @id @default(uuid())
+  status          String    @default("PENDING") // 狀態: PENDING, PROCESSING, COMPLETED, FAILED
+  payload         String    // 前端傳來的原始需求 (JSON 字串)
+  result          String?   // 排課結果或錯誤訊息 (JSON 字串)
+  progressPhase   String    @default("QUEUED") // 細粒度階段: QUEUED, PROCESSING, SOLVING, FINALIZING, COMPLETED, FAILED
+  progressMessage String    @default("")       // 當前階段的人類可讀訊息
+  startedAt       DateTime?                    // 引擎實際開始運行的時間
+  finishedAt      DateTime?                    // 引擎完成的時間（無論成功或失敗）
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}

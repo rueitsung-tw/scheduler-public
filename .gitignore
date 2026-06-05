@@ -1,0 +1,79 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+.DS_Store
+dist
+dist-ssr
+coverage
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+*.tsbuildinfo
+
+.eslintcache
+
+# Cypress
+/cypress/videos/
+/cypress/screenshots/
+
+# Vitest
+__screenshots__/
+
+# Vite
+*.timestamp-*-*.mjs
+
+/src/generated/prisma
+
+# Debug/Diagnostic Python scripts
+analyze_payload.py
+anti_collision_diagnose.py
+binary_diagnose.py
+diagnose_constraints.py
+diagnostic_stats.py
+magic_eq_diagnose.py
+query_classrooms.py
+quick_test_solver.py
+repair_agent.py
+verify_alternating_fix.py
+verify_periods.py
+
+# Backup files
+*_backup.py
+solver_test_*_backup.py
+
+# Debug JSON outputs
+debug_*.json
+input_*.json
+output*.json
+out_s_*.json
+fresh_db_dump.json
+
+# Database tools
+check_db.mjs
+cleanup_db.*
+fetch_all_db.mjs
+export_solver_input.mjs
+
+# Logs & Reports
+solver_log.txt
+debug_*_report.txt
+debug_lock_audit.txt
+
+# Dev database
+dev.db
