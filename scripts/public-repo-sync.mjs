@@ -9,6 +9,14 @@ function toPosix(relPath) {
   return relPath.split(path.sep).join('/');
 }
 
+function normalizeAbsDir(dirPath) {
+  return path.resolve(dirPath).replace(/[\\/]+$/, '').toLowerCase();
+}
+
+function isSameDirectory(left, right) {
+  return normalizeAbsDir(left) === normalizeAbsDir(right);
+}
+
 function escapeRegexChar(char) {
   return char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
 }
@@ -228,6 +236,7 @@ async function main() {
   const manifest = await loadManifest();
   const sourceRoot = repoRoot;
   const targetRoot = path.resolve(manifest.targetDir ?? 'F:/scheduler-public');
+  const sourceMatchesTarget = isSameDirectory(sourceRoot, targetRoot);
   const { isAllowed, isIgnored } = buildAllowlist(manifest);
 
   const sourceFiles = await walkFiles(sourceRoot, manifest);
@@ -240,6 +249,9 @@ async function main() {
       `Allowed files: ${allowedFiles.length}`,
       `Ignored files: ${ignoredFiles.length}`,
       `Unclassified files: ${unclassifiedFiles.length}`,
+      sourceMatchesTarget
+        ? 'Mode: auditing the checked-in public copy only; sync is disabled when source and target are the same directory.'
+        : `Target: ${targetRoot}`,
     ]);
 
     if (unclassifiedFiles.length > 0) {
@@ -255,6 +267,12 @@ async function main() {
 
   if (command !== 'sync') {
     throw new Error(`Unknown command "${command}". Use "check" or "sync".`);
+  }
+
+  if (sourceMatchesTarget) {
+    throw new Error(
+      'Refusing to sync when source and target are the same directory. Run this command from the private source workspace that copies into the public repo.',
+    );
   }
 
   await fs.mkdir(targetRoot, { recursive: true });

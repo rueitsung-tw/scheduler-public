@@ -1,7 +1,13 @@
 # Public Repo Transfer Index
 
 This index is the human-readable companion to [`public-repo.manifest.json`](./public-repo.manifest.json).
-The manifest is the source of truth for syncing the public working copy at `F:\scheduler-public`.
+The manifest is the source of truth for what is allowed to land in the public working copy at `F:\scheduler-public`.
+
+## Repository Role
+
+- This repository is the public/open-source target copy.
+- The private developer workspace is the source repository where local databases, debug payloads, unpublished notes, and other sensitive files may exist.
+- `public-repo.manifest.json` is maintained as an allowlist snapshot so the public copy only receives files that have been explicitly classified as safe to publish.
 
 ## Included Roots
 
@@ -17,6 +23,7 @@ The manifest is the source of truth for syncing the public working copy at `F:\s
 - `.gitignore`
 - `.oxlintrc.json`
 - `.prettierrc.json`
+- `PUBLIC_REPO_INDEX.md`
 - `README.md`
 - `eslint.config.js`
 - `index.html`
@@ -53,9 +60,16 @@ The manifest is the source of truth for syncing the public working copy at `F:\s
 
 ## Maintenance Rule
 
-When a new file is meant to be public:
+When a file changes in the private source repository:
 
-1. Add it to `public-repo.manifest.json`
-2. Re-run `node scripts/public-repo-sync.mjs check`
-3. Sync to `F:\scheduler-public`
+1. Decide whether it belongs in public, private, or an explicitly ignored bucket.
+2. Update `public-repo.manifest.json` first if the file should be published.
+3. Run `node scripts/public-repo-sync.mjs check` in the private source repository until `Unclassified files: 0`.
+4. Run `node scripts/public-repo-sync.mjs sync` in the private source repository to copy the allowlisted files into `F:\scheduler-public`.
+5. Review the resulting public repo diff, then commit and push the public repository.
 
+## Important Behavior
+
+- In this public repository, `node scripts/public-repo-sync.mjs check` only audits the checked-in public tree.
+- In this public repository, `node scripts/public-repo-sync.mjs sync` is intentionally blocked because the source and target directories are the same.
+- The real "what changed in private but has not been classified yet" check only works when run from the private source workspace.

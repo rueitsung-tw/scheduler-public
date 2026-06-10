@@ -2,18 +2,20 @@
 
 國小智慧排課系統是一個專為國小排課場景（對應台灣 108 課綱）量身打造的校域級智慧排課與課表編排平台。本系統結合了現代前端技術、輕量後端資料庫，並以 Google OR-Tools CP-SAT 約束規劃求解器（Constraint Programming - Satisfiability）為核心，實現高效、精準、具備容錯與後處理能力的自動排課引擎。
 
+> 本倉庫是公開版 / 開源版工作目錄。私人開發工作區中的本機資料庫、debug payload、診斷腳本、修復歷程與其他敏感檔案，不會同步到這裡。
+
 ---
 
 ## 🛠️ 核心技術棧 (Technology Stack)
 
 | 分層 | 技術技術 | 說明 |
 | :--- | :--- | :--- |
-| **前端 UI** | Vue 3 (Composition API) + Vite | 基於 `<script setup>` 語法開發，UI 元件採用 Element Plus |
+| **前端 UI** | Vue 3 (Composition API) + Vite | 基於 `<script setup>` 語法開發，以單檔元件與自訂樣式組成管理介面 |
 | **狀態管理** | Pinia | 使用核心 `useScheduleStore` 進行資料庫雙向同步與引擎輪詢控制 |
 | **後端 API** | Express.js (Node.js) | 作為 REST API 伺服器，並透過 `child_process.spawn` 橋接 Python 求解器 |
 | **資料庫 & ORM** | SQLite + Prisma ORM | 本地輕量級資料儲存，使用 Prisma Client 驅動進行資料結構管理 |
 | **排課引擎** | Python (OR-Tools CP-SAT) | 核心約規劃求解，使用滿意度約束求解器計算全校可行解 |
-| **後處理優化** | Python (Simulated Annealing) | 實作專責優化代理 `repair_agent.py`（模擬退火演算法）微調課表與消除衝突 |
+| **特殊排程輔助** | Python | `phase2_engine.py` 處理特殊/複雜科目；部分私人工作區診斷或修復輔助腳本不納入公開版 |
 | **報表匯出** | XLSX (xlsx) / DOCX (docx) | 前端自動推導與生成教育部標準配課表、直式全校課表及專科教室課表 |
 
 ---
@@ -37,18 +39,19 @@ scheduler-frontend/
 │   ├── class_rules.py            # 班級與年級習慣約束
 │   ├── teacher_rules.py          # 教師與特教/抽離課程約束
 │   └── special_rules.py          # 交替配對、專科教室指派與游泳課容量約束
-├── docs/                         # 系統開發與中後期修復計畫文檔倉庫
+├── public/                       # 靜態資產
+├── docs/                         # 公開版穩定說明文件
 ├── server.js                     # Express API 伺服器 & Python 橋接主程式
 ├── solver.py                     # Python 智慧排課求解器主入口
 ├── phase2_engine.py              # 特殊/複雜科目（游泳、特教）的二階段求解引擎
 ├── preprocessor.py               # 資料預處理與正規化器
-├── repair_agent.py               # 模擬退火（Simulated Annealing）課表後處理優化代理
-├── diagnostic_stats.py           # 求解前/後資料品質與命中率統計診斷器
 ├── config.py                     # Python 引擎全域常數與科目代碼配置
 ├── utils.py                      # Python 工具函數與 JSON 解析器
-├── dev.db                        # 本地 SQLite 資料庫檔案
+├── PUBLIC_REPO_INDEX.md          # 公開版同步與 allowlist 規則索引
+├── public-repo.manifest.json     # 公開版 allowlist manifest
+├── scripts/public-repo-sync.mjs  # 私人來源庫 -> 公開版 的同步檢查/複製工具
 ├── package.json                  # Node.js 套件依賴與腳本定義
-└── DataDictionary_2.md          # 系統資料字典與最新架構手冊
+└── docs/DataDictionary.md        # 系統資料字典與架構手冊
 ```
 
 ---
@@ -132,7 +135,7 @@ graph TD
 * **修復背景**：當排課需求遭遇極端物理死結（如專科教室容量極度緊繃、多種配對衝突）時，硬約束求解器會直接回報 `INFEASIBLE`（無解）。
 * **解決方案**：
   * 將專科教室容量限制由硬約束改為帶高罰分的軟約束，以確保求解器能在任何死結時都 100% 產出可行解。
-  * 引入 `repair_agent.py`（模擬退火優化代理）與 `diagnostic_stats.py`（診斷統計模組），在 Python CP-SAT 求解後自動進行後處理微調，消除軟性容量超載並極大化教師專長與年級優先度之命中率。
+  * 私人工作區曾搭配 `repair_agent.py` 與 `diagnostic_stats.py` 等輔助工具做後處理與診斷；這些本機/診斷腳本不屬於公開版 allowlist，因此本倉庫只保留公開需要的主流程程式碼與穩定文件。
 
 ### 10. 專科教室具體指派結果導出與衝堂持久化 (Classroom Assignment & Conflict Persistence)
 * **修復背景**：先前求解器雖然建立了教室指派變數（`assign_c_r_p`），但其決策解在輸出時被直接拋棄，前端只能以模糊反推粗暴瞎猜；且全域衝突資訊只能在前端運行時暫存，無法保存供未來 AI 儲存與分析。
