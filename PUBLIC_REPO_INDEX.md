@@ -8,6 +8,8 @@ The manifest is the source of truth for what is allowed to land in the public wo
 - This repository is the public/open-source target copy.
 - The private developer workspace is the source repository where local databases, debug payloads, unpublished notes, and other sensitive files may exist.
 - `public-repo.manifest.json` is maintained as an allowlist snapshot so the public copy only receives files that have been explicitly classified as safe to publish.
+- The sync script lives only in this public repository and reads the private source repository through `--source <path>`.
+- The private source repository is read-only from the script's perspective: no writes, deletes, or renames are allowed there.
 
 ## Included Roots
 
@@ -49,6 +51,15 @@ The manifest is the source of truth for what is allowed to land in the public wo
 - `docs/Scheduler_Engine_Overview.md`
 - `docs/藝才班特規排課模組_使用說明手冊.md`
 
+## Public-Only Files
+
+- `PUBLIC_REPO_INDEX.md`
+- `public-repo.manifest.json`
+- `scripts/public-repo-sync.mjs`
+- `tests/`
+
+These files are maintained directly in `F:\scheduler-public` and are preserved via the manifest's `targetOnlyFiles` / `targetOnlyRoots` rules.
+
 ## Excluded by Default
 
 - Local runtime and secrets: `.env`, `dev.db`, `*.local`
@@ -63,13 +74,16 @@ The manifest is the source of truth for what is allowed to land in the public wo
 When a file changes in the private source repository:
 
 1. Decide whether it belongs in public, private, or an explicitly ignored bucket.
-2. Update `public-repo.manifest.json` first if the file should be published.
-3. Run `node scripts/public-repo-sync.mjs check` in the private source repository until `Unclassified files: 0`.
-4. Run `node scripts/public-repo-sync.mjs sync` in the private source repository to copy the allowlisted files into `F:\scheduler-public`.
+2. Update `public-repo.manifest.json` in this public repository first if the file should be published.
+3. Run `node scripts/public-repo-sync.mjs check --source "<private-source-path>"` from `F:\scheduler-public` until `Unclassified files: 0`.
+4. Run `node scripts/public-repo-sync.mjs sync --source "<private-source-path>"` from `F:\scheduler-public` to copy the allowlisted files into this repository.
 5. Review the resulting public repo diff, then commit and push the public repository.
 
 ## Important Behavior
 
-- In this public repository, `node scripts/public-repo-sync.mjs check` only audits the checked-in public tree.
-- In this public repository, `node scripts/public-repo-sync.mjs sync` is intentionally blocked because the source and target directories are the same.
-- The real "what changed in private but has not been classified yet" check only works when run from the private source workspace.
+- `node scripts/public-repo-sync.mjs check` audits the checked-in public tree when `--source` is omitted.
+- `node scripts/public-repo-sync.mjs check --source "<private-source-path>"` classifies the private source tree without modifying it.
+- `node scripts/public-repo-sync.mjs sync --source "<private-source-path>"` only writes inside `F:\scheduler-public`.
+- `node scripts/public-repo-sync.mjs sync` without `--source` is rejected.
+- `node scripts/public-repo-sync.mjs sync --source "F:\scheduler-public"` is rejected.
+- `node scripts/public-repo-sync.mjs sync --source "<private-source-path>" --dry-run` prints planned copies and stale-file removals without mutating either tree.

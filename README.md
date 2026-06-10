@@ -3,6 +3,7 @@
 國小智慧排課系統是一個專為國小排課場景（對應台灣 108 課綱）量身打造的校域級智慧排課與課表編排平台。本系統結合了現代前端技術、輕量後端資料庫，並以 Google OR-Tools CP-SAT 約束規劃求解器（Constraint Programming - Satisfiability）為核心，實現高效、精準、具備容錯與後處理能力的自動排課引擎。
 
 > 本倉庫是公開版 / 開源版工作目錄。私人開發工作區中的本機資料庫、debug payload、診斷腳本、修復歷程與其他敏感檔案，不會同步到這裡。
+> 公開版同步腳本只放在本倉庫，使用 `--source <私人來源資料夾>` 讀取來源內容；來源資料夾永遠只讀，只有 `F:\scheduler-public` 會被修改。
 
 ---
 
@@ -49,7 +50,8 @@ scheduler-frontend/
 ├── utils.py                      # Python 工具函數與 JSON 解析器
 ├── PUBLIC_REPO_INDEX.md          # 公開版同步與 allowlist 規則索引
 ├── public-repo.manifest.json     # 公開版 allowlist manifest
-├── scripts/public-repo-sync.mjs  # 私人來源庫 -> 公開版 的同步檢查/複製工具
+├── scripts/public-repo-sync.mjs  # 公開版內執行、透過 --source 讀取私人來源庫的同步工具
+├── tests/                        # 公開版同步腳本與降級機制的回歸測試
 ├── package.json                  # Node.js 套件依賴與腳本定義
 └── docs/DataDictionary.md        # 系統資料字典與架構手冊
 ```
@@ -135,7 +137,27 @@ graph TD
 * **修復背景**：當排課需求遭遇極端物理死結（如專科教室容量極度緊繃、多種配對衝突）時，硬約束求解器會直接回報 `INFEASIBLE`（無解）。
 * **解決方案**：
   * 將專科教室容量限制由硬約束改為帶高罰分的軟約束，以確保求解器能在任何死結時都 100% 產出可行解。
-  * 私人工作區曾搭配 `repair_agent.py` 與 `diagnostic_stats.py` 等輔助工具做後處理與診斷；這些本機/診斷腳本不屬於公開版 allowlist，因此本倉庫只保留公開需要的主流程程式碼與穩定文件。
+  * 私人工作區曾搭配 `repair_agent.py` 與 `diagnostic_stats.py` 等輔助工具做後處理與診斷；這些本機/診斷腳本不屬於公開版 allowlist，因此本倉庫只保留公開需要的主流程程式碼與穩定文件。公開版若缺少這些腳本，後端會自動跳過診斷/修復步驟並回退到 solver 原始結果，而不是讓整個排課流程失敗。
+
+---
+
+## 🔄 公開版同步流程 (Public Sync Workflow)
+
+公開版同步腳本固定從 `F:\scheduler-public` 執行，並透過 `--source` 指向私人來源資料夾：
+
+```powershell
+npm run public:check -- --source "D:\private-scheduler"
+npm run public:sync -- --source "D:\private-scheduler" --dry-run
+npm run public:sync -- --source "D:\private-scheduler"
+```
+
+同步保證如下：
+
+1. 私人來源資料夾只會被讀取，不會被寫入、刪除或改名。
+2. 實際被修改的只有 `F:\scheduler-public`。
+3. `sync` 會複製 allowlist 內檔案，並刪除公開版中已不再被 allowlist 允許的舊檔。
+4. `sync` 若未提供 `--source`，或把 `--source` 指到 `F:\scheduler-public` 自己，都會直接拒絕執行。
+5. `check` 若不帶 `--source`，則只稽核目前 public repo 自身是否仍符合 manifest。
 
 ### 10. 專科教室具體指派結果導出與衝堂持久化 (Classroom Assignment & Conflict Persistence)
 * **修復背景**：先前求解器雖然建立了教室指派變數（`assign_c_r_p`），但其決策解在輸出時被直接拋棄，前端只能以模糊反推粗暴瞎猜；且全域衝突資訊只能在前端運行時暫存，無法保存供未來 AI 儲存與分析。

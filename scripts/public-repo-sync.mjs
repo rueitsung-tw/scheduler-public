@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -15,6 +16,34 @@ function normalizeAbsDir(dirPath) {
 
 function isSameDirectory(left, right) {
   return normalizeAbsDir(left) === normalizeAbsDir(right);
+}
+
+function parseArgs(argv) {
+  const args = [...argv];
+  const command = (args.shift() ?? 'check').toLowerCase();
+  let sourceRoot = null;
+  let dryRun = false;
+
+  while (args.length > 0) {
+    const arg = args.shift();
+    if (arg === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+
+    if (arg === '--source') {
+      const value = args.shift();
+      if (!value) {
+        throw new Error('Missing value for --source.');
+      }
+      sourceRoot = path.resolve(value);
+      continue;
+    }
+
+    throw new Error(`Unknown argument "${arg}". Supported options: --source <path>, --dry-run.`);
+  }
+
+  return { command, sourceRoot, dryRun };
 }
 
 function escapeRegexChar(char) {
@@ -145,6 +174,52 @@ function buildAllowlist(manifest) {
   return { isAllowed, isIgnored, isExplicitlyIncluded };
 }
 
+function buildTargetOnlyMatcher(manifest) {
+  const targetOnlyRootSet = new Set((manifest.targetOnlyRoots ?? []).map((value) => value.toLowerCase()));
+  const targetOnlyFileSet = new Set(
+    [...(manifest.targetOnlyFiles ?? []), ...(manifest.targetOnlyDocFiles ?? [])].map((value) =>
+      value.toLowerCase(),
+    ),
+  );
+
+  return (relPath) => {
+    const lowered = relPath.toLowerCase();
+    if (targetOnlyFileSet.has(lowered)) {
+      return true;
+    }
+
+    for (const root of targetOnlyRootSet) {
+      if (isUnderRoot(lowered, root)) {
+        return true;
+      }
+    }
+
+    return false;
+  };
+}
+
+function assertDirectoryExists(dirPath, label) {
+  if (!fsSync.existsSync(dirPath)) {
+    throw new Error(`${label} does not exist: ${dirPath}`);
+  }
+
+  const stat = fsSync.statSync(dirPath);
+  if (!stat.isDirectory()) {
+    throw new Error(`${label} is not a directory: ${dirPath}`);
+  }
+}
+
+function resolveTargetRoot(manifest) {
+  const manifestTargetRoot = path.resolve(manifest.targetDir ?? repoRoot);
+  if (!isSameDirectory(manifestTargetRoot, repoRoot)) {
+    throw new Error(
+      `This script only mutates the current public repository. Expected target ${repoRoot}, got ${manifestTargetRoot}.`,
+    );
+  }
+
+  return manifestTargetRoot;
+}
+
 async function ensureParentDir(filePath) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
@@ -185,9 +260,12 @@ async function listFiles(rootDir) {
   return output;
 }
 
-async function pruneTarget(targetRoot, allowedSet) {
+async function findStaleFiles(targetRoot, allowedSet) {
   const targetFiles = await listFiles(targetRoot);
-  const staleFiles = targetFiles.filter((relPath) => !allowedSet.has(relPath.toLowerCase()));
+  return targetFiles.filter((relPath) => !allowedSet.has(relPath.toLowerCase()));
+}
+
+async function pruneTarget(targetRoot, staleFiles) {
 
   for (const relPath of staleFiles) {
     const absPath = path.join(targetRoot, ...relPath.split('/'));
@@ -231,35 +309,68 @@ function printSummary(title, lines) {
   }
 }
 
-async function main() {
-  const command = (process.argv[2] ?? 'check').toLowerCase();
-  const manifest = await loadManifest();
-  const sourceRoot = repoRoot;
-  const targetRoot = path.resolve(manifest.targetDir ?? 'F:/scheduler-public');
-  const sourceMatchesTarget = isSameDirectory(sourceRoot, targetRoot);
-  const { isAllowed, isIgnored } = buildAllowlist(manifest);
+function printPaths(title, paths) {
+  if (paths.length === 0) {
+    return;
+  }
 
-  const sourceFiles = await walkFiles(sourceRoot, manifest);
-  const allowedFiles = sourceFiles.filter((relPath) => isAllowed(relPath));
-  const ignoredFiles = sourceFiles.filter((relPath) => !isAllowed(relPath) && isIgnored(relPath));
-  const unclassifiedFiles = sourceFiles.filter((relPath) => !isAllowed(relPath) && !isIgnored(relPath));
+  console.log('');
+  console.log(title);
+  for (const relPath of paths) {
+    console.log(relPath);
+  }
+}
+
+async function main() {
+  const { command, sourceRoot, dryRun } = parseArgs(process.argv.slice(2));
+  const manifest = await loadManifest();
+  const targetRoot = resolveTargetRoot(manifest);
+  const { isAllowed, isIgnored } = buildAllowlist(manifest);
+  const isTargetOnly = buildTargetOnlyMatcher(manifest);
 
   if (command === 'check') {
-    printSummary('Public allowlist check', [
-      `Allowed files: ${allowedFiles.length}`,
-      `Ignored files: ${ignoredFiles.length}`,
-      `Unclassified files: ${unclassifiedFiles.length}`,
-      sourceMatchesTarget
-        ? 'Mode: auditing the checked-in public copy only; sync is disabled when source and target are the same directory.'
-        : `Target: ${targetRoot}`,
-    ]);
+    if (sourceRoot) {
+      assertDirectoryExists(sourceRoot, 'Source directory');
+      const sourceFiles = await walkFiles(sourceRoot, manifest);
+      const allowedFiles = sourceFiles.filter((relPath) => isAllowed(relPath));
+      const ignoredFiles = sourceFiles.filter((relPath) => !isAllowed(relPath) && isIgnored(relPath));
+      const unclassifiedFiles = sourceFiles.filter((relPath) => !isAllowed(relPath) && !isIgnored(relPath));
 
-    if (unclassifiedFiles.length > 0) {
-      console.log('');
-      console.log('Unclassified files need review:');
-      for (const relPath of unclassifiedFiles) {
-        console.log(relPath);
+      printSummary('Public allowlist check', [
+        `Source: ${sourceRoot}`,
+        `Target: ${targetRoot}`,
+        `Allowed files: ${allowedFiles.length}`,
+        `Ignored files: ${ignoredFiles.length}`,
+        `Unclassified files: ${unclassifiedFiles.length}`,
+      ]);
+      printPaths('Unclassified files need review:', unclassifiedFiles);
+
+      if (unclassifiedFiles.length > 0) {
+        process.exitCode = 1;
       }
+      return;
+    }
+
+    const targetFiles = await listFiles(targetRoot);
+    const allowedTargetFiles = targetFiles.filter((relPath) => isAllowed(relPath) || isTargetOnly(relPath));
+    const ignoredTargetFiles = targetFiles.filter(
+      (relPath) => !isAllowed(relPath) && !isTargetOnly(relPath) && isIgnored(relPath),
+    );
+    const unclassifiedTargetFiles = targetFiles.filter(
+      (relPath) => !isAllowed(relPath) && !isTargetOnly(relPath) && !isIgnored(relPath),
+    );
+
+    printSummary('Public allowlist check', [
+      `Source: (audit current public repo only)`,
+      `Target: ${targetRoot}`,
+      `Allowed files: ${allowedTargetFiles.length}`,
+      `Ignored files: ${ignoredTargetFiles.length}`,
+      `Unclassified files: ${unclassifiedTargetFiles.length}`,
+      'Mode: auditing the checked-in public copy only; sync requires --source.',
+    ]);
+    printPaths('Unclassified files need review:', unclassifiedTargetFiles);
+
+    if (unclassifiedTargetFiles.length > 0) {
       process.exitCode = 1;
     }
     return;
@@ -269,22 +380,55 @@ async function main() {
     throw new Error(`Unknown command "${command}". Use "check" or "sync".`);
   }
 
-  if (sourceMatchesTarget) {
+  if (!sourceRoot) {
+    throw new Error('Public sync requires --source <private-dir>.');
+  }
+
+  assertDirectoryExists(sourceRoot, 'Source directory');
+
+  if (isSameDirectory(sourceRoot, targetRoot)) {
     throw new Error(
-      'Refusing to sync when source and target are the same directory. Run this command from the private source workspace that copies into the public repo.',
+      'Refusing to sync when source and target are the same directory. Do not use the public repo itself as --source.',
     );
+  }
+
+  const sourceFiles = await walkFiles(sourceRoot, manifest);
+  const allowedFiles = sourceFiles.filter((relPath) => isAllowed(relPath));
+  const ignoredFiles = sourceFiles.filter((relPath) => !isAllowed(relPath) && isIgnored(relPath));
+  const unclassifiedFiles = sourceFiles.filter((relPath) => !isAllowed(relPath) && !isIgnored(relPath));
+  const allowedTargetSet = new Set(allowedFiles.map((value) => value.toLowerCase()));
+  const targetFiles = await listFiles(targetRoot);
+  for (const relPath of targetFiles) {
+    if (isTargetOnly(relPath)) {
+      allowedTargetSet.add(relPath.toLowerCase());
+    }
+  }
+  const staleFiles = await findStaleFiles(targetRoot, allowedTargetSet);
+
+  printSummary(dryRun ? 'Public sync dry-run' : 'Public sync complete', [
+    `Source: ${sourceRoot}`,
+    `Target: ${targetRoot}`,
+    `Allowed files: ${allowedFiles.length}`,
+    `Ignored files: ${ignoredFiles.length}`,
+    `Unclassified files: ${unclassifiedFiles.length}`,
+    `Copied files: ${allowedFiles.length}`,
+    `Removed stale files: ${staleFiles.length}`,
+    `Dry run: ${dryRun ? 'yes' : 'no'}`,
+  ]);
+  printPaths('Unclassified files need review:', unclassifiedFiles);
+  printPaths(dryRun ? 'Would remove stale files:' : 'Removed stale files:', staleFiles);
+
+  if (unclassifiedFiles.length > 0) {
+    throw new Error('Refusing to sync because the source tree contains unclassified files.');
+  }
+
+  if (dryRun) {
+    return;
   }
 
   await fs.mkdir(targetRoot, { recursive: true });
   await copyAllowedFiles(sourceRoot, targetRoot, allowedFiles);
-
-  const staleFiles = await pruneTarget(targetRoot, new Set(allowedFiles.map((value) => value.toLowerCase())));
-
-  printSummary('Public sync complete', [
-    `Target: ${targetRoot}`,
-    `Copied files: ${allowedFiles.length}`,
-    `Removed stale files: ${staleFiles.length}`,
-  ]);
+  await pruneTarget(targetRoot, staleFiles);
 }
 
 main().catch((error) => {

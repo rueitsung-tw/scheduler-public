@@ -38,6 +38,14 @@
     "docs/Scheduler_Engine_Overview.md",
     "docs/藝才班特規排課模組_使用說明手冊.md"
   ],
+  "targetOnlyRoots": [
+    "tests"
+  ],
+  "targetOnlyFiles": [
+    "PUBLIC_REPO_INDEX.md",
+    "public-repo.manifest.json",
+    "scripts/public-repo-sync.mjs"
+  ],
   "ignoredRoots": [
     ".agent",
     ".agents",

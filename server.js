@@ -19,6 +19,11 @@ import path from 'path';
 import os from 'os';
 import { buildScheduleAiReport } from './src/utils/scheduleAiReport.js';
 import { buildAiTuningPromptBundle } from './src/services/aiTuningPrompt.js';
+import {
+    isOptionalScriptAvailable,
+    runOptionalDiagnosticStats,
+    runOptionalRepairAgent,
+} from './src/services/publicSchedulerFallback.js';
 
 /**
  * Runtime contract:
@@ -2585,23 +2590,12 @@ app.get('/api/debug-infeasible-report', async (req, res) => {
  * @returns {object|null} 統計結果物件
  */
 async function runDiagnosticStats(inputPath, resultPath) {
-    return new Promise((resolve, _reject) => {
-        const diag = spawnPython('diagnostic_stats.py', [inputPath, resultPath], 'Diagnostic Stats');
-        let output = '';
-        diag.stdout.on('data', (d) => output += d);
-        diag.stderr.on('data', (d) => console.error(`[Diagnostic Error]: ${d}`));
-        diag.on('close', (code) => {
-            if (code === 0) {
-                try {
-                    resolve(JSON.parse(output));
-                } catch (e) {
-                    console.error('診斷統計 JSON 解析失敗:', e);
-                    resolve(null);
-                }
-            } else {
-                resolve(null);
-            }
-        });
+    return runOptionalDiagnosticStats({
+        inputPath,
+        resultPath,
+        baseDir: __dirname,
+        spawnPython,
+        logger: console,
     });
 }
 
@@ -2685,34 +2679,31 @@ async function runSchedulingWorker(jobId, payload) {
                     }
 
                     // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
-                    await prisma.scheduleJob.update({
-                        where: { id: jobId },
-                        data: {
-                          progressPhase: 'REPAIRING',
-                          progressMessage: '模擬退火優化中... (Repair Agent)'
-                        }
+                    const repairAgentAvailable = isOptionalScriptAvailable('repair_agent.py', {
+                        baseDir: __dirname,
                     });
 
-                    const repairOutputPath = path.join(__dirname, `output_repaired_${jobId}.json`);
-                    const repairResult = new Promise((resolve, _reject) => {
-                        const repair = spawnPython('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
-                        let repairLog = '';
-                        repair.stdout.on('data', (d) => {
-                            const msg = d;
-                            console.log(`[Repair Agent]: ${msg}`);
-                            repairLog += msg;
-                        });
-                        repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d}`));
-                        repair.on('close', (rc) => {
-                            if (rc === 0 && fs.existsSync(repairOutputPath)) {
-                                resolve('repaired');
-                            } else {
-                                resolve('original');
+                    if (repairAgentAvailable) {
+                        await prisma.scheduleJob.update({
+                            where: { id: jobId },
+                            data: {
+                              progressPhase: 'REPAIRING',
+                              progressMessage: '模擬退火優化中... (Repair Agent)'
                             }
                         });
-                    });
+                    } else {
+                        console.warn('[Public Fallback] repair_agent.py not found. Skipping repair stage and using solver output.');
+                    }
 
-                    const repairStatus = await repairResult;
+                    const repairOutputPath = path.join(__dirname, `output_repaired_${jobId}.json`);
+                    const repairStatus = await runOptionalRepairAgent({
+                        inputPath,
+                        outputPath,
+                        repairOutputPath,
+                        baseDir: __dirname,
+                        spawnPython,
+                        logger: console,
+                    });
 
                     let postRepairStats = null;
                     let resultData;
@@ -2967,4 +2958,3 @@ const server = app.listen(PORT, () => {
 });
 // [Blueprint_Extend_Timeout] 設定 Server 層級超時為 1800000ms (30 分鐘)，防止 HTTP 連線中斷
 server.setTimeout(1800000);
-
