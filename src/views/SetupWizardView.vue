@@ -8,8 +8,8 @@
         </div>
       </div>
 
-      <h1 class="setup-title">歡迎使用智慧排課系統</h1>
-      <p class="setup-subtitle">請完成以下基本設定，以啟動您的排課系統。</p>
+      <h1 class="setup-title">首次安裝與基本資料設定</h1>
+      <p class="setup-subtitle">請輸入學校名稱與初始管理員資料，完成系統初始化。</p>
 
       <!-- 錯誤訊息顯示 -->
       <div v-if="errorMessage" class="alert alert-error">
@@ -42,25 +42,26 @@
           <div class="form-group">
             <label for="username">
               <span class="label-icon">👤</span>
-              管理員帳號
+              初始管理員帳號
               <span class="required">*</span>
             </label>
             <input
               id="username"
               v-model="username"
               type="text"
-              placeholder="請輸入管理員帳號"
+              placeholder="請輸入初始管理員帳號"
               required
               :class="{ 'input-error': errors.username }"
             />
             <span v-if="errors.username" class="error-text">{{ errors.username }}</span>
+            <small class="field-note">此為初始管理員資料，供未來登入功能使用。正式登入機制尚未啟用。</small>
           </div>
 
-          <!-- 密碼 -->
+          <!-- 初始密碼 -->
           <div class="form-group">
             <label for="password">
               <span class="label-icon">🔒</span>
-              密碼
+              初始密碼
               <span class="required">*</span>
             </label>
             <input
@@ -74,11 +75,11 @@
             <span v-if="errors.password" class="error-text">{{ errors.password }}</span>
           </div>
 
-          <!-- 確認密碼 -->
+          <!-- 確認初始密碼 -->
           <div class="form-group">
             <label for="confirmPassword">
               <span class="label-icon">🔒</span>
-              確認密碼
+              確認初始密碼
               <span class="required">*</span>
             </label>
             <input
@@ -101,7 +102,7 @@
       </div>
 
       <p class="setup-footer">
-        初始化後，系統將建立管理員帳號並解鎖所有功能模組。
+        初始化完成後即可進入主系統設定排課參數。初始管理員資料已保存，正式登入功能將於後續啟用。
       </p>
     </div>
   </div>
@@ -325,6 +326,15 @@ const handleSetup = async () => {
   font-size: 13px;
   margin-top: 6px;
   font-weight: 500;
+}
+
+/* 欄位備註 */
+.field-note {
+  display: block;
+  color: #94a3b8;
+  font-size: 12px;
+  margin-top: 4px;
+  font-style: italic;
 }
 
 /* 警告框 */

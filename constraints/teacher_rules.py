@@ -10,9 +10,41 @@ teacher_rules.py — 教師維度約束
 依賴：config, utils
 """
 
+import terminal_sanitizer
 import json
+from collections import defaultdict
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
 from utils import is_virtual_teacher
+
+
+def _build_class_map(classes_data):
+    return {
+        str(cls.get("name", "")).strip(): cls
+        for cls in classes_data or []
+        if cls.get("name")
+    }
+
+
+def _teacher_is_collision_exempt(teacher_name, classes_data, ai_settings, schedule):
+    """
+    只有在藝才班模式啟用，且該虛擬教師當前所有排課變數都屬於藝才班時，
+    才允許跳過教師互斥約束。
+    """
+    if not (ai_settings or {}).get("artsClassEnabled", False):
+        return False
+    if not is_virtual_teacher(teacher_name):
+        return False
+
+    class_map = _build_class_map(classes_data)
+    assigned_classes = {
+        class_name
+        for (class_name, _period, current_teacher, _subject) in schedule.keys()
+        if current_teacher == teacher_name
+    }
+    if not assigned_classes:
+        return False
+
+    return all(class_map.get(class_name, {}).get("isArtsClass", False) for class_name in assigned_classes)
 
 
 def apply_anti_collision(model, schedule, class_names, teacher_names, classes_data, ai_settings):
@@ -30,29 +62,109 @@ def apply_anti_collision(model, schedule, class_names, teacher_names, classes_da
         classes_data: list of class dicts
         ai_settings: dict with artsClassEnabled flag
     """
-    # 班級維度：同時段不排多課
+    # 班級維度：同時段只能有一門課
     for p in range(TOTAL_PERIODS):
         for c_name in class_names:
-            art_vars = list(set([var for (c, per, t, s), var in schedule.items() if c == c_name and per == p and "美勞" in s]))
-            mus_vars = list(set([var for (c, per, t, s), var in schedule.items() if c == c_name and per == p and "音樂" in s]))
-            other_vars = list(set([var for (c, per, t, s), var in schedule.items() if c == c_name and per == p and "美勞" not in s and "音樂" not in s]))
+            slot_vars = list(set([
+                var
+                for (c, per, _t, _s), var in schedule.items()
+                if c == c_name and per == p
+            ]))
+            if slot_vars:
+                model.AddAtMostOne(slot_vars)
 
-            if art_vars or mus_vars:
-                model.Add(sum(other_vars) + sum(art_vars) <= 1)
-                model.Add(sum(other_vars) + sum(mus_vars) <= 1)
-            else:
-                if other_vars:
-                    model.AddAtMostOne(other_vars)
+    # 教師維度：衝堂防護（以實際 schedule 內出現的老師為準，避免漏掉導師或未建檔老師）
+    teacher_names_in_schedule = sorted({
+        t_name
+        for (_class_name, _period, t_name, _subject) in schedule.keys()
+        if t_name
+    })
+    all_teacher_names = sorted(set(teacher_names or []).union(teacher_names_in_schedule))
 
-    # 教師維度：衝堂防護（改為簡單 per-teacher per-period occupancy 約束）
     for p in range(TOTAL_PERIODS):
-        for t_name in teacher_names:
-            if ai_settings.get("artsClassEnabled", False) and is_virtual_teacher(t_name):
-                # 虛擬老師在藝才班模式下跳過
+        for t_name in all_teacher_names:
+            if _teacher_is_collision_exempt(t_name, classes_data, ai_settings, schedule):
+                # 僅限純藝才班虛擬教師可豁免
                 continue
             t_vars = [var for (c, per, t, s), var in schedule.items() if t == t_name and per == p]
             if t_vars:
                 model.Add(sum(t_vars) <= 1)
+
+
+def apply_alternating_teacher_anti_collision(
+    model,
+    schedule,
+    class_teacher_pair,
+    alternating_class_is_music_odd,
+):
+    """
+    交替課實際授課教師的單雙週互斥。
+
+    schedule 變數只以主教師建模；輸出時會依 is_music_odd 切成主教師/副教師。
+    因此副教師必須另外用 week-specific occupancy 防衝堂。
+    """
+    teacher_week_slots = defaultdict(list)
+
+    for (c_name, period, schedule_teacher, subject), active_var in schedule.items():
+        is_alt = "交替" in subject or "/" in subject
+        if not is_alt:
+            continue
+
+        music_teacher, art_teacher = class_teacher_pair.get(
+            c_name,
+            (schedule_teacher, schedule_teacher),
+        )
+        direction_var = alternating_class_is_music_odd.get((c_name, schedule_teacher))
+        if direction_var is None:
+            direction_var = alternating_class_is_music_odd.get((c_name, music_teacher))
+        if direction_var is None:
+            direction_var = alternating_class_is_music_odd.get((c_name, art_teacher))
+        if direction_var is None:
+            continue
+
+        odd_music = model.NewBoolVar(
+            f"alt_occ_odd_music_{c_name}_{period}_{music_teacher}".replace(" ", "_")
+        )
+        model.Add(odd_music <= active_var)
+        model.Add(odd_music <= direction_var)
+        model.Add(odd_music >= active_var + direction_var - 1)
+
+        even_art = model.NewBoolVar(
+            f"alt_occ_even_art_{c_name}_{period}_{art_teacher}".replace(" ", "_")
+        )
+        model.Add(even_art <= active_var)
+        model.Add(even_art <= direction_var)
+        model.Add(even_art >= active_var + direction_var - 1)
+
+        odd_art = model.NewBoolVar(
+            f"alt_occ_odd_art_{c_name}_{period}_{art_teacher}".replace(" ", "_")
+        )
+        model.Add(odd_art <= active_var)
+        model.Add(odd_art <= direction_var.Not())
+        model.Add(odd_art >= active_var - direction_var)
+
+        even_music = model.NewBoolVar(
+            f"alt_occ_even_music_{c_name}_{period}_{music_teacher}".replace(" ", "_")
+        )
+        model.Add(even_music <= active_var)
+        model.Add(even_music <= direction_var.Not())
+        model.Add(even_music >= active_var - direction_var)
+
+        if music_teacher:
+            teacher_week_slots[(music_teacher, period, "odd")].append(odd_music)
+            teacher_week_slots[(music_teacher, period, "even")].append(even_music)
+        if art_teacher:
+            teacher_week_slots[(art_teacher, period, "odd")].append(odd_art)
+            teacher_week_slots[(art_teacher, period, "even")].append(even_art)
+
+    protected_slots = 0
+    for vars_at_slot in teacher_week_slots.values():
+        if vars_at_slot:
+            model.Add(sum(vars_at_slot) <= 1)
+            protected_slots += 1
+
+    if protected_slots:
+        print(f"  [CONSTRAINT] [交替教師防衝堂] 已建立 {protected_slots} 組單雙週教師互斥")
 
 
 def apply_teacher_unavailable_slots(model, schedule, teachers_data):
@@ -132,7 +244,7 @@ def apply_teacher_quota(model, classes_data, teachers_data, schoolInfo):
 
         if teacher_teaches_arts_class:
             effective_max_periods = 9999
-            print(f"  🎭 [藝才班特規] {t_name} 豁免配額上限 (max_periods → 9999)")
+            print(f"   [藝才班特規] {t_name} 豁免配額上限 (max_periods → 9999)")
         else:
             effective_max_periods = int(t_data.get("base_periods") or t_data.get("max_periods") or fallback_base)
 
@@ -164,8 +276,8 @@ def apply_teacher_quota(model, classes_data, teachers_data, schoolInfo):
         t_data["_expertise_quotas"] = expertise_quotas
 
         if expertise_quotas:
-            print(f"  📊 [專長配額] {t_name}: {expertise_quotas}")
-        print(f"  ⚡ [Soft Quota] {t_name} 總上限: {safe_max_quota} (硬約束已移除，改用懲罰權重)")
+            print(f"  [INFO] [專長配額] {t_name}: {expertise_quotas}")
+        print(f"  [CONSTRAINT] [Soft Quota] {t_name} 總上限: {safe_max_quota} (硬約束已移除，改用懲罰權重)")
 
 
 def apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings):

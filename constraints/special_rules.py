@@ -12,11 +12,13 @@ special_rules.py — 特殊規則（例外型、專題型）
 依賴：config, utils
 """
 
+import terminal_sanitizer
 import re
 
 from config import DAYS, PERIODS_PER_DAY, LUNCH_BOUNDARY, TOTAL_PERIODS
+from .utils import grade_needs_special_room, canonical_subject
 
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 # 有效相鄰節次對：唯一規則來源（single source of truth）
 #
 # 規則說明：
@@ -24,9 +26,9 @@ from config import DAYS, PERIODS_PER_DAY, LUNCH_BOUNDARY, TOTAL_PERIODS
 #   下午合法：(4,5), (5,6)
 #   禁止：    (3,4) 跨午休邊界
 #
-# ⚠️ special_rules.py 的建模端與 solver.py 的驗證端
+# [WARN] special_rules.py 的建模端與 solver.py 的驗證端
 #    必須共用此函式，不得各自重新判斷邊界。
-# ──────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 
 def get_valid_consecutive_pairs(base: int) -> list[tuple[int, int]]:
     """
@@ -59,27 +61,49 @@ def get_valid_consecutive_pairs(base: int) -> list[tuple[int, int]]:
 
 
 
-def apply_english_capacity(model, classes_data, schedule, subject_room_count):
+def apply_english_capacity(model, classes_data, schedule, subject_room_count, school_info=None):
     """
     [硬約束 11] 英語容量限制
 
     同一時段使用英語教室的班級數不得超過實際英語教室數量。
-    排除 1 年級英語課（不使用專科英語教室）。
+    使用 grade_needs_special_room 判斷是否需要專科教室（取代 regex 硬編碼）。
 
     Args:
         model: CpModel
         schedule: dict (c, p, t, s) -> BoolVar
         classes_data: list of class dicts
         subject_room_count: dict 專科教室數
+        school_info: dict with subjectClassroomGrades config (optional)
     """
     eng_room_count = subject_room_count.get("語文-英語", subject_room_count.get("英語", 5))
     
+    # Build grade map from class names
+    class_grade_map = {}
+    for cls in classes_data:
+        c_name = cls.get("name", "")
+        raw_grade = cls.get("grade")
+        if raw_grade is None:
+            match = re.search(r'(\d+)年', c_name)
+            if match:
+                raw_grade = int(match.group(1))
+        try:
+            class_grade_map[c_name] = int(raw_grade) if raw_grade is not None else 1
+        except Exception:
+            class_grade_map[c_name] = 1
+    
+    # Get subjectClassroomGrades config for English exemption check
+    classroom_grades_cfg = (school_info or {}).get("subjectClassroomGrades", {}) or {}
+
     for p in range(TOTAL_PERIODS):
         eng_vars = []
         for (c, per, t, s), var in schedule.items():
             if per == p and "英語" in s:
-                if not re.search(r'1年', c):
-                    eng_vars.append(var)
+                grade = class_grade_map.get(c, 1)
+                # Use shared utility instead of regex r'1年'
+                canonical = canonical_subject("語文-英語")
+                if not grade_needs_special_room(canonical, grade, classroom_grades_cfg):
+                    continue  # This grade doesn't need specialty room for English
+                eng_vars.append(var)
                     
         if eng_vars:
             model.Add(sum(eng_vars) <= eng_room_count)
@@ -113,13 +137,13 @@ def apply_no_consecutive_pe(model, classes_data, schedule):
                     model.Add(v1[0] + v2[0] <= 1)
 
 
-def apply_art_consecutive_constraint(model, classes_data, schedule):
+def apply_art_consecutive_constraint(model, classes_data, schedule, penalty_vars=None):
     """
-    [硬約束 13] 美勞固定課必須與音樂美勞交替課連堂
+    [軟約束 13] 美勞固定課必須與音樂美勞交替課連堂
 
     對於經過 1.5+1.5 拆分後的班級（有 美勞_固定 + 音樂美勞_交替）：
-    - 美勞_固定 必須與 音樂美勞_交替 排在同一天
-    - 兩者必須相鄰節次
+    - 美勞_固定 偏好與 音樂美勞_交替 排在同一天
+    - 兩者偏好相鄰節次
     - 不可跨午休（pr=3 時 p1=base+3, p2=base+4）
     - 不適用於沒有這兩種課的班級
 
@@ -127,6 +151,7 @@ def apply_art_consecutive_constraint(model, classes_data, schedule):
         model: CpModel
         schedule: dict (c, p, t, s) -> BoolVar
         classes_data: list of class dicts
+        penalty_vars: list for soft penalty accumulation
     """
     for cls in classes_data:
         c_name = cls.get("name", "")
@@ -195,10 +220,13 @@ def apply_art_consecutive_constraint(model, classes_data, schedule):
 
                 consecutive_patterns.append(pair_ok)
 
-        # 4. 強制至少一組連堂
+         # 4. 軟限制：偏好至少一組連堂（權重 1000）
         if consecutive_patterns:
-            model.Add(sum(consecutive_patterns) >= 1)
-            print(f"  ✅ [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對)")
+            has_art_consec = model.NewBoolVar(f'art_consec_ok_{c_name}')
+            model.Add(sum(consecutive_patterns) >= 1).OnlyEnforceIf(has_art_consec)
+            if penalty_vars is not None:
+                penalty_vars.append(1000 * (1 - has_art_consec))
+            print(f"  [SOFT] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對, 權重=1000)")
 
 
 def apply_alternating_perfect_pairing(
@@ -211,7 +239,7 @@ def apply_alternating_perfect_pairing(
     class_pair_group,
     class_teacher_pair,
     phase2_penalty_vars,
-    ai_settings=None,  # 🆕 傳入 ai_settings 以讀取配置
+    ai_settings=None,  # [NEW] 傳入 ai_settings 以讀取配置
 ):
     """
     [硬/軟約束 14] 班對班互補配對約束（支援硬性/軟性/奇數班級降級）
@@ -232,7 +260,7 @@ def apply_alternating_perfect_pairing(
 
     # 讀取全局或年級配對設定
     pairing_strictness = ai_settings.get("pairingStrictness", {})
-    default_strictness = ai_settings.get("defaultPairingStrictness", "hard")
+    default_strictness = ai_settings.get("defaultPairingStrictness", "soft")
 
     # 預建：class_name -> is_music_odd BoolVar（優先用主老師 key）
     class_music_odd_var = {}
@@ -267,7 +295,7 @@ def apply_alternating_perfect_pairing(
             if len(class_vars) < 2:
                 continue
 
-            # ── 容量軟懲罰：同時段活躍班數 > pair_capacity × 2
+            # -- 容量軟懲罰：同時段活躍班數 > pair_capacity × 2
             active_bvars = [v for _, v in class_vars]
             if len(active_bvars) > pair_capacity * 2:
                 overload = model.NewIntVar(
@@ -277,7 +305,7 @@ def apply_alternating_perfect_pairing(
                 model.Add(overload >= sum(active_bvars) - pair_capacity * 2)
                 phase2_penalty_vars.append(10000 * overload)
 
-            # ── 決定約束強度：
+            # -- 決定約束強度：
             # 1. 總班級數不等於 2 的大群組或奇數群組，自動降為軟性約束 (soft)，防範著色矛盾 (完全圖 K_k 當 k >= 3 時為 2-不可著色)
             # 2. 只有剛好 2 個班的完美配對群組才保留 hard 模式
             total_members = group_classes_count.get(gid, 0)
@@ -293,7 +321,7 @@ def apply_alternating_perfect_pairing(
             else:
                 strictness = "soft"
 
-            # ── 兩兩互補約束建立
+            # -- 兩兩互補約束建立
             for i in range(len(class_vars)):
                 for j in range(i + 1, len(class_vars)):
                     c_i, var_i = class_vars[i]
@@ -312,12 +340,12 @@ def apply_alternating_perfect_pairing(
                     model.Add(both_active <= var_j)
 
                     if strictness == "hard":
-                        # ✅ 硬約束模式
+                        # [OK] 硬約束模式
                         model.Add(bool_i + bool_j >= 1).OnlyEnforceIf(both_active)
                         model.Add(bool_i + bool_j <= 1).OnlyEnforceIf(both_active)
-                        # print(f"  🔒 [Pair 硬約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已硬鎖定")
+                        # print(f"  [LOCK] [Pair 硬約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已硬鎖定")
                     else:
-                        # ── 軟性約束模式（奇數班群或特定設定下使用）
+                        # -- 軟性約束模式（奇數班群或特定設定下使用）
                         # 我們希望：both_active 成立時，bool_i != bool_j
                         # 若相同 (bool_i == bool_j)，則產生 mismatch
                         same = model.NewBoolVar(f'alt_same_{gid}_p{p}_{c_i}_{c_j}')
@@ -333,12 +361,12 @@ def apply_alternating_perfect_pairing(
                         
                         penalty_weight = ai_settings.get("pairingPenaltyWeight", 5000)
                         phase2_penalty_vars.append(penalty_weight * mismatch)
-                        # print(f"  ⚡ [Pair 軟約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已建立為軟約束 (權重: {penalty_weight})")
+                        # print(f"  [CONSTRAINT] [Pair 軟約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已建立為軟約束 (權重: {penalty_weight})")
 
 
 def apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_penalty_vars):
     """
-    [硬約束 14.5] 游泳引擎 v2（混合連堂：體育+導師區塊/健康）
+    [軟約束 14.5] 游泳引擎 v2（混合連堂：體育+導師區塊/健康）
 
     Args:
         model: CpModel
@@ -459,9 +487,11 @@ def apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_
                     model.AddMaxEquality(pool_active, all_active_sources)
                     pool_usage_at_p[p].append(pool_active)
 
-            # Step 4: 強制每班至少 1 組游泳連堂
+            # Step 4: 軟限制：偏好每班至少 1 組游泳連堂（權重 1200）
             if class_swim_vars:
-                model.Add(sum(class_swim_vars) >= 1)
+                has_swim_consec = model.NewBoolVar(f'swim_consec_ok_{c_name}')
+                model.Add(sum(class_swim_vars) >= 1).OnlyEnforceIf(has_swim_consec)
+                phase2_penalty_vars.append(1200 * (1 - has_swim_consec))
 
     # Step 5: 泳池容量限制（軟懲罰）
     for p, usage_vars in pool_usage_at_p.items():

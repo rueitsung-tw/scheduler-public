@@ -8,37 +8,87 @@
  */
 
 /**
- * 定義科目的適用年級範圍
- * @returns {Object} 科目名稱到適用年級陣列的映射
+ * 🆕 Phase 2: 預設科目年級範圍 — 僅在無 subjectGradeRules 時使用
  */
-function getSubjectGradeRanges() {
-  return {
-    // 生活 → 只允許 1-2 年級
-    '生活': [1, 2],
+const DEFAULT_GRADE_RANGES = {
+  '生活': [1, 2],
+  '自然科學': [3, 4, 5, 6],
+  '音樂': [3, 4, 5, 6],
+  '美勞': [3, 4, 5, 6],
+  '社會': [3, 4, 5, 6],
+  '綜合活動': [3, 4, 5, 6],
+  '科技-資訊': [3, 4, 5, 6],
+};
 
-    // 以下科目只允許 3-6 年級
-    '自然科學': [3, 4, 5, 6],
-    '音樂': [3, 4, 5, 6],
-    '美勞': [3, 4, 5, 6],
-    '社會': [3, 4, 5, 6],
-    '綜合活動': [3, 4, 5, 6],
-    '科技-資訊': [3, 4, 5, 6],
-  };
+function canonicalSubjectForGradeRule(subjectName) {
+  const subject = String(subjectName || '').trim()
+  if (!subject) return ''
+  if (subject.startsWith('音樂')) return '音樂'
+  if (subject.startsWith('美勞')) return '美勞'
+  if (subject.startsWith('自然')) return '自然科學'
+  if (subject.startsWith('科技-資訊') || subject.startsWith('資訊') || subject.startsWith('電腦')) return '科技-資訊'
+  return subject
+}
+
+function normalizeSubjectGradeRules(subjectGradeRules = null) {
+  const normalized = {}
+
+  for (const [subjectName, grades] of Object.entries(subjectGradeRules || {})) {
+    if (!Array.isArray(grades) || grades.length === 0) continue
+
+    const allowedGrades = grades
+      .map((grade) => Number(grade))
+      .filter((grade) => Number.isFinite(grade))
+
+    if (allowedGrades.length > 0) {
+      normalized[canonicalSubjectForGradeRule(subjectName)] = allowedGrades
+    }
+  }
+
+  return normalized
+}
+
+function buildGradeRangesFromStandardDomainSettings(standardDomainSettings = null) {
+  const ranges = {}
+
+  for (const entry of standardDomainSettings || []) {
+    const subjectName = canonicalSubjectForGradeRule(entry?.name || entry?.subject || entry?.subjectName)
+    const periods = entry?.periods
+    if (!subjectName || typeof periods !== 'object' || periods == null) continue
+
+    const allowedGrades = Object.entries(periods)
+      .map(([grade, value]) => [Number(grade), Number(value)])
+      .filter(([grade, value]) => Number.isFinite(grade) && Number.isFinite(value) && value > 0)
+      .map(([grade]) => grade)
+
+    ranges[subjectName] = allowedGrades
+  }
+
+  return ranges
+}
+
+export function buildEffectiveSubjectGradeRanges(subjectGradeRules = null, standardDomainSettings = null) {
+  return {
+    ...DEFAULT_GRADE_RANGES,
+    ...buildGradeRangesFromStandardDomainSettings(standardDomainSettings),
+    ...normalizeSubjectGradeRules(subjectGradeRules),
+  }
 }
 
 /**
  * 檢查指定科目是否適用於指定年級
  * @param {string} subjectName - 科目名稱
  * @param {number} grade - 年級 (1-6)
+ * @param {Object|null} schoolInfo - 學校設定物件（包含 subjectGradeRules）
  * @returns {boolean} 是否適用
  */
-export function isSubjectApplicableToGrade(subjectName, grade) {
+export function isSubjectApplicableToGrade(subjectName, grade, schoolInfo = null, standardDomainSettings = null) {
   if (!subjectName || typeof grade !== 'number') {
     return true;
   }
 
-  const ranges = getSubjectGradeRanges();
-  const applicableGrades = ranges[subjectName];
+  const ranges = buildEffectiveSubjectGradeRanges(schoolInfo?.subjectGradeRules, standardDomainSettings);
+  const applicableGrades = ranges[canonicalSubjectForGradeRule(subjectName)];
 
   // 如果沒有定義該科目的年級範圍，則視為不限制
   if (!applicableGrades) {
@@ -55,7 +105,7 @@ export function formatAllowedGrades(allowedGrades) {
   return allowedGrades.join('、');
 }
 
-export function getSubjectGradeValidation(subjectName, grade) {
+export function getSubjectGradeValidation(subjectName, grade, schoolInfo = null, standardDomainSettings = null) {
   const numericGrade = Number(grade);
   if (!subjectName || !Number.isFinite(numericGrade)) {
     return {
@@ -67,11 +117,12 @@ export function getSubjectGradeValidation(subjectName, grade) {
     };
   }
 
-  const ranges = getSubjectGradeRanges();
-  const allowedGrades = ranges[subjectName];
+  const canonicalSubject = canonicalSubjectForGradeRule(subjectName)
+  const ranges = buildEffectiveSubjectGradeRanges(schoolInfo?.subjectGradeRules, standardDomainSettings);
+  const allowedGrades = ranges[canonicalSubject];
   if (!allowedGrades) {
     return {
-      subjectName,
+      subjectName: canonicalSubject || subjectName,
       grade: numericGrade,
       allowedGrades: null,
       allowed: true,
@@ -81,7 +132,7 @@ export function getSubjectGradeValidation(subjectName, grade) {
 
   const allowed = allowedGrades.includes(numericGrade);
   return {
-    subjectName,
+    subjectName: canonicalSubject,
     grade: numericGrade,
     allowedGrades,
     allowed,
@@ -91,7 +142,7 @@ export function getSubjectGradeValidation(subjectName, grade) {
   };
 }
 
-export function sanitizeRequirementsByGrade(requirements, grade) {
+export function sanitizeRequirementsByGrade(requirements, grade, schoolInfo = null, standardDomainSettings = null) {
   if (!Array.isArray(requirements)) {
     return { requirements: [], removed: [] };
   }
@@ -101,7 +152,7 @@ export function sanitizeRequirementsByGrade(requirements, grade) {
 
   for (const req of requirements) {
     const subjectName = req?.subject || req?.subjectName || req?.name || '';
-    const validation = getSubjectGradeValidation(subjectName, grade);
+    const validation = getSubjectGradeValidation(subjectName, grade, schoolInfo, standardDomainSettings);
     if (validation.allowed) {
       kept.push(req);
     } else {
@@ -121,14 +172,14 @@ export function sanitizeRequirementsByGrade(requirements, grade) {
  * @param {number} grade - 年級
  * @returns {Array} 過濾後的科目陣列
  */
-export function filterSubjectsByGrade(subjects, grade) {
+export function filterSubjectsByGrade(subjects, grade, schoolInfo = null, standardDomainSettings = null) {
   if (!subjects || !Array.isArray(subjects)) {
     return [];
   }
 
   return subjects.filter(s => {
     const subjectName = s.subject || s.name || s.subject_name || '';
-    return isSubjectApplicableToGrade(subjectName, grade);
+    return isSubjectApplicableToGrade(subjectName, grade, schoolInfo, standardDomainSettings);
   });
 }
 
@@ -141,7 +192,7 @@ export function filterSubjectsByGrade(subjects, grade) {
  * @param {number} grade - 年級
  * @returns {Array} 過濾後的需求陣列
  */
-export function filterValidRequirements(requirements, grade) {
+export function filterValidRequirements(requirements, grade, schoolInfo = null, standardDomainSettings = null) {
   if (!requirements || !Array.isArray(requirements)) {
     return [];
   }
@@ -154,7 +205,7 @@ export function filterValidRequirements(requirements, grade) {
 
     // 科目年級適用性檢查
     const subjectName = req.subject || req.subjectName || req.name || '';
-    if (!isSubjectApplicableToGrade(subjectName, grade)) {
+    if (!isSubjectApplicableToGrade(subjectName, grade, schoolInfo, standardDomainSettings)) {
       return false;
     }
 

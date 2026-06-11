@@ -168,7 +168,12 @@ function buildAllowlist(manifest) {
   }
 
   function isAllowed(relPath) {
-    return isExplicitlyIncluded(relPath) || (includeRootSet.size > 0 && !isIgnored(relPath) && [...includeRootSet].some((root) => isUnderRoot(relPath.toLowerCase(), root)));
+    return (
+      isExplicitlyIncluded(relPath) ||
+      (includeRootSet.size > 0 &&
+        !isIgnored(relPath) &&
+        [...includeRootSet].some((root) => isUnderRoot(relPath.toLowerCase(), root)))
+    );
   }
 
   return { isAllowed, isIgnored, isExplicitlyIncluded };
@@ -266,7 +271,6 @@ async function findStaleFiles(targetRoot, allowedSet) {
 }
 
 async function pruneTarget(targetRoot, staleFiles) {
-
   for (const relPath of staleFiles) {
     const absPath = path.join(targetRoot, ...relPath.split('/'));
     await fs.rm(absPath, { force: true });
@@ -361,7 +365,7 @@ async function main() {
     );
 
     printSummary('Public allowlist check', [
-      `Source: (audit current public repo only)`,
+      'Source: (audit current public repo only)',
       `Target: ${targetRoot}`,
       `Allowed files: ${allowedTargetFiles.length}`,
       `Ignored files: ${ignoredTargetFiles.length}`,

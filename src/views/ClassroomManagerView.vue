@@ -80,7 +80,21 @@
     </div>
 
     <div class="list-card">
-      <h3>🏢 已建檔之專科教室</h3>
+      <div class="list-header">
+        <h3>🏢 已建檔之專科教室</h3>
+        <div class="ei-buttons">
+          <button @click="handleExportClassrooms" class="ei-btn export-btn">📤 匯出教室資料</button>
+          <button @click="triggerImportClassrooms" class="ei-btn import-btn">📥 匯入教室資料</button>
+          <input
+            ref="classroomFileInput"
+            type="file"
+            accept=".json,application/json"
+            style="display: none"
+            @change="handleImportClassrooms"
+          />
+        </div>
+      </div>
+      <p v-if="eiMessage" :class="['ei-message', eiType]">{{ eiMessage }}</p>
       <table class="room-table">
         <thead>
           <tr>
@@ -245,6 +259,11 @@ import { useScheduleStore } from '../stores/schedule'
 
 const scheduleStore = useScheduleStore()
 
+// 🆕 專科教室獨立匯出/匯入
+const classroomFileInput = ref(null)
+const eiMessage = ref('')
+const eiType = ref('success')
+
 // 基礎資料狀態
 const newRoom = ref({ name: '', subject: '', primaryTeacher: '', allowSharing: true, gradePreferencesRaw: 'shared' })
 const isEditing = ref(false)
@@ -390,7 +409,7 @@ const getRoomClassesLegacy = (day, period) => {
 
       if (isAssigned) {
         let label = String(cls.name).replace('年', '0').replace('班', '');
-        
+
         // 針對交替課 (如 "音樂(單)/美勞(雙)") 做人性化後綴顯示
         if (course.subject.includes('單') || course.subject.includes('雙')) {
           const matchesSubj = course.subject.match(/([^\(/]+)\((單|雙)\)/g);
@@ -578,6 +597,109 @@ const getRoomClassesLegacy = (day, period) => {
 
 void getRoomClassesLegacy
 
+// ==========================================
+// 🆕 專科教室獨立匯出 / 匯入
+// ==========================================
+function handleExportClassrooms() {
+  const payload = {
+    type: 'classrooms_backup',
+    version: '1.0.0',
+    exportedAt: new Date().toISOString(),
+    classrooms: (scheduleStore.classrooms || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      subject: r.subject,
+      primaryTeacher: r.primaryTeacher || '',
+      allowSharing: r.allowSharing !== undefined ? r.allowSharing : true,
+      gradePreferences: Array.isArray(r.gradePreferences) ? [...r.gradePreferences] : [],
+    })),
+  }
+
+  const json = JSON.stringify(payload, null, 2)
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  const dateStr = new Date().toISOString().slice(0, 10)
+  a.href = url
+  a.download = `專科教室備份_${dateStr}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+
+  eiMessage.value = '✅ 教室資料已匯出'
+  eiType.value = 'success'
+}
+
+function triggerImportClassrooms() {
+  classroomFileInput.value?.click()
+}
+
+async function handleImportClassrooms(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+
+  try {
+    const text = await file.text()
+    let parsed = JSON.parse(text)
+
+    // 支援兩種格式：
+    // 1. 有 type 封裝的物件 {type: 'classrooms_backup', classrooms: [...]}
+    // 2. 根層直接是陣列 [...]
+    let rooms
+    if (parsed.type === 'classrooms_backup' && Array.isArray(parsed.classrooms)) {
+      rooms = parsed.classrooms
+    } else if (Array.isArray(parsed)) {
+      rooms = parsed
+    } else {
+      throw new Error('檔案格式不正確：缺少 classrooms 陣列')
+    }
+
+    if (!confirm(`確定匯入 ${rooms.length} 筆教室資料？這將覆蓋現有的專科教室設定。`)) {
+      event.target.value = ''
+      return
+    }
+
+    // Canonical subject map (與 settingsBackup.js 一致)
+    const CANONICAL_SUBJECT_MAP = {
+      '英語': '語文-英語',
+      '自然': '自然科學',
+      '科技-資訊': '資訊',
+      '電腦': '資訊',
+      '健康與體育': '體育',
+      '本土語言': '本土語',
+      '閩南語': '本土語',
+      '客語': '本土語',
+    }
+
+    const normalized = rooms.map((room) => ({
+      id: room.id || `cr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name: room.name || '未命名教室',
+      subject: (() => {
+        const s = String(room.subject || '').trim()
+        return CANONICAL_SUBJECT_MAP[s] || s
+      })(),
+      primaryTeacher: room.primaryTeacher || '',
+      allowSharing: room.allowSharing !== undefined ? room.allowSharing : true,
+      gradePreferences: Array.isArray(room.gradePreferences)
+        ? room.gradePreferences.map((g) => Number(g) > 0 ? Number(g) : 0).filter((g) => g > 0)
+        : [],
+    }))
+
+    // 覆蓋 store 中的 classrooms
+    scheduleStore.classrooms.splice(0, scheduleStore.classrooms.length, ...normalized)
+
+    // 立即同步到後端
+    await scheduleStore.syncToCloud()
+
+    eiMessage.value = `✅ 已匯入 ${normalized.length} 筆教室資料並同步到後端`
+    eiType.value = 'success'
+  } catch (e) {
+    eiMessage.value = `❌ 匯入失敗：${e.message}`
+    eiType.value = 'error'
+  } finally {
+    event.target.value = ''
+  }
+}
+
 // 重新定義房間對照邏輯：以實際教室占用與週別為準
 const getRoomClasses = (day, period) => {
   if (!selectedRoom.value) return ''
@@ -705,6 +827,59 @@ const getRoomClasses = (day, period) => {
 
 .room-table { width: 100%; border-collapse: collapse; }
 .room-table th, .room-table td { border-bottom: 1px solid #f1f5f9; padding: 15px 10px; text-align: left; }
+/* 🆕 list-header layout */
+.list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.list-header h3 {
+  margin: 0;
+}
+
+/* 🆕 匯出/匯入按鈕 */
+.ei-buttons {
+  display: flex;
+  gap: 8px;
+}
+.ei-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.ei-btn.export-btn {
+  background: #6366f1;
+  color: white;
+}
+.ei-btn.export-btn:hover {
+  background: #4f46e5;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+.ei-btn.import-btn {
+  background: #8b5cf6;
+  color: white;
+}
+.ei-btn.import-btn:hover {
+  background: #7c3aed;
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+}
+.ei-message {
+  margin-top: 8px;
+  font-size: 0.9rem;
+  text-align: center;
+}
+.ei-message.success {
+  color: #10b981;
+}
+.ei-message.error {
+  color: #ef4444;
+}
+
 .room-table th { background-color: #f8fafc; color: #475569; font-weight: bold; }
 .font-bold { font-weight: bold; color: #1e293b; font-size: 1.1em;}
 .tag { background: #e0e7ff; color: #4338ca; padding: 6px 10px; border-radius: 6px; font-size: 0.85em; font-weight: bold; border: 1px solid #c7d2fe;}

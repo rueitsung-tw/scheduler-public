@@ -197,7 +197,21 @@ function buildCompactPromptMarkdown(promptReport) {
   lines.push('Return strict JSON only.');
   lines.push('If candidateMoves are present, only choose moves from the candidate pool and copy their candidateId exactly.');
   lines.push('Allowed move type: same-class candidateId selection only.');
+  if (Array.isArray(promptReport?.legalCandidateIds) && promptReport.legalCandidateIds.length > 0) {
+    lines.push(`Legal candidateId values: ${promptReport.legalCandidateIds.join(', ')}`);
+  }
   lines.push('Required keys: summary, issues, selectedMoves, warnings, nextFocus, stopReason.');
+  lines.push('');
+  lines.push('## Summary Format (Actionable)');
+  lines.push('summary must include actionableItems array with specific problem locations:');
+  lines.push('```json');
+  lines.push('{"text":"...","confidence":0.0,"actionableItems":[{"className":"3年11班","day":1,"period":3,"subject":"語文-英語","location":"英語專科教室","problem":"容量超額","suggestedAction":"檢查科任科目年級專科教室使用設定"}]}');
+  lines.push('```');
+  lines.push('');
+  lines.push('## No Guess IDs Rule');
+  lines.push('如果無法從 legalCandidateIds 中選出有把握的 candidateId，selectedMoves 必須回傳 []。');
+  lines.push('禁止輸出 CAND-*、座標物件、或任何 legalCandidateIds 以外的值。');
+  lines.push('若本輪無合法調課選項，請在 summary.actionableItems 說明需人工處理的具體班級/節次/場域。');
   return lines.join('\n');
 }
 
@@ -296,6 +310,7 @@ function buildCompactResourcePromptReport({
     teacherLoads,
     swapCandidates,
     candidateMoves,
+    legalCandidateIds: candidateMoves.map((candidate) => candidate.candidateId),
     history: (Array.isArray(tuningContext?.recentHistory) ? tuningContext.recentHistory : []).slice(-limits.maxHistoryEntries),
     limits: {
       maxFocusClasses: limits.maxFocusClasses,
@@ -354,6 +369,7 @@ function buildCompactClassPromptReport({
     teacherLoads,
     swapCandidates,
     candidateMoves,
+    legalCandidateIds: candidateMoves.map((candidate) => candidate.candidateId),
     history: (Array.isArray(tuningContext?.recentHistory) ? tuningContext.recentHistory : []).slice(-limits.maxHistoryEntries),
     resourceSummary: null,
     limits: {

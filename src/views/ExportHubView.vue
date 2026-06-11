@@ -104,15 +104,6 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useScheduleStore } from '../stores/schedule'
-import {
-  exportMoEFormat,
-  exportClassesTimetableXLSX,
-  exportClassesTimetableVerticalXLSX,
-  exportClassroomTimetable,
-  exportSwimmingSchedule,
-  exportSubjectTeacherTimetables,
-} from '../utils/exportUtilsTeacherPatch'
-
 
 const scheduleStore = useScheduleStore()
 
@@ -122,9 +113,21 @@ onMounted(async () => {
   await scheduleStore.loadFromDB(true);
 });
 
-const handleMoEExport = () => {
+// 動態載入匯出工具（按需載入 xlsx / docx / file-saver）
+async function loadExportUtils() {
+  const mod = await import('../utils/exportUtils.js')
+  return mod
+}
+
+async function loadTeacherPatch() {
+  const mod = await import('../utils/exportUtilsTeacherPatch.js')
+  return mod
+}
+
+const handleMoEExport = async () => {
   if (!scheduleStore.isInitialized) return
   try {
+    const { exportMoEFormat } = await loadExportUtils()
     exportMoEFormat(scheduleStore)
   } catch (e) {
     console.error('匯出教育部標準格式失敗:', e)
@@ -132,9 +135,10 @@ const handleMoEExport = () => {
   }
 }
 
-const handleClassTimetableExport = () => {
+const handleClassTimetableExport = async () => {
   if (!scheduleStore.isInitialized) return
   try {
+    const { exportClassesTimetableXLSX } = await loadExportUtils()
     exportClassesTimetableXLSX(scheduleStore)
   } catch (e) {
     console.error('匯出班級課表失敗:', e)
@@ -142,9 +146,10 @@ const handleClassTimetableExport = () => {
   }
 }
 
-const handleClassTimetableVerticalExport = () => {
+const handleClassTimetableVerticalExport = async () => {
   if (!scheduleStore.isInitialized) return
   try {
+    const { exportClassesTimetableVerticalXLSX } = await loadExportUtils()
     exportClassesTimetableVerticalXLSX(scheduleStore)
   } catch (e) {
     console.error('匯出直式班級課表失敗:', e)
@@ -155,6 +160,7 @@ const handleClassTimetableVerticalExport = () => {
 const handleClassroomExport = async () => {
   if (!scheduleStore.isInitialized) return
   try {
+    const { exportClassroomTimetable } = await loadExportUtils()
     await exportClassroomTimetable(scheduleStore)
   } catch (e) {
     console.error('匯出專科教室課表失敗:', e)
@@ -162,9 +168,10 @@ const handleClassroomExport = async () => {
   }
 }
 
-const handleSubjectTeacherExport = () => {
+const handleSubjectTeacherExport = async () => {
   if (!scheduleStore.isInitialized) return
   try {
+    const { exportSubjectTeacherTimetables } = await loadTeacherPatch()
     exportSubjectTeacherTimetables(scheduleStore)
   } catch (e) {
     console.error('匯出科任教師課表失敗:', e)
@@ -175,6 +182,7 @@ const handleSubjectTeacherExport = () => {
 const handleSwimmingExport = async () => {
   if (!scheduleStore.isInitialized) return
   try {
+    const { exportSwimmingSchedule } = await loadExportUtils()
     await exportSwimmingSchedule(scheduleStore)
   } catch (e) {
     console.error('匯出游泳池課表失敗:', e)

@@ -1,6 +1,6 @@
 import { useScheduleStore } from '../stores/schedule'
 
-const SCHEMA_VERSION = '1.0.0'
+const SCHEMA_VERSION = '1.1.0'
 
 const DEFAULT_CLASSROOM_LIMITS = {
   '自然科學': 3,
@@ -19,6 +19,24 @@ const DEFAULT_AI_SETTINGS = {
   enableSpecialRoomLimit: true,
 }
 
+// Canonical subject keys for classroom normalization (mirrors store's normalizeRoomSubject)
+const CANONICAL_SUBJECT_MAP = {
+  '英語': '語文-英語',
+  '自然': '自然科學',
+  '科技-資訊': '資訊',
+  '電腦': '資訊',
+  '健康與體育': '體育',
+  '本土語言': '本土語',
+  '閩南語': '本土語',
+  '客語': '本土語',
+}
+
+function normalizeClassroomSubject(subj) {
+  if (!subj) return ''
+  const s = String(subj).trim()
+  return CANONICAL_SUBJECT_MAP[s] || s
+}
+
 export function buildExportPayload() {
   const store = useScheduleStore()
 
@@ -32,6 +50,15 @@ export function buildExportPayload() {
   return {
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
+    // 🆕 匯出專科教室資料
+    classrooms: (store.classrooms || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      subject: r.subject,
+      primaryTeacher: r.primaryTeacher || '',
+      allowSharing: r.allowSharing !== undefined ? r.allowSharing : true,
+      gradePreferences: Array.isArray(r.gradePreferences) ? [...r.gradePreferences] : [],
+    })),
     schoolInfo: {
       academic_year: Number(store.schoolInfo.academic_year) || 0,
       semester: store.schoolInfo.semester || '上學期',
@@ -112,6 +139,8 @@ export function parseImportFile(text) {
     teachers: Array.isArray(payload.teachers) ? payload.teachers : [],
     // 🔒 解析班級資料
     classes: Array.isArray(payload.classes) ? payload.classes : [],
+    // 🆕 解析專科教室資料（舊版備份可能沒有，預設空陣列）
+    classrooms: Array.isArray(payload.classrooms) ? payload.classrooms : [],
   }
 }
 
@@ -198,6 +227,24 @@ export function applyImport(data) {
       }
     })
   }
+
+  // 🆕 還原專科教室資料（僅當備份有 classrooms 且非空時才覆蓋）
+  if (data.classrooms.length > 0) {
+    const normalized = data.classrooms.map((room) => ({
+      id: room.id || `cr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name: room.name || '未命名教室',
+      subject: normalizeClassroomSubject(room.subject),
+      primaryTeacher: room.primaryTeacher || '',
+      allowSharing: room.allowSharing !== undefined ? room.allowSharing : true,
+      gradePreferences: Array.isArray(room.gradePreferences)
+        ? room.gradePreferences.map((g) => Number(g) > 0 ? Number(g) : 0).filter((g) => g > 0)
+        : [],
+    }))
+
+    // 用匯入的教室資料覆蓋現有資料
+    store.classrooms.splice(0, store.classrooms.length, ...normalized)
+  }
+  // 舊版備份沒有 classrooms 時，不觸發任何操作，保留現有教室資料
 
   store.markScheduleDirty()
 }

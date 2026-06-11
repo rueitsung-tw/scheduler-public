@@ -37,6 +37,12 @@ from .special_rules import (
     add_consecutive_constraint,
 )
 
+from .utils import (
+    canonical_subject,
+    is_subject_allowed_for_grade,
+    grade_needs_special_room,
+)
+
 __all__ = [
     # base_rules
     "create_schedule_vars_and_course_demands",
@@ -60,4 +66,8 @@ __all__ = [
     "apply_alternating_perfect_pairing",
     "apply_swimming_engine_v2",
     "add_consecutive_constraint",
+    # utils
+    "canonical_subject",
+    "is_subject_allowed_for_grade",
+    "grade_needs_special_room",
 ]

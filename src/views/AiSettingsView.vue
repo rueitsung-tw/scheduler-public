@@ -75,6 +75,47 @@
             <small>這段提示詞會跟著送到你選的 LLM 服務。</small>
           </div>
 
+          <!-- 本地模型進階參數 (Qwen Thinking 模式穩定化) -->
+          <div class="advanced-settings" :class="{ 'disabled-section': !aiStore.enabled }">
+            <h3>本地模型進階設定</h3>
+            <p class="desc">針對 Qwen3.6 等大模型的 Thinking 模式與輸出控制。</p>
+
+            <div class="form-group toggle-group" style="border-bottom: none; padding-bottom: 0;">
+              <label class="switch">
+                <input type="checkbox" v-model="aiStore.disableThinking" />
+                <span class="slider round"></span>
+              </label>
+              <span class="toggle-label">關閉 Thinking 模式（支援的本地模型才會套用 /no_think）</span>
+            </div>
+            <small style="margin-bottom: 16px; display: block;">啟用時會對支援的本地模型服務加入 /no_think；目前預設的 ollama 不會套用此處理，可用來降低 reasoning_content 過長導致 content 為空的機率。</small>
+
+            <div class="form-group">
+              <label>最大輸出 Token 數 (max_tokens)</label>
+              <input
+                type="number"
+                v-model.number="aiStore.maxOutputTokens"
+                min="256"
+                max="8192"
+                step="256"
+                :disabled="!aiStore.enabled"
+              />
+               <small>預設 8192。若模型回應被截斷（finish_reason=length），可再依模型狀況調高。</small>
+            </div>
+
+            <div class="form-group">
+              <label>Temperature (隨機性)</label>
+              <input
+                type="number"
+                v-model.number="aiStore.temperature"
+                min="0"
+                max="2"
+                step="0.1"
+                :disabled="!aiStore.enabled"
+              />
+              <small>預設 0（最確定性）。排課 JSON 輸出建議保持 0。</small>
+            </div>
+          </div>
+
           <div class="action-buttons">
             <button @click="testConnection" class="test-btn" :disabled="!aiStore.enabled || isTesting">
               {{ isTesting ? '測試中...' : `測試 ${activeService.label} 連線` }}
@@ -747,6 +788,41 @@ input:checked + .slider:before {
   background: #fee2e2;
   color: #991b1b;
   border: 1px solid #ef4444;
+}
+
+.advanced-settings {
+  margin-top: 20px;
+  padding: 20px;
+  background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
+  border: 1px solid #bae6fd;
+  border-radius: 12px;
+}
+
+.advanced-settings h3 {
+  margin: 0 0 8px 0;
+  font-size: 1.05em;
+  color: #0c4a6e;
+}
+
+.advanced-settings .desc {
+  margin: 0 0 16px 0;
+  font-size: 0.9em;
+  color: #0369a1;
+}
+
+.advanced-settings .form-group input[type='number'] {
+  padding: 12px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 14px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.advanced-settings .form-group input[type='number']:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
 @media (max-width: 860px) {

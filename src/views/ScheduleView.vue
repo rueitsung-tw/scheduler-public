@@ -1,6 +1,6 @@
 <template>
   <div class="schedule-container">
-    <h2>東門國小智慧排課引擎</h2>
+    <h2>{{ dataStore.schoolInfo.name || '' }}智慧排課引擎</h2>
 
     <div class="control-panel">
       <button
@@ -70,26 +70,109 @@
         </p>
       </div>
       <div class="error-actions">
-        <button @click="showAiModal = true" class="ai-diagnosis-btn">💡 點擊查看 AI 診斷分析報告</button>
+        <button v-if="hasEngineDiagnosticWarnings" @click="showAiModal = true" class="ai-diagnosis-btn">💡 查看排課警示摘要</button>
+        <button v-if="hasEngineDiagnosticWarnings" @click="openAiDiagnosisModal" class="ai-deep-analysis-btn" :disabled="isAiInfeasibleAnalyzing">
+          {{ isAiInfeasibleAnalyzing ? 'AI 深度分析中…' : '🧠 執行 AI 深度分析' }}
+        </button>
         <button @click="resetState" class="retry-btn">🔄 重置後重試</button>
       </div>
     </div>
 
-    <!-- 🔍 AI 診斷分析 Modal -->
+    <!-- 🔍 排課診斷警示 Modal -->
     <div v-if="showAiModal" class="modal-overlay" @click.self="showAiModal = false">
       <div class="ai-modal-content">
         <div class="ai-modal-header">
-          <h3>💡 AI 診斷分析報告</h3>
+          <h3>💡 排課失敗診斷</h3>
           <button class="modal-close-btn" @click="showAiModal = false">✕</button>
         </div>
         <div class="ai-modal-body">
-          <p class="ai-modal-intro">以下是 AI 根據排課失敗報告自動分析出的建議：</p>
+          <p class="ai-modal-intro">以下僅顯示系統從失敗診斷中辨識出的警示訊息：</p>
           <ul class="ai-analysis-list">
-            <li v-for="(item, index) in dataStore.engineAiAnalysis" :key="index">{{ item }}</li>
+            <li v-for="(item, index) in dataStore.engineDiagnosticWarnings" :key="index">{{ item }}</li>
           </ul>
-          <p v-if="!dataStore.engineAiAnalysis || dataStore.engineAiAnalysis.length === 0" class="ai-empty">
-            目前無 AI 分析資料，請確認後端 AI 設定已啟用。
+          <p v-if="!hasEngineDiagnosticWarnings" class="ai-empty">
+            目前沒有可辨識的診斷警示。
           </p>
+
+          <div class="ai-deep-analysis-panel">
+            <div class="ai-deep-analysis-header">
+              <div>
+                <h4>AI 深度分析</h4>
+                <p>把診斷 bundle 送進模型，整理成根因、建議與證據摘要。</p>
+              </div>
+              <div class="ai-deep-analysis-actions">
+                <button @click="requestAiInfeasibleAnalysis" class="ai-deep-analysis-btn" :disabled="isAiInfeasibleAnalyzing">
+                  {{ isAiInfeasibleAnalyzing ? '分析中…' : '重新分析' }}
+                </button>
+                <button @click="downloadInfeasibleBundle" class="secondary-btn" :disabled="isDownloadingInfeasibleBundle">
+                  {{ isDownloadingInfeasibleBundle ? '下載中…' : '下載 infeasible bundle' }}
+                </button>
+              </div>
+            </div>
+
+            <p v-if="aiInfeasiblePromptBudgetSummary" class="ai-deep-analysis-budget">
+              {{ aiInfeasiblePromptBudgetSummary }}
+            </p>
+
+            <div v-if="hasAiInfeasibleError" class="ai-error-box" :class="`ai-error-box--${aiInfeasibleError.code || 'unknown'}`">
+              <strong class="ai-error-title">{{ aiInfeasibleError.title }}</strong>
+              <p class="ai-error-message">{{ aiInfeasibleError.message }}</p>
+              <div v-if="aiInfeasibleError.steps?.length" class="ai-error-steps">
+                <strong>建議下一步</strong>
+                <ol>
+                  <li v-for="(step, index) in aiInfeasibleError.steps" :key="index">{{ step }}</li>
+                </ol>
+              </div>
+              <details v-if="aiInfeasibleError.details" class="ai-error-details">
+                <summary>技術細節</summary>
+                <pre>{{ aiInfeasibleError.details }}</pre>
+              </details>
+            </div>
+
+            <div v-if="aiInfeasibleAnalysis" class="ai-deep-analysis-result">
+              <div class="ai-deep-analysis-summary">
+                <strong>{{ aiInfeasibleAnalysis.summary?.text || 'AI 已完成分析' }}</strong>
+                <p>
+                  信心：{{ aiInfeasibleAnalysis.summary?.confidence || '-' }}
+                  ｜主分類：{{ aiInfeasibleAnalysis.summary?.primaryCategory || '-' }}
+                </p>
+                <p v-if="aiInfeasibleAnalysis.summary?.nextStep">建議先做：{{ aiInfeasibleAnalysis.summary.nextStep }}</p>
+              </div>
+
+              <div class="ai-deep-analysis-section">
+                <h5>可能根因</h5>
+                <ul class="ai-deep-analysis-items">
+                  <li v-for="(item, index) in aiInfeasibleAnalysis.rootCauses || []" :key="`cause-${index}`">
+                    <strong>{{ item.category }}</strong>
+                    <span>｜信心 {{ item.confidence }}</span>
+                    <p>{{ item.message }}</p>
+                    <p v-if="item.evidence?.length" class="ai-deep-analysis-evidence">證據：{{ item.evidence.join('；') }}</p>
+                  </li>
+                </ul>
+              </div>
+
+              <div class="ai-deep-analysis-section">
+                <h5>修復建議</h5>
+                <ul class="ai-deep-analysis-items">
+                  <li v-for="(item, index) in aiInfeasibleAnalysis.recommendations || []" :key="`recommendation-${index}`">
+                    <strong>{{ item.priority }}</strong>
+                    <p>{{ item.action }}</p>
+                    <p v-if="item.rationale" class="ai-deep-analysis-rationale">{{ item.rationale }}</p>
+                  </li>
+                </ul>
+              </div>
+
+              <div class="ai-deep-analysis-section">
+                <h5>證據摘要</h5>
+                <ul class="ai-deep-analysis-items">
+                  <li v-for="(item, index) in aiInfeasibleAnalysis.evidence || []" :key="`evidence-${index}`">
+                    <strong>{{ item.source }}</strong>
+                    <p>{{ item.detail }}</p>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="ai-modal-footer">
           <button @click="showAiModal = false" class="modal-close-full-btn">關閉</button>
@@ -120,6 +203,9 @@
         <button @click="applyAiPreviewAndGoToEditor" class="apply-btn">套用此課表並前往編輯器</button>
         <button @click="downloadAiMarkdown" class="secondary-btn">匯出 Markdown</button>
         <button @click="downloadAiJson" class="secondary-btn">匯出 JSON</button>
+        <button @click="downloadSubmissionBundle" class="secondary-btn" :disabled="isGeneratingBundle">
+          {{ isGeneratingBundle ? '產生中…' : '下載預送出封包' }}
+        </button>
         <button @click="requestAiTuning" class="ai-tune-btn" :disabled="isAiTuning">
           {{ isAiTuning ? 'AI 分析中…' : '送交 AI 微調' }}
         </button>
@@ -142,12 +228,29 @@
 
       <div v-if="aiTuningResult" class="ai-tuning-panel">
         <h4>AI 建議結果</h4>
-        <p class="ai-tuning-summary">
+        <p v-if="aiTuningResult.summary?.globalOverview" class="ai-tuning-summary">
+          {{ aiTuningResult.summary.globalOverview }}
+        </p>
+        <p v-if="aiTuningResult.summary?.focusOverview" class="ai-tuning-summary">
+          {{ aiTuningResult.summary.focusOverview }}
+        </p>
+        <p v-if="!aiTuningResult.summary?.globalOverview && !aiTuningResult.summary?.focusOverview" class="ai-tuning-summary">
           {{ aiTuningResult.summary?.text || aiTuningResult.summary || 'AI 已回傳調整建議' }}
         </p>
         <p v-if="aiTuningResult.confidence !== undefined" class="ai-tuning-confidence">
           信心分數：{{ aiTuningResult.confidence }}
         </p>
+
+        <!-- Actionable Items from AI summary -->
+        <div v-if="aiTuningResult.summary?.actionableItems?.length" class="ai-tuning-actionable">
+          <strong>可操作項目</strong>
+          <ul>
+            <li v-for="(item, index) in aiTuningResult.summary.actionableItems" :key="index" class="ai-tuning-actionable-item">
+              {{ getDayLabel(item.day) }}第{{ item.period }}節｜{{ item.className }}｜{{ item.subject }}｜{{ item.location || '未指定' }}｜{{ item.problem }}
+              <span v-if="item.suggestedAction" class="ai-tuning-actionable-suggestion">｜建議：{{ item.suggestedAction }}</span>
+            </li>
+          </ul>
+        </div>
         <div v-if="aiTuningResult.loopState" class="ai-tuning-loop-state">
           <strong>迴圈狀態</strong>
           <p>
@@ -302,17 +405,49 @@ import {
   buildAiTuningPromptBundle,
   selectAiTuningFocusPreview,
 } from '../services/aiTuningPrompt';
+import { createSubmissionBundle, downloadJson } from '../services/aiTuningSubmissionBundle';
+import { runAiInfeasibleAnalysis } from '../services/aiInfeasibleAnalysisClient';
 
 const dataStore = useScheduleStore();
 const aiStore = useAiStore();
 const router = useRouter();
-const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:3000/api`;
+const API_BASE = (() => {
+  const configuredBase = String(import.meta.env.VITE_API_BASE_URL || '').trim();
+  if (configuredBase) {
+    try {
+      const parsed = new URL(configuredBase, window.location.origin);
+      const isLocalhostTarget = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+      if (!isLocalhostTarget || parsed.origin === window.location.origin) {
+        return parsed.toString().replace(/\/$/, '');
+      }
+    } catch {
+      return configuredBase.replace(/\/$/, '');
+    }
+  }
+
+  return '/api';
+})();
+const AI_TUNING_PROMPT_LIMITS = {
+  resource_first: 60000,
+  class_first: 40000,
+};
+
+const getAiTuningPromptMaxChars = (focusStrategy) => (
+  AI_TUNING_PROMPT_LIMITS[String(focusStrategy || '').trim()] || AI_TUNING_PROMPT_LIMITS.resource_first
+);
 
 // ?? AI 閮箸 Modal ?批
 const showAiModal = ref(false);
 const isAiTuning = ref(false);
+const isGeneratingBundle = ref(false);
 const aiTuningError = ref(null);
 const aiTuningResult = ref(null);
+const isAiInfeasibleAnalyzing = ref(false);
+const isDownloadingInfeasibleBundle = ref(false);
+const aiInfeasibleError = ref(null);
+const aiInfeasibleAnalysis = ref(null);
+const aiInfeasibleBundle = ref(null);
+const aiInfeasiblePromptBudget = ref(null);
 const aiPreviewSchedule = ref(null);
 const aiTuningJobState = ref(null);
 const aiTuningHistory = ref([]);
@@ -321,20 +456,27 @@ const aiTuningHistoryError = ref(null);
 const isCancellingAiTuningJob = ref(false);
 const aiTuningPromptPreview = ref(null);
 const aiTuningFocusStrategy = ref('resource_first');
-const MAX_AI_TUNING_PROMPT_CHARS = 100000;
 
 const hasAiTuningError = computed(() => Boolean(aiTuningError.value?.message));
+const hasEngineDiagnosticWarnings = computed(() => dataStore.engineDiagnosticWarnings.length > 0);
+const hasAiInfeasibleError = computed(() => Boolean(aiInfeasibleError.value?.message));
 const aiTuningFocusLabel = computed(() => (
   aiTuningFocusStrategy.value === 'class_first'
     ? '目前策略：單班優先，先從問題最多的班級開始。'
     : '目前策略：專科教室優先，先從最稀缺資源追蹤連鎖衝突。'
 ));
+const aiInfeasiblePromptBudgetSummary = computed(() => {
+  const budget = aiInfeasiblePromptBudget.value;
+  if (!budget) return '';
+  const status = budget.withinBudget ? 'Prompt 安全' : 'Prompt 過大';
+  return `${status} / 約 ${Number(budget.estimatedChars || 0).toLocaleString('zh-TW')} chars / 上限 ${Number(budget.maxPromptChars || 0).toLocaleString('zh-TW')}${budget.truncated ? ' / 已自動縮編' : ''}`;
+});
 
 const aiTuningPromptPreviewSummary = computed(() => {
   const preview = aiTuningPromptPreview.value;
   if (!preview) return '尚未預估';
   const chars = preview.promptBudget?.estimatedChars ?? 0;
-  const maxChars = preview.promptBudget?.maxPromptChars ?? MAX_AI_TUNING_PROMPT_CHARS;
+  const maxChars = preview.promptBudget?.maxPromptChars ?? getAiTuningPromptMaxChars(aiTuningFocusStrategy.value);
   const status = preview.promptBudget?.withinBudget ? '安全' : '過大';
   return `${status} / 約 ${chars.toLocaleString('zh-TW')} chars / 上限 ${maxChars.toLocaleString('zh-TW')}`;
 });
@@ -412,6 +554,8 @@ const buildAiTuningPromptPreview = () => {
     return null;
   }
 
+  const maxPromptChars = getAiTuningPromptMaxChars(aiTuningFocusStrategy.value);
+
   const focus = selectAiTuningFocusPreview({
     report: aiReportJson.value,
     scheduleContext: {
@@ -437,7 +581,7 @@ const buildAiTuningPromptPreview = () => {
         focusStrategy: aiTuningFocusStrategy.value,
         maxMovesPerRound: 3,
       },
-      maxPromptChars: MAX_AI_TUNING_PROMPT_CHARS,
+      maxPromptChars,
     }),
   };
 };
@@ -594,6 +738,16 @@ const AI_TUNING_ERROR_GUIDES = {
       '如果同樣發生，請把回傳內容交給工程人員檢查提示詞與約束規則。',
     ],
   },
+  candidate_pool_mismatch: {
+    title: 'AI 候選池資料不一致',
+    message: '這不是使用者手動排課錯誤，而是送給 AI 的 candidateId 清單與後端驗證用候選池不一致。',
+    steps: [
+      '下載預送出封包，檢查 promptLegalCandidateIds 與 report.candidateMoves 是否來自同一份候選池。',
+      '查看下方技術細節中的「prompt/驗證候選交集」；若為 0/N，優先回報為系統資料流問題。',
+      '同時確認 AI 回傳的 selectedMoves 是否只使用 prompt 中列出的 candidateId。',
+      '請勿手動套用 AI 建議；候選池重新同步或重新產生封包後再執行 AI 微調。',
+    ],
+  },
   apply_failed: {
     title: 'AI 建議無法套用',
     message: 'AI 回傳的調整內容無法寫回課表。',
@@ -608,6 +762,33 @@ const AI_TUNING_ERROR_GUIDES = {
     steps: [
       '確認後端服務是否已啟動，且可以正常接收 `/api` 請求。',
       '如果是開發模式，檢查 Vite proxy 與 `VITE_API_BASE_URL` 是否一致。',
+    ],
+  },
+  upstream_output_empty: {
+    title: 'AI 回應內容為空',
+    message: '本地模型可能把輸出 token 用在 thinking/reasoning，導致正式 content 為空。',
+    steps: [
+      '確認 AI 設定頁已啟用「停用 Thinking 模式」。',
+      '將最大輸出 token 提高到 4096 或以上。',
+      '確認 API URL 使用完整 OpenAI-compatible chat completions 端點。',
+    ],
+  },
+  upstream_output_truncated: {
+    title: 'AI 回應被截斷',
+    message: '本地模型在完成 JSON 前達到輸出 token 上限。',
+    steps: [
+      '提高最大輸出 token，例如 4096、8192。',
+      '減少本次預送出的候選交換資料量。',
+      '確認模型回應只輸出 JSON，不輸出解釋文字。',
+    ],
+  },
+  upstream_invalid_json: {
+    title: 'AI 回應不是有效 JSON',
+    message: '本地模型有回應內容，但格式不是系統可解析的 JSON。',
+    steps: [
+      '將 temperature 設為 0。',
+      '確認 System Prompt 要求只回傳 JSON。',
+      '如果模型輸出包含 reasoning 或說明文字，請啟用停用 Thinking 模式。',
     ],
   },
   unknown_error: {
@@ -630,6 +811,7 @@ const AI_TUNING_ERROR_CODE_MAP = {
   AI_TUNING_PROMPT_TOO_LARGE: 'upstream_context_overflow',
   AI_INVALID_SWAP_MOVE: 'invalid_move',
   AI_INVALID_CANDIDATE_MOVE: 'invalid_move',
+  AI_TUNING_CANDIDATE_POOL_MISMATCH: 'candidate_pool_mismatch',
   AI_ANALYSIS_FAILED: 'unknown_error',
   AI_TUNING_CONTEXT_MISSING: 'ai_tuning_context_missing',
   AI_TUNING_SESSION_NOT_FOUND: 'ai_tuning_session_not_found',
@@ -646,6 +828,13 @@ const AI_TUNING_ERROR_CODE_MAP = {
   AI_TUNING_JOB_NOT_FOUND: 'ai_tuning_session_not_found',
   AI_TUNING_CANCELLED: 'ai_tuning_cancel_failed',
   AI_TUNING_FAILED: 'ai_tuning_step_failed',
+  AI_UPSTREAM_OUTPUT_EMPTY: 'upstream_output_empty',
+  AI_UPSTREAM_OUTPUT_TRUNCATED: 'upstream_output_truncated',
+  AI_UPSTREAM_INVALID_JSON: 'upstream_invalid_json',
+  AI_INFEASIBLE_BUNDLE_MISSING: 'no_report',
+  AI_INFEASIBLE_PROMPT_TOO_LARGE: 'upstream_context_overflow',
+  AI_INFEASIBLE_INVALID_RESPONSE: 'upstream_invalid_json',
+  AI_INFEASIBLE_ANALYSIS_FAILED: 'unknown_error',
 };
 
 const isAbortLikeError = (error) => {
@@ -729,6 +918,7 @@ let timerId = null;
 const resetState = () => {
   dataStore.resetEngineState();
   clearAiTuningState();
+  clearAiInfeasibleState();
 };
 
 // 頁面載入時自動恢復輪詢
@@ -800,6 +990,7 @@ const phaseLabel = computed(() => {
  * 4. 🔒 雙層防護：過濾 periods <= 0 與年級不適用科目
  */
 const startEngine = async () => {
+  clearAiInfeasibleState();
   // --- 🚨 送出前防呆檢查 ---
   const errors = [];
   const teacherLoad = {};
@@ -927,6 +1118,31 @@ const startEngine = async () => {
     console.log("🧹 已成功清洗低年級髒資料，並完成中高年級科目轉換！");
   }
 
+  const homeroomRequirementTrace = dataStore.classes.map((cls) => {
+    const homeroomSubjects = (cls.course_requirements || []).filter((req) => {
+      const subject = String(req.subject || '').trim();
+      return req.defaultTeacher === 'homeroom'
+        && subject !== '導師區塊'
+        && !subject.includes('生活')
+        && !subject.includes('游泳')
+        && !subject.includes('體育');
+    });
+
+    const existingHomeroomBlock = (cls.course_requirements || []).find(
+      (req) => String(req.subject || '').trim() === '導師區塊'
+    );
+
+    return {
+      className: cls.name,
+      blockCandidatePeriods: homeroomSubjects.reduce((sum, req) => sum + (Number(req.periods) || 0), 0),
+      existingHomeroomBlockPeriods: Number(existingHomeroomBlock?.periods) || 0,
+      mergedSubjects: homeroomSubjects.map((req) => ({
+        subject: req.subject,
+        periods: Number(req.periods) || 0
+      }))
+    };
+  }).filter((item) => item.blockCandidatePeriods > 0 || item.existingHomeroomBlockPeriods > 0);
+
   // 🚀 組合最乾淨的 Payload 送出給 Python
   const realPayload = {
     schoolInfo: dataStore.schoolInfo,
@@ -935,7 +1151,10 @@ const startEngine = async () => {
     specialCourses: dataStore.specialCourses,
     standardDomainSettings: dataStore.standardDomainSettings,
     classrooms: dataStore.classrooms, // 🚀 BugFix: 將專科教室資料打包送給後端
-    aiSettings: dataStore.aiSettings   // 🚀 Fix 0: 補上 AI 硬約束設定，確保後端正確讀取游泳/交替等開關
+    aiSettings: dataStore.aiSettings,   // 🚀 Fix 0: 補上 AI 硬約束設定，確保後端正確讀取游泳/交替等開關
+    payloadDiagnostics: {
+      homeroomRequirementTrace
+    }
   };
 
   console.log("🚀 準備發送 Payload 至後端引擎:", realPayload);
@@ -1038,12 +1257,170 @@ const downloadAiJson = () => {
   downloadTextFile(`AI課表分析報告_${stamp}.json`, JSON.stringify(aiReportJson.value, null, 2), 'application/json;charset=utf-8');
 };
 
+const downloadSubmissionBundle = async () => {
+  if (!aiReportJson.value || !dataStore.engineResult?.schedule) return;
+
+  isGeneratingBundle.value = true;
+  try {
+    const bundle = createSubmissionBundle(
+      {
+        classes: dataStore.classes,
+        teachers: dataStore.teachers,
+        classrooms: dataStore.classrooms,
+        schoolInfo: dataStore.schoolInfo,
+        engineResult: dataStore.engineResult,
+        engineMeta: {
+          jobId: dataStore.engineJobId,
+          status: dataStore.engineStatus,
+          finishedAt: dataStore.engineFinishedAt,
+        },
+      },
+      dataStore.aiSettings,
+      {
+        enabled: aiStore.enabled,
+        serviceType: aiStore.serviceType,
+        apiUrl: aiStore.apiUrl,
+        model: aiStore.model,
+        systemPrompt: aiStore.systemPrompt,
+        disableThinking: aiStore.disableThinking,
+        maxOutputTokens: aiStore.maxOutputTokens,
+        temperature: aiStore.temperature,
+      },
+      aiTuningFocusStrategy.value
+    );
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadJson(bundle, `ai-tuning-bundle_${stamp}.json`);
+  } catch (error) {
+    console.error('[ScheduleView] Bundle generation failed:', error);
+    alert(`封包產生失敗：${error.message}`);
+  } finally {
+    isGeneratingBundle.value = false;
+  }
+};
+
 const clearAiTuningState = () => {
   aiTuningError.value = null;
   aiTuningResult.value = null;
   aiPreviewSchedule.value = null;
   aiTuningJobState.value = null;
   aiTuningPromptPreview.value = null;
+};
+
+const clearAiInfeasibleState = () => {
+  isAiInfeasibleAnalyzing.value = false;
+  isDownloadingInfeasibleBundle.value = false;
+  aiInfeasibleError.value = null;
+  aiInfeasibleAnalysis.value = null;
+  aiInfeasibleBundle.value = null;
+  aiInfeasiblePromptBudget.value = null;
+};
+
+const buildAiConnectionSettings = () => ({
+  enabled: aiStore.enabled,
+  serviceType: aiStore.serviceType,
+  apiUrl: aiStore.apiUrl,
+  model: aiStore.model,
+  systemPrompt: aiStore.systemPrompt,
+  disableThinking: aiStore.disableThinking,
+  maxOutputTokens: aiStore.maxOutputTokens,
+  temperature: aiStore.temperature,
+});
+
+const openAiDiagnosisModal = async () => {
+  showAiModal.value = true;
+  if (!aiInfeasibleAnalysis.value && !isAiInfeasibleAnalyzing.value && !aiInfeasibleError.value) {
+    await requestAiInfeasibleAnalysis();
+  }
+};
+
+const requestAiInfeasibleAnalysis = async () => {
+  aiInfeasibleError.value = null;
+
+  if (!aiStore.enabled || !String(aiStore.apiUrl || '').trim() || !String(aiStore.model || '').trim()) {
+    aiInfeasibleError.value = buildAiTuningError({
+      responseStatus: 400,
+      responseData: {
+        code: !aiStore.enabled ? 'AI_DISABLED' : 'AI_API_URL_MISSING',
+        error: !aiStore.enabled ? 'AI 功能尚未啟用' : 'AI 連線設定不完整',
+      },
+    });
+    return;
+  }
+
+  isAiInfeasibleAnalyzing.value = true;
+  aiInfeasibleAnalysis.value = null;
+  aiInfeasibleBundle.value = null;
+  aiInfeasiblePromptBudget.value = null;
+
+  try {
+    const result = await runAiInfeasibleAnalysis({
+      apiBase: API_BASE,
+      jobId: dataStore.engineJobId,
+      connectionSettings: buildAiConnectionSettings(),
+      maxPromptChars: 120000,
+    });
+
+    aiInfeasibleAnalysis.value = result.analysis;
+    aiInfeasibleBundle.value = result.bundle || null;
+    aiInfeasiblePromptBudget.value = result.promptBudget || null;
+  } catch (error) {
+    aiInfeasibleError.value = buildAiTuningError({
+      responseStatus: error?.responseStatus ?? null,
+      responseData: error?.responseData ?? (error?.code ? { code: error.code, error: error.message } : null),
+      fallbackError: error,
+    });
+  } finally {
+    isAiInfeasibleAnalyzing.value = false;
+  }
+};
+
+const downloadInfeasibleBundle = async () => {
+  isDownloadingInfeasibleBundle.value = true;
+  try {
+    let bundle = aiInfeasibleBundle.value;
+
+    if (!bundle) {
+      const jobQuery = dataStore.engineJobId ? `?jobId=${encodeURIComponent(dataStore.engineJobId)}` : '';
+      const response = await fetch(`${API_BASE}/ai-infeasible-analysis-bundle${jobQuery}`);
+      const rawText = await response.text();
+      let data = {};
+
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = { rawText };
+        }
+      }
+
+      if (!response.ok || !data?.bundle) {
+        throw {
+          responseStatus: response.status,
+          responseData: data?.bundle ? data : {
+            code: data?.code || 'AI_INFEASIBLE_BUNDLE_MISSING',
+            error: data?.error || '無法取得 infeasible bundle',
+            details: data?.details || rawText || '',
+          },
+        };
+      }
+
+      bundle = data.bundle;
+      aiInfeasibleBundle.value = bundle;
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const jobIdLabel = dataStore.engineJobId || bundle?.job?.jobId || 'latest';
+    downloadJson(bundle, `infeasible-bundle_${jobIdLabel}_${stamp}.json`);
+  } catch (error) {
+    aiInfeasibleError.value = buildAiTuningError({
+      responseStatus: error?.responseStatus ?? null,
+      responseData: error?.responseData ?? null,
+      fallbackError: error instanceof Error ? error : new Error(error?.message || '下載 infeasible bundle 失敗'),
+    });
+  } finally {
+    isDownloadingInfeasibleBundle.value = false;
+  }
 };
 
 const applyAiPreviewAndGoToEditor = async () => {
@@ -1074,12 +1451,13 @@ const requestAiTuning = async () => {
   const promptPreview = buildAiTuningPromptPreview();
   aiTuningPromptPreview.value = promptPreview;
   if (promptPreview?.promptBudget && !promptPreview.promptBudget.withinBudget) {
+    const maxPromptChars = getAiTuningPromptMaxChars(aiTuningFocusStrategy.value);
     aiTuningError.value = buildAiTuningError({
       responseStatus: 413,
       responseData: {
         code: 'AI_TUNING_PROMPT_TOO_LARGE',
         error: '本輪焦點摘要仍超過安全門檻，請縮小修復範圍後再試。',
-        details: `estimated=${promptPreview.promptBudget.estimatedChars}, max=${promptPreview.promptBudget.maxPromptChars}`,
+        details: `strategy=${aiTuningFocusStrategy.value}, estimated=${promptPreview.promptBudget.estimatedChars}, max=${maxPromptChars}`,
       },
     });
     return;
@@ -1104,21 +1482,19 @@ const requestAiTuning = async () => {
         },
       },
       aiSettings: dataStore.aiSettings,
-      connectionSettings: {
-        enabled: aiStore.enabled,
-        serviceType: aiStore.serviceType,
-        apiUrl: aiStore.apiUrl,
-        model: aiStore.model,
-        systemPrompt: aiStore.systemPrompt,
-      },
+      connectionSettings: buildAiConnectionSettings(),
       focusStrategy: aiTuningFocusStrategy.value,
       maxIterations: 3,
       maxMovesPerRound: 3,
       tuningContext: {
-        maxPromptChars: MAX_AI_TUNING_PROMPT_CHARS,
+        maxPromptChars: getAiTuningPromptMaxChars(aiTuningFocusStrategy.value),
         focusStrategy: aiTuningFocusStrategy.value,
         promptRisk: promptPreview?.promptBudget || null,
         promptWarnings: promptPreview?.promptWarnings || [],
+        promptMarkdown: promptPreview?.promptMarkdown || '',
+        promptScope: promptPreview?.promptScope || null,
+        promptReport: promptPreview?.promptReport || null,
+        focus: promptPreview?.focus || null,
       },
       onProgress: (snapshot) => {
         aiTuningJobState.value = snapshot;
@@ -1181,12 +1557,14 @@ const cancelCurrentAiTuningJob = async () => {
   }
 };
 
+const getDayLabel = (day) => {
+  const labels = { 1: '週一', 2: '週二', 3: '週三', 4: '週四', 5: '週五' };
+  return labels[Number(day)] || `週${day}`;
+};
+
 const buildMoveFallbackLabel = (move) => {
   if (!move) return '';
-  const formatDay = (day) => {
-    const labels = { 1: '週一', 2: '週二', 3: '週三', 4: '週四', 5: '週五' };
-    return labels[Number(day)] || `週${day}`;
-  };
+  const formatDay = (day) => getDayLabel(day);
   const fromLabel = move.from?.label || `${formatDay(move.from?.day)}第${move.from?.period}節`;
   const toLabel = move.to?.label || `${formatDay(move.to?.day)}第${move.to?.period}節`;
   const subjectFrom = move.from?.subjectLabel || '--';
@@ -1235,37 +1613,81 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
       const item = items[0];
       targetClass.timetable[day][period] = {
         subject: item.subject,
-        teacher: item.teacherName
+        teacher: item.teacherName,
+        ...(item.classroomName && { classroomName: item.classroomName }),
+        ...(item.pairGroupId && { pairGroupId: item.pairGroupId }),
+        ...(item.pairRole && { pairRole: item.pairRole }),
       };
     } else {
-      // 多筆：檢查是否為音樂/美勞交替
-      const subjects = items.map(i => i.subject);
-      const hasMusic = subjects.some(s => s.includes('音樂'));
-      const hasArt = subjects.some(s => s.includes('美勞'));
+      // 多筆：檢查是否為交替課（依 item.week 動態決定 oddWeek / evenWeek）
+      const hasWeekFlag = items.some(i => i.week === 'odd' || i.week === 'even');
 
-      if (hasMusic && hasArt) {
-        // 合併為單雙週交替格
-        const musicItem = items.find(i => i.subject.includes('音樂'));
-        const artItem = items.find(i => i.subject.includes('美勞'));
+      if (hasWeekFlag) {
+        // 合併為單雙週交替格 — 依 solver 輸出的 week 欄位動態決定方向
+        const oddItem = items.find(i => i.week === 'odd');
+        const evenItem = items.find(i => i.week === 'even');
 
-        // 從 course_requirements 獲取準確的教師姓名
-        const musicTeacher = getSubjectTeacher(targetClass, '音樂') || musicItem?.teacherName || '';
-        const artTeacher = getSubjectTeacher(targetClass, '美勞') || artItem?.teacherName || '';
-
-        targetClass.timetable[day][period] = {
-          subject: '音樂(單)/美勞(雙)',
-          teacher: `${musicTeacher} / ${artTeacher}`,
-          isAlternating: true,
-          oddWeek: { subject: '音樂', teacher: musicTeacher },
-          evenWeek: { subject: '美勞', teacher: artTeacher }
-        };
+        if (oddItem && evenItem) {
+          targetClass.timetable[day][period] = {
+            subject: `${oddItem.subject}(單)/${evenItem.subject}(雙)`,
+            teacher: `${oddItem.teacherName || ''} / ${evenItem.teacherName || ''}`,
+            isAlternating: true,
+            oddWeek: {
+              subject: oddItem.subject,
+              teacher: oddItem.teacherName || '',
+              ...(oddItem.classroomName && { classroomName: oddItem.classroomName }),
+            },
+            evenWeek: {
+              subject: evenItem.subject,
+              teacher: evenItem.teacherName || '',
+              ...(evenItem.classroomName && { classroomName: evenItem.classroomName }),
+            }
+          };
+        } else {
+          // 只有單一週次，降级為普通寫入
+          const last = items[items.length - 1];
+          targetClass.timetable[day][period] = {
+            subject: last.subject,
+            teacher: last.teacherName,
+            ...(last.classroomName && { classroomName: last.classroomName }),
+          };
+        }
       } else {
-        // 其他多筆情況：取最後一筆（一般不應該發生）
-        const last = items[items.length - 1];
-        targetClass.timetable[day][period] = {
-          subject: last.subject,
-          teacher: last.teacherName
-        };
+        // 向后兼容：舊格式（無 week 欄位），沿用音樂/美勞判斷邏輯
+        const subjects = items.map(i => i.subject);
+        const hasMusic = subjects.some(s => s.includes('音樂'));
+        const hasArt = subjects.some(s => s.includes('美勞'));
+
+        if (hasMusic && hasArt) {
+          const musicItem = items.find(i => i.subject.includes('音樂'));
+          const artItem = items.find(i => i.subject.includes('美勞'));
+
+          const musicTeacher = getSubjectTeacher(targetClass, '音樂') || musicItem?.teacherName || '';
+          const artTeacher = getSubjectTeacher(targetClass, '美勞') || artItem?.teacherName || '';
+
+          targetClass.timetable[day][period] = {
+            subject: '音樂(單)/美勞(雙)',
+            teacher: `${musicTeacher} / ${artTeacher}`,
+            isAlternating: true,
+            oddWeek: {
+              subject: '音樂',
+              teacher: musicTeacher,
+              ...(musicItem?.classroomName && { classroomName: musicItem.classroomName }),
+            },
+            evenWeek: {
+              subject: '美勞',
+              teacher: artTeacher,
+              ...(artItem?.classroomName && { classroomName: artItem.classroomName }),
+            }
+          };
+        } else {
+          // 其他多筆情況：取最後一筆
+          const last = items[items.length - 1];
+          targetClass.timetable[day][period] = {
+            subject: last.subject,
+            teacher: last.teacherName
+          };
+        }
       }
     }
   });
@@ -1275,13 +1697,8 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
     const gradeMatch = String(cls.name).match(/(\d+)年/) || String(cls.name).match(/^(\d)/);
     const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 1;
 
-    // 取得該班導師姓名
-    const homeroomReq = (cls.course_requirements || []).find(r =>
-      r.defaultTeacher === 'homeroom' && r.subject !== '導師區塊'
-    );
-    const homeroomTeacher = homeroomReq
-      ? (homeroomReq.teacher_name || homeroomReq.teacher || cls.homeroom_teacher || '')
-      : (cls.homeroom_teacher || '');
+    // 取得該班導師姓名 — 直接使用 cls.homeroom_teacher，避免 course_requirements 來源不一致導致誤報
+    const homeroomTeacher = cls.homeroom_teacher || '';
 
     for (let d = 1; d <= 5; d++) {
       for (let p = 1; p <= 7; p++) {
@@ -1746,6 +2163,36 @@ button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
   font-weight: 600;
 }
 
+.ai-tuning-actionable {
+  margin-top: 12px;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.ai-tuning-actionable strong {
+  color: #9a3412;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.ai-tuning-actionable ul {
+  margin: 0 0 0 18px;
+  padding: 0;
+}
+
+.ai-tuning-actionable-item {
+  color: #7c2d12;
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+
+.ai-tuning-actionable-suggestion {
+  color: #059669;
+  font-weight: 600;
+}
+
 /* ===== 進度面板 ===== */
 .progress-panel {
   background: #eff6ff;
@@ -1983,6 +2430,7 @@ button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
 /* ===== 錯誤操作按鈕區 ===== */
 .error-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: center;
   margin-top: 16px;
@@ -2005,6 +2453,29 @@ button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
 .ai-diagnosis-btn:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 12px rgba(139, 92, 246, 0.4);
+}
+
+.ai-deep-analysis-btn {
+  background: linear-gradient(135deg, #0f766e, #115e59);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 1em;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 4px 6px rgba(15, 118, 110, 0.28);
+}
+
+.ai-deep-analysis-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(15, 118, 110, 0.35);
+}
+
+.ai-deep-analysis-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
 }
 
 /* ===== Modal Overlay ===== */
@@ -2121,6 +2592,118 @@ button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
   color: #94a3b8;
   padding: 30px;
   font-style: italic;
+}
+
+.ai-deep-analysis-panel {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.ai-deep-analysis-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.ai-deep-analysis-header h4 {
+  margin: 0 0 6px;
+  color: #0f172a;
+}
+
+.ai-deep-analysis-header p {
+  margin: 0;
+  color: #475569;
+  font-size: 0.92em;
+}
+
+.ai-deep-analysis-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.ai-deep-analysis-budget {
+  margin: 0 0 16px;
+  color: #0f766e;
+  font-size: 0.9em;
+  background: #ecfeff;
+  border: 1px solid #a5f3fc;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.ai-deep-analysis-result {
+  display: grid;
+  gap: 16px;
+}
+
+.ai-deep-analysis-summary {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  text-align: left;
+}
+
+.ai-deep-analysis-summary strong {
+  color: #0f172a;
+}
+
+.ai-deep-analysis-summary p {
+  margin: 8px 0 0;
+  color: #334155;
+  line-height: 1.6;
+}
+
+.ai-deep-analysis-section {
+  text-align: left;
+}
+
+.ai-deep-analysis-section h5 {
+  margin: 0 0 10px;
+  color: #0f172a;
+  font-size: 0.98em;
+}
+
+.ai-deep-analysis-items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.ai-deep-analysis-items li {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.ai-deep-analysis-items strong {
+  color: #0f172a;
+}
+
+.ai-deep-analysis-items span {
+  color: #475569;
+  font-size: 0.9em;
+}
+
+.ai-deep-analysis-items p {
+  margin: 8px 0 0;
+  color: #334155;
+  line-height: 1.6;
+}
+
+.ai-deep-analysis-evidence,
+.ai-deep-analysis-rationale {
+  color: #475569;
+  font-size: 0.92em;
 }
 
 .ai-modal-footer {

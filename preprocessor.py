@@ -4,24 +4,153 @@
 不碰 OR-Tools model
 """
 
+import terminal_sanitizer
 import re
 import math
 from utils import parse_grade
 
 
-def preprocess_classes(classes_data, ai_settings=None):
+_DEFAULT_GRADE_RULES = {
+    "生活": {1, 2},
+    "自然科學": {3, 4, 5, 6},
+    "音樂": {3, 4, 5, 6},
+    "美勞": {3, 4, 5, 6},
+    "社會": {3, 4, 5, 6},
+    "綜合活動": {3, 4, 5, 6},
+    "科技-資訊": {3, 4, 5, 6},
+}
+
+
+def _canonical_subject_for_grade_rules(subject):
+    subject = str(subject or "").strip()
+    if not subject:
+        return ""
+    if subject.startswith("音樂"):
+        return "音樂"
+    if subject.startswith("美勞"):
+        return "美勞"
+    if subject.startswith("自然"):
+        return "自然科學"
+    if subject.startswith("科技-資訊") or subject.startswith("資訊") or subject.startswith("電腦"):
+        return "科技-資訊"
+    return subject
+
+
+def _build_grade_rules_from_standard_domain_settings(standard_domain_settings):
+    grade_rules = {}
+    for entry in standard_domain_settings or []:
+        subject = _canonical_subject_for_grade_rules(entry.get("name") or entry.get("subject") or entry.get("subjectName"))
+        periods = entry.get("periods", {})
+        if not subject or not isinstance(periods, dict):
+            continue
+
+        allowed_grades = set()
+        for grade_key, value in periods.items():
+            try:
+                grade = int(grade_key)
+                if float(value or 0) > 0:
+                    allowed_grades.add(grade)
+            except (TypeError, ValueError):
+                continue
+
+        grade_rules[subject] = allowed_grades
+    return grade_rules
+
+
+def _normalize_subject_grade_rules(subject_grade_rules):
+    normalized = {}
+    for subj, grades in (subject_grade_rules or {}).items():
+        if not isinstance(grades, (list, set, tuple)) or len(grades) <= 0:
+            continue
+
+        allowed_grades = set()
+        for grade in grades:
+            try:
+                allowed_grades.add(int(grade))
+            except (TypeError, ValueError):
+                continue
+
+        if allowed_grades:
+            normalized[_canonical_subject_for_grade_rules(subj)] = allowed_grades
+
+    return normalized
+
+
+def build_effective_grade_rules(standard_domain_settings=None, subject_grade_rules=None):
+    effective_rules = {subject: set(grades) for subject, grades in _DEFAULT_GRADE_RULES.items()}
+    effective_rules.update(_build_grade_rules_from_standard_domain_settings(standard_domain_settings))
+    effective_rules.update(_normalize_subject_grade_rules(subject_grade_rules))
+    return effective_rules
+
+
+def allowed_grades_for_subject(subject, grade_rules=None):
+    canonical = _canonical_subject_for_grade_rules(subject)
+    rules = grade_rules if grade_rules is not None else _DEFAULT_GRADE_RULES
+    return rules.get(canonical)
+
+
+def _sanitize_requirements_by_grade(cls, metadata, grade_rules=None):
+    grade = parse_grade(cls)
+    if grade is None:
+        return
+
+    reqs = cls.get("course_requirements", [])
+    kept = []
+    removed = []
+
+    for req in reqs:
+        periods = float(req.get("periods", 0) or 0)
+        subject = req.get("subject", "")
+        allowed_grades = allowed_grades_for_subject(subject, grade_rules=grade_rules)
+
+        if periods <= 0:
+            removed.append({
+                "className": cls.get("name", ""),
+                "subject": subject,
+                "reason": "periods<=0",
+            })
+            continue
+
+        if allowed_grades is not None and grade not in allowed_grades:
+            removed.append({
+                "className": cls.get("name", ""),
+                "subject": subject,
+                "reason": f"grade {grade} not in {sorted(allowed_grades)}",
+            })
+            continue
+
+        kept.append(req)
+
+    cls["course_requirements"] = kept
+    if removed:
+        metadata.setdefault("removed_requirements", []).extend(removed)
+
+
+def preprocess_classes(classes_data, ai_settings=None, standard_domain_settings=None, subject_grade_rules=None):
     """
     對 classes_data 執行完整前處理，回傳 (normalized_classes, metadata)。
+
+    Args:
+        classes_data: list of class dicts
+        ai_settings: dict with AI tuning settings
+        standard_domain_settings: list of domain setting entries (fallback for grade rules)
+        subject_grade_rules: dict {canonical_subject: [grade, ...]} from SystemSetting.subjectGradeRules.
+                            If provided, takes priority over standard_domain_settings derivation.
 
     注意：metadata 目前暫不輸出 alternating_info（由 base_rules 直接從課程需求推導），
     因此回傳空 dict 保持契約一致。未來若需啟用 alternating_info，取消 _split_arts_15_15 中的註解即可。
     """
     metadata = {}
+    grade_rules = build_effective_grade_rules(
+        standard_domain_settings=standard_domain_settings,
+        subject_grade_rules=subject_grade_rules,
+    )
 
     for cls in classes_data:
         _fix_grade(cls)
+        _sanitize_requirements_by_grade(cls, metadata, grade_rules=grade_rules)
         _clean_ghost_art(cls)
-        _homeroom_blockization(cls, ai_settings)
+        _homeroom_blockization(cls, ai_settings, metadata)
         _split_arts_15_15(cls, metadata)
         _process_generic_alternating_subjects(cls)
         _fix_existing_pair_group_ids(cls)
@@ -71,7 +200,7 @@ def _clean_ghost_art(cls):
             base = re.sub(r'_(固定|交替|homeroom)', '', norm)
             key = (base, req.get("teacher_name", ""))
             if key in seen_normalized:
-                print(f"  🧹 [Ghost Art 清理] 跳過重複科目: {subject} ({req.get('teacher_name', '')}) @ {cls.get('name', '')}")
+                print(f"  [CLEAN] [Ghost Art 清理] 跳過重複科目: {subject} ({req.get('teacher_name', '')}) @ {cls.get('name', '')}")
                 continue
             seen_normalized.add(key)
         cleaned.append(req)
@@ -79,7 +208,7 @@ def _clean_ghost_art(cls):
     cls["course_requirements"] = cleaned
 
 
-def _homeroom_blockization(cls, ai_settings):
+def _homeroom_blockization(cls, ai_settings, metadata=None):
     """
     導師科目自動區塊化：
     若啟用此功能，將所有 defaultTeacher == 'homeroom' 且非生活、非游泳、非體育的導師自授科目，
@@ -97,11 +226,15 @@ def _homeroom_blockization(cls, ai_settings):
     reqs = cls.get("course_requirements", [])
     
     homeroom_subs_to_block = []
+    exempt_homeroom_subs = []
     other_reqs = []
     
     for req in reqs:
         subj = req.get("subject", "")
         default_t = req.get("defaultTeacher", "")
+        if subj == "導師區塊":
+            other_reqs.append(req)
+            continue
         
         # 判定是否為導師自授科目，並排除特規科目
         is_homeroom_sub = (default_t == "homeroom")
@@ -109,23 +242,29 @@ def _homeroom_blockization(cls, ai_settings):
         
         if is_homeroom_sub and not is_exempt:
             homeroom_subs_to_block.append(req)
+        elif is_homeroom_sub and is_exempt:
+            exempt_homeroom_subs.append(req)
+            other_reqs.append(req)
         else:
             other_reqs.append(req)
+
+    existing_hr = next((r for r in other_reqs if r.get("subject") == "導師區塊"), None)
+    existing_hr_periods = float(existing_hr.get("periods", 0)) if existing_hr else 0
             
     if homeroom_subs_to_block:
         # 1. 累加節數
         total_blocked_periods = sum(float(r.get("periods", 0)) for r in homeroom_subs_to_block)
         
         # 2. 獲取導師姓名
-        teacher_name = None
-        for r in homeroom_subs_to_block:
-            tn = r.get("teacher_name") or r.get("teacher", "")
-            if tn:
-                teacher_name = tn
-                break
+        teacher_name = (cls.get("homeroom_teacher") or "").strip()
+        if not teacher_name:
+            for r in homeroom_subs_to_block:
+                tn = r.get("teacher_name") or r.get("teacher", "")
+                if tn:
+                    teacher_name = tn
+                    break
                 
         # 3. 合併至既有的「導師區塊」或新增一筆
-        existing_hr = next((r for r in other_reqs if r.get("subject") == "導師區塊"), None)
         if existing_hr:
             existing_hr["periods"] = float(existing_hr.get("periods", 0)) + total_blocked_periods
             if not existing_hr.get("teacher_name") and teacher_name:
@@ -141,9 +280,47 @@ def _homeroom_blockization(cls, ai_settings):
             other_reqs.insert(0, merged)
             
         cls["course_requirements"] = other_reqs
-        print(f"  🔗 [Homeroom Blockization] {cls.get('name', '')}: 已合併 {len(homeroom_subs_to_block)} 個導師科目，共 {total_blocked_periods} 節課至「導師區塊」")
-    else:
+        print(f"  [LINK] [Homeroom Blockization] {cls.get('name', '')}: 已合併 {len(homeroom_subs_to_block)} 個導師科目，共 {total_blocked_periods} 節課至「導師區塊」")
+    elif not existing_hr and not exempt_homeroom_subs:
         _homeroom_blockization_legacy(cls)
+
+    if metadata is not None and (homeroom_subs_to_block or existing_hr or exempt_homeroom_subs):
+        metadata.setdefault("homeroomBlockizationTrace", []).append({
+            "className": cls.get("name", ""),
+            "existingHomeroomBlockPeriods": existing_hr_periods,
+            "mergedPeriods": sum(float(r.get("periods", 0)) for r in homeroom_subs_to_block),
+            "finalHomeroomBlockPeriods": next(
+                (
+                    float(r.get("periods", 0))
+                    for r in cls.get("course_requirements", [])
+                    if r.get("subject") == "導師區塊"
+                ),
+                existing_hr_periods,
+            ),
+            "teacherName": (cls.get("homeroom_teacher") or "").strip(),
+            "mergedSubjects": [
+                {
+                    "subject": r.get("subject", ""),
+                    "periods": float(r.get("periods", 0) or 0),
+                }
+                for r in homeroom_subs_to_block
+            ],
+            "exemptSubjects": [
+                {
+                    "subject": r.get("subject", ""),
+                    "periods": float(r.get("periods", 0) or 0),
+                }
+                for r in exempt_homeroom_subs
+            ],
+            "hasPreexistingHomeroomBlock": bool(existing_hr),
+            "note": (
+                "payload_already_contains_homeroom_block"
+                if existing_hr and homeroom_subs_to_block
+                else "homeroom_subjects_merged"
+                if homeroom_subs_to_block
+                else "existing_homeroom_block_only"
+            ),
+        })
 
 def _homeroom_blockization_legacy(cls):
     reqs = cls.get("course_requirements", [])
@@ -157,12 +334,13 @@ def _homeroom_blockization_legacy(cls):
     if len(homeroom_reqs) > 1:
         # 合併所有導師區塊節數
         total_hr_periods = sum(float(r.get("periods", 0)) for r in homeroom_reqs)
-        teacher_name = None
-        for r in homeroom_reqs:
-            tn = r.get("teacher_name", "")
-            if tn:
-                teacher_name = tn
-                break
+        teacher_name = (cls.get("homeroom_teacher") or "").strip()
+        if not teacher_name:
+            for r in homeroom_reqs:
+                tn = r.get("teacher_name", "")
+                if tn:
+                    teacher_name = tn
+                    break
 
         merged = {
             "subject": "導師區塊",
@@ -172,7 +350,7 @@ def _homeroom_blockization_legacy(cls):
             "allow_consecutive": True
         }
         cls["course_requirements"] = [merged] + other_reqs
-        print(f"  🔗 [Homeroom Block] {cls.get('name', '')}: 合併 {len(homeroom_reqs)} 個導師區塊 → {total_hr_periods} 節")
+        print(f"  [LINK] [Homeroom Block] {cls.get('name', '')}: 合併 {len(homeroom_reqs)} 個導師區塊 → {total_hr_periods} 節")
 
 
 def _split_arts_15_15(cls, metadata):
@@ -231,7 +409,7 @@ def _split_arts_15_15(cls, metadata):
     if music_teacher or art_teacher:
         # pair_group_id：以師資組合為識別碼，同一組音美老師的所有班級共用同一 group
         import hashlib
-        raw_key = f"{music_teacher}|{art_teacher}|{cls.get('grade')}"
+        raw_key = f"{music_teacher}|{art_teacher}"
         pair_group_id = "g_" + hashlib.md5(raw_key.encode()).hexdigest()[:8]
 
         new_reqs.append({
@@ -247,7 +425,7 @@ def _split_arts_15_15(cls, metadata):
         })
 
     cls["course_requirements"] = other_reqs + new_reqs
-    print(f"  ✂️ [Arts Split] {c_name}: 音樂 1.5 + 美勞 1.5 → 音樂_固定(1) + 美勞_固定(1) + 交替(1) [group={pair_group_id}]")
+    print(f"  ️ [Arts Split] {c_name}: 音樂 1.5 + 美勞 1.5 → 音樂_固定(1) + 美勞_固定(1) + 交替(1) [group={pair_group_id}]")
 
 
 def _process_generic_alternating_subjects(cls):
@@ -274,13 +452,15 @@ def _process_generic_alternating_subjects(cls):
             req["pair_group_id"] = pair_group_id
             # 默認不可連堂，每週1節
             req["allow_consecutive"] = False
-            print(f"  🔄 [Generic Alt] {c_name}: 識別交替科目 {subj} (老師: {t_name}) [group={pair_group_id}]")
+            print(f"  [WARN] [Generic Alt] {c_name}: 識別交替科目 {subj} (老師: {t_name}) [group={pair_group_id}]")
 
 
 def _fix_existing_pair_group_ids(cls):
     """
     如果傳入的 requirements 已經被拆分過且自帶 pair_group_id，
-    我們必須根據班級年級重新計算 pair_group_id，以防止跨年級過度全局化。
+    重新套用目前的分組規則：
+    - 音樂美勞交替：只依音樂/美勞老師組合分組，允許跨年級互補配對
+    - 泛型交替科目：維持年級分組，避免過度全局化
     """
     reqs = cls.get("course_requirements", [])
     grade = cls.get("grade")
@@ -293,7 +473,7 @@ def _fix_existing_pair_group_ids(cls):
             
             import hashlib
             if "音樂美勞" in subj or ("音樂" in subj and "美勞" in subj):
-                raw_key = f"{music_t}|{art_t}|{grade}"
+                raw_key = f"{music_t}|{art_t}"
                 new_gid = "g_" + hashlib.md5(raw_key.encode("utf-8")).hexdigest()[:8]
             else:
                 raw_key = f"{t_name}|{subj}|{grade}"
@@ -301,4 +481,3 @@ def _fix_existing_pair_group_ids(cls):
             
             req["pair_group_id"] = new_gid
             req["is_alternating"] = True
-

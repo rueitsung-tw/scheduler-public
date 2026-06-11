@@ -30,6 +30,22 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     return s;
   };
 
+  /**
+   * 🆕 Phase 1: 從 standardDomainSettings 產生 subjectGradeRules 初值
+   */
+  function migrateSubjectGradeRules(standardDomainSettings) {
+    const rules = {}
+    for (const entry of standardDomainSettings) {
+      const grades = Object.entries(entry.periods || {})
+        .filter(([, p]) => Number(p) > 0)
+        .map(([g]) => parseInt(g, 10))
+      if (grades.length > 0) {
+        rules[entry.name] = grades
+      }
+    }
+    return rules
+  }
+
   const sanitizeClassRequirements = (classData) => {
     if (!classData) return classData;
     const grade = Number(classData.grade || getGradeFromClassName(classData.name));
@@ -50,7 +66,80 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     };
   };
 
+  const normalizeDiagnosticLine = (line) => String(line || '').replace(/\r/g, '').trim();
+
+  const normalizeDiagnosticWarningDetail = (item) => {
+    if (!item || typeof item !== 'object') return null;
+    const message = normalizeDiagnosticLine(item.message);
+    if (!message) return null;
+    const level = String(item.level || 'warn').trim().toLowerCase() || 'warn';
+    const category = String(item.category || 'generic_infeasible').trim() || 'generic_infeasible';
+    const displayText = normalizeDiagnosticLine(item.displayText || `[${level.toUpperCase()}] ${message}`);
+    return {
+      level,
+      category,
+      message,
+      displayText,
+      rawLine: normalizeDiagnosticLine(item.rawLine),
+      contextLine: normalizeDiagnosticLine(item.contextLine),
+    };
+  };
+
+  const normalizeDiagnosticWarningDetails = (input) => (
+    Array.isArray(input)
+      ? input.map((item) => normalizeDiagnosticWarningDetail(item)).filter(Boolean)
+      : []
+  );
+
+  const isDiagnosticWarningLine = (line) => {
+    const normalized = normalizeDiagnosticLine(line);
+    if (!normalized) return false;
+    if (normalized.startsWith('===') && normalized.includes('診斷報告')) return false;
+    if (/\[OK\]/i.test(normalized) || /\[INFO\]/i.test(normalized)) return false;
+    return (
+      /\[(WARN|ERROR|ALERT)\]/i.test(normalized)
+      || normalized.includes('⚠️')
+      || normalized.includes('❌')
+      || normalized.includes('🚨')
+    );
+  };
+
+  const extractDiagnosticWarningLines = (input) => {
+    const sourceLines = Array.isArray(input)
+      ? input
+      : String(input || '').split('\n');
+    const deduped = [];
+    const seen = new Set();
+
+    sourceLines.forEach((line) => {
+      const normalized = normalizeDiagnosticLine(line);
+      if (!isDiagnosticWarningLine(normalized) || seen.has(normalized)) return;
+      seen.add(normalized);
+      deduped.push(normalized);
+    });
+
+    return deduped;
+  };
+
+  const buildGenericDiagnosticFallback = () => ([
+    '⚠️ 排課引擎無法找到可辨識的診斷警示，請優先檢查班級課程需求、教師配額與專科教室容量。',
+  ]);
+
+  const loadDiagnosticWarningsFromReport = async () => {
+    try {
+      const reportRes = await fetch(`${API_BASE}/debug-infeasible-report`);
+      if (!reportRes.ok) return buildGenericDiagnosticFallback();
+
+      const reportData = await reportRes.json();
+      const warningLines = extractDiagnosticWarningLines(reportData.content || '');
+      return warningLines.length > 0 ? warningLines : buildGenericDiagnosticFallback();
+    } catch (_) {
+      return buildGenericDiagnosticFallback();
+    }
+  };
+
   const schoolInfo = ref({
+    name: '',
     academic_year: '115', semester: '上學期',
     periodDefaults: { homeroom: 15, subject: 19, admin: 6 },
     gradeSettings: { '1': 3, '2': 3, '3': 3, '4': 3, '5': 3, '6': 3 },
@@ -62,6 +151,17 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       '音樂': [3, 4, 5, 6],
       '美勞': [3, 4, 5, 6],
       '自然科學': [3, 4, 5, 6]
+    },
+    // 🆕 Phase 1: 科目可排年級規則 — 控制哪些科目可以排在哪些年級
+    subjectGradeRules: {
+      '生活': [1, 2],
+      '自然科學': [3, 4, 5, 6],
+      '音樂': [3, 4, 5, 6],
+      '美勞': [3, 4, 5, 6],
+      '社會': [3, 4, 5, 6],
+      '綜合活動': [3, 4, 5, 6],
+      '科技-資訊': [3, 4, 5, 6],
+      '語文-英語': [1, 2, 3, 4, 5, 6]
     }
   });
 
@@ -111,6 +211,12 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   const engineResult = ref(null);
   // 🔍 AI 診斷分析結果
   const engineAiAnalysis = ref([]);
+  const engineDiagnosticWarningDetails = ref([]);
+  const engineDiagnosticWarnings = computed(() => (
+    engineDiagnosticWarningDetails.value.length > 0
+      ? engineDiagnosticWarningDetails.value.map((item) => item.displayText).filter(Boolean)
+      : extractDiagnosticWarningLines(engineAiAnalysis.value)
+  ));
 
   // --- 🔄 排課進度狀態 (持久化輪詢) ---
   const enginePhase = ref(''); // QUEUED, PROCESSING, SOLVING, REPAIRING, FINALIZING, COMPLETED, FAILED
@@ -193,6 +299,12 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         '自然科學': [3, 4, 5, 6]
       };
       if (data.schoolInfo) {
+        // 🆕 Phase 1: Migration — if DB has no subjectGradeRules, generate from standardDomainSettings
+        const dbGradeRules = data.schoolInfo?.subjectGradeRules;
+        let mergedGradeRules = dbGradeRules && Object.keys(dbGradeRules).length > 0
+          ? dbGradeRules
+          : null;
+
         schoolInfo.value = {
           ...schoolInfo.value,
           ...data.schoolInfo,
@@ -203,8 +315,18 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           subjectClassroomGrades: {
             ...DEFAULT_SUBJECT_CLASSROOM_GRADES,
             ...(data.schoolInfo?.subjectClassroomGrades ?? {}),
-          }
+          },
+          // If DB already has subjectGradeRules, use it; will be filled by migration below if needed
+          subjectGradeRules: mergedGradeRules || schoolInfo.value.subjectGradeRules
         };
+      }
+
+      // 🆕 Phase 1: After loading standardDomainSettings, migrate subjectGradeRules if still empty
+      if (!schoolInfo.value.subjectGradeRules || Object.keys(schoolInfo.value.subjectGradeRules).length === 0) {
+        const migrated = migrateSubjectGradeRules(standardDomainSettings.value);
+        if (Object.keys(migrated).length > 0) {
+          schoolInfo.value.subjectGradeRules = migrated;
+        }
       }
 
       // 🌟 關鍵修復：從資料庫讀取教師資料時，強制將 JSON 字串解析回陣列
@@ -307,6 +429,13 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       } else if (!data.standardDomainSettings || data.standardDomainSettings.length === 0) {
         console.log('🌱 偵測到 108 課綱矩陣為空，使用初始預設值...');
         // 不覆蓋，保持 ref 初始值（L37-53 已定義正確結構）
+      }
+
+      // 🆕 Phase 1: subjectGradeRules 遷移邏輯
+      // 若 DB 沒有 subjectGradeRules，從 standardDomainSettings 產生初值
+      if (!schoolInfo.value.subjectGradeRules || Object.keys(schoolInfo.value.subjectGradeRules).length === 0) {
+        schoolInfo.value.subjectGradeRules = migrateSubjectGradeRules(standardDomainSettings.value);
+        console.log('🌱 從 standardDomainSettings 產生 subjectGradeRules 初值:', schoolInfo.value.subjectGradeRules);
       }
 
       // 🚀 修復：ai_settings 位於 data.schoolInfo.ai_settings（後端 /api/schedule 回傳格式）
@@ -925,27 +1054,15 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             enginePhase.value = 'FAILED';
             engineErrorMessage.value = data.result?.message || '排課引擎無法找到可行解 (INFEASIBLE)';
 
-            // 🔍 捕獲 AI 診斷分析資料
+            // 🔍 捕獲診斷資料；優先使用結構化 diagnosticWarnings
+            engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(data.result?.diagnosticWarnings);
             if (data.result && Array.isArray(data.result.aiAnalysis)) {
               engineAiAnalysis.value = data.result.aiAnalysis;
             }
 
-            // 🔍 若無 AI 分析，讀取 debug_infeasible_report.txt
-            if (engineAiAnalysis.value.length === 0) {
-              try {
-                const reportRes = await fetch(`${API_BASE}/debug-infeasible-report`);
-                if (reportRes.ok) {
-                  const reportData = await reportRes.json();
-                  const lines = (reportData.content || '').split('\n').filter(l => l.trim() && !l.startsWith('#') && !l.startsWith('---'));
-                  if (lines.length > 0) {
-                    engineAiAnalysis.value = lines.slice(0, 20);
-                  } else {
-                    engineAiAnalysis.value = ['⚠️ 排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。'];
-                  }
-                }
-              } catch (_) {
-                // 靜默忽略
-              }
+            // 🔍 若尚無可辨識警示，讀取 debug_infeasible_report.txt 萃取警示
+            if (engineDiagnosticWarnings.value.length === 0) {
+              engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
             }
 
             if (data.startedAt && data.finishedAt) {
@@ -969,9 +1086,13 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           engineFinishedAt.value = data.finishedAt;
           const errDetail = data.result?.error || data.progressMessage || '排課引擎執行失敗';
           engineErrorMessage.value = errDetail;
-          // 🔍 捕獲 AI 診斷分析資料
+          // 🔍 捕獲診斷分析資料
+          engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(data.result?.diagnosticWarnings);
           if (data.result && Array.isArray(data.result.aiAnalysis)) {
             engineAiAnalysis.value = data.result.aiAnalysis;
+          }
+          if (engineDiagnosticWarnings.value.length === 0) {
+            engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
           }
           reject(new Error(errDetail));
         } else {
@@ -1086,6 +1207,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     enginePollingActive.value = false;
     engineNetworkRetry.value = 0;
     engineAiAnalysis.value = [];
+    engineDiagnosticWarningDetails.value = [];
   };
 
   // 🚀 新增：根據 gradeSettings 同步 Class 記錄
@@ -1149,12 +1271,29 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
 
   const resetAllData = () => {
     schoolInfo.value = {
+      name: '',
       academic_year: '115', semester: '上學期',
       periodDefaults: { homeroom: 15, subject: 19, admin: 6 },
       gradeSettings: { '1': 3, '2': 3, '3': 3, '4': 3, '5': 3, '6': 3 },
       alternativeMatrix: { '1': [], '2': [], '3': [], '4': [], '5': [], '6': [] },
       classExceptions: [],
-      classroomLimits: { '自然科學': 3, '語文-英語': 3, '音樂': 3, '美勞': 3, '體育': 6, '資訊': 1  }
+      classroomLimits: { '自然科學': 3, '語文-英語': 3, '音樂': 3, '美勞': 3, '體育': 6, '資訊': 1 },
+      subjectClassroomGrades: {
+        '語文-英語': [2, 3, 4, 5, 6],
+        '音樂': [3, 4, 5, 6],
+        '美勞': [3, 4, 5, 6],
+        '自然科學': [3, 4, 5, 6]
+      },
+      subjectGradeRules: {
+        '生活': [1, 2],
+        '自然科學': [3, 4, 5, 6],
+        '音樂': [3, 4, 5, 6],
+        '美勞': [3, 4, 5, 6],
+        '社會': [3, 4, 5, 6],
+        '綜合活動': [3, 4, 5, 6],
+        '科技-資訊': [3, 4, 5, 6],
+        '語文-英語': [1, 2, 3, 4, 5, 6]
+      }
     };
     teachers.value = [];
     classes.value = [];
@@ -1169,7 +1308,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     isInitialized,
     schoolInfo, syncStatus, lastSavedTime, teachers, classes, specialCourses, classrooms, standardDomainSettings, allAvailableSubjects,
     teacherQuotas,
-    engineStatus, engineJobId, engineErrorMessage, engineResult, engineAiAnalysis,
+    engineStatus, engineJobId, engineErrorMessage, engineResult, engineAiAnalysis, engineDiagnosticWarnings, engineDiagnosticWarningDetails,
     // 新增：進度狀態欄位
     enginePhase, engineMessage, engineStartedAt, engineFinishedAt,
     engineElapsedSeconds, engineLastUpdated, enginePollingActive, engineNetworkRetry,

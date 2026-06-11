@@ -5,7 +5,8 @@
     "src",
     "constraints",
     "prisma",
-    "public"
+    "public",
+    "tests"
   ],
   "includeFiles": [
     ".editorconfig",
@@ -13,11 +14,10 @@
     ".gitignore",
     ".oxlintrc.json",
     ".prettierrc.json",
-    "PUBLIC_REPO_INDEX.md",
-    "README.md",
     "eslint.config.js",
     "index.html",
     "jsconfig.json",
+    "LICENSE.md",
     "package-lock.json",
     "package.json",
     "phase2_engine.py",
@@ -31,7 +31,8 @@
     "terminal_sanitizer.py",
     "config.py",
     "utils.py",
-    "vite.config.js"
+    "vite.config.js",
+    "vitest.config.js"
   ],
   "includeDocFiles": [
     "docs/DataDictionary.md",
@@ -42,11 +43,15 @@
     "tests"
   ],
   "targetOnlyFiles": [
+    "LICENSE.md",
+    "README.md",
     "PUBLIC_REPO_INDEX.md",
     "public-repo.manifest.json",
-    "scripts/public-repo-sync.mjs"
+    "scripts/public-repo-sync.mjs",
+    "src/services/publicSchedulerFallback.js"
   ],
   "ignoredRoots": [
+    ".cmp",
     ".agent",
     ".agents",
     ".claude",
@@ -60,7 +65,7 @@
     "__pycache__",
     "dist",
     "node_modules",
-    "tests",
+    "scratch",
     "venv"
   ],
   "ignoredPatterns": [

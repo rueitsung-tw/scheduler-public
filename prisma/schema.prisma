@@ -83,6 +83,7 @@ model CourseRequirement {
 // 6. 系統全域設定 (108 矩陣永不遺失)
 model SystemSetting {
   id                 Int    @id @default(1)
+  schoolName         String @default("")
   academic_year      String @default("115")
   semester           String @default("上學期")
   grade_settings     String
@@ -98,6 +99,8 @@ model SystemSetting {
   aiSystemSettings   String @default("{}")
   // 🆕 新增：科任科目分配專科教室之適用年級配置 (JSON String)
   subjectClassroomGrades String @default("{}")
+  // [Phase 1] 新增：科目可排年級規則 — 控制哪些科目可以排在哪些年級
+  subjectGradeRules String @default("{}")
 }
 
 // 8. 管理員使用者 (Setup Wizard 專用)

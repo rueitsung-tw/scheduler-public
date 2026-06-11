@@ -100,8 +100,13 @@ function compareCandidatePriority(a, b) {
   );
 }
 
-function buildCandidateId(className, fromSlot, toSlot) {
-  return `CAND-${normalizeText(className)}-D${fromSlot.day}P${fromSlot.period}-D${toSlot.day}P${toSlot.period}`;
+const ACTIONABLE_ISSUE_TYPES = new Set(['teacher', 'room', 'grade', 'multi_assignment'])
+
+let _candidateCounter = 0;
+
+function buildCandidateId() {
+  _candidateCounter += 1;
+  return `M-${String(_candidateCounter).padStart(6, '0')}`;
 }
 
 function buildPairKey(className, slotA, slotB) {
@@ -137,7 +142,7 @@ function buildCandidateImpactSummary(classReport, fromSlot, toSlot) {
 
 function buildCandidateObject(classReport, fromSlot, toSlot) {
   const className = normalizeText(classReport?.className);
-  const candidateId = buildCandidateId(className, fromSlot, toSlot);
+  const candidateId = buildCandidateId();
   return {
     candidateId,
     className,
@@ -182,6 +187,7 @@ function buildCandidateObject(classReport, fromSlot, toSlot) {
 }
 
 export function buildAiTuningCandidatePool(report, options = {}) {
+  _candidateCounter = 0;
   const classReports = Array.isArray(report?.classes) ? report.classes : [];
   const maxClasses = Number.isFinite(Number(options.maxClasses)) ? Number(options.maxClasses) : 3;
   const maxAnchorsPerClass = Number.isFinite(Number(options.maxAnchorsPerClass)) ? Number(options.maxAnchorsPerClass) : 4;
@@ -210,7 +216,7 @@ export function buildAiTuningCandidatePool(report, options = {}) {
       .filter((slot) => slot.entries.length > 0);
 
     const issueSlots = occupiedSlots
-      .filter((slot) => slot.issueCount > 0)
+      .filter((slot) => slot.issueCount > 0 && slot.issueTypes.some((type) => ACTIONABLE_ISSUE_TYPES.has(type)))
       .sort(compareSlotPriority)
       .slice(0, maxAnchorsPerClass);
 

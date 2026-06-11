@@ -1,4 +1,6 @@
 import { buildAiTuningCandidatePool } from '../services/aiTuningCandidates.js'
+import { normalizeSubject } from './subjectCanonical.js'
+import { getSubjectGradeValidation } from './gradeSubjectUtils.js'
 
 const EMPTY_CELL = '--'
 
@@ -24,10 +26,9 @@ export function getGradeFromClassName(className) {
   return match ? Number.parseInt(match[1], 10) : 0
 }
 
-export function normalizeSubject(subject) {
-  if (!subject) return ''
-  return String(subject).trim()
-}
+// re-export normalizeSubject so that external consumers (e.g. useTimetableConflicts)
+// continue to work without changing their import paths.
+export { normalizeSubject } from './subjectCanonical.js'
 
 export function normalizeTeacher(teacher) {
   if (!teacher) return ''
@@ -280,8 +281,8 @@ function isRoomCapacityExempt(subject, className, schoolInfo) {
     return !allowedGrades.includes(grade)
   }
 
-  const isEnglish = normalizedSubject.includes('英語') || normalizedSubject.toLowerCase().includes('english')
-  if (isEnglish && grade === 1) return true
+  // 英語是否使用專科教室由 schoolInfo.subjectClassroomGrades 決定
+  // 不再硬編碼排除 1 年級，避免與 standardDomainSettings/course_requirements 脫鉤
 
   const isMusicArtScience =
     normalizedSubject.includes('音樂') ||
@@ -294,29 +295,81 @@ function isRoomCapacityExempt(subject, className, schoolInfo) {
   return false
 }
 
+/** 判斷是否為導師負責的核心科目（語文-國語、數學）*/
+function isHomeroomCoreRequirement(required = {}) {
+  const subject = normalizeSubject(required.subject)
+  const defaultTeacher = String(required.defaultTeacher || '').trim()
+  return defaultTeacher === 'homeroom' && ['語文-國語', '國語', '數學'].includes(subject)
+}
+
+/** 當導師核心科目排課節數為 0 時，抑制需求差異假阳性 */
+function shouldSuppressRequirementDelta(required = {}, scheduled = 0) {
+  return isHomeroomCoreRequirement(required) && Number(scheduled) === 0
+}
+
+function getScheduledCountValue(scheduledCountMap, subject) {
+  if (!subject) return 0
+  if (scheduledCountMap instanceof Map) {
+    return scheduledCountMap.get(subject) || 0
+  }
+  if (scheduledCountMap && typeof scheduledCountMap === 'object') {
+    return Number(scheduledCountMap[subject]) || 0
+  }
+  return 0
+}
+
+function isEarlyGradeHealthRequirement(required = {}, classData = {}) {
+  const subject = normalizeSubject(required.subject)
+  const grade = Number(classData?.grade) || getGradeFromClassName(classData?.name || classData?.className || '')
+  return subject === '健康' && grade > 0 && grade <= 2
+}
+
+function shouldSuppressAiRequirementDelta(required = {}, scheduled = 0, scheduledCountMap = new Map(), classData = {}) {
+  if (shouldSuppressRequirementDelta(required, scheduled)) return true
+
+  const defaultTeacher = String(required.defaultTeacher || '').trim()
+  const hasHomeroomBlock = getScheduledCountValue(scheduledCountMap, '導師區塊') > 0
+  if (!hasHomeroomBlock) return false
+
+  if (defaultTeacher === 'homeroom') return true
+
+  return isEarlyGradeHealthRequirement(required, classData)
+}
+
+function buildRequirementSuppressionReason(required = {}, scheduledCountMap = new Map(), classData = {}) {
+  if (shouldSuppressRequirementDelta(required, 0)) {
+    return '導師核心科目缺漏由既有抑制規則忽略'
+  }
+
+  const defaultTeacher = String(required.defaultTeacher || '').trim()
+  if (defaultTeacher === 'homeroom' && getScheduledCountValue(scheduledCountMap, '導師區塊') > 0) {
+    return '已偵測導師區塊，導師科目缺漏不納入 AI 微調警示'
+  }
+
+  if (isEarlyGradeHealthRequirement(required, classData) && getScheduledCountValue(scheduledCountMap, '導師區塊') > 0) {
+    return '低年級健康課缺漏視為導師區塊後續手動調整，不納入 AI 微調警示'
+  }
+
+  return ''
+}
+
+/** 判斷教師名稱是否為虛擬/外聘教師 */
+function isVirtualTeacherName(name) {
+  return ['虛擬', '外聘', '待排'].some((keyword) => String(name || '').includes(keyword))
+}
+
+/** 當藝才班模式開啟且為虛擬教師時，抑制教師衝突 */
+function shouldSuppressTeacherConflict(teacher, classData, aiSettings = {}) {
+  return Boolean(aiSettings?.artsClassEnabled && classData?.isArtsClass && isVirtualTeacherName(teacher))
+}
+
 function getAllowedGradesForSubject(subject, schoolInfo) {
-  const normalizedSubject = normalizeSubject(subject)
-  if (!normalizedSubject) return null
-
-  const classroomGradesConfig = schoolInfo?.subjectClassroomGrades || {}
-  const matchedKey = Object.keys(classroomGradesConfig).find(
-    (key) => normalizedSubject.includes(key) || key.includes(normalizedSubject)
-  )
-
-  if (!matchedKey) return null
-
-  const allowedGrades = classroomGradesConfig[matchedKey]
-  if (!Array.isArray(allowedGrades)) return null
-
-  return allowedGrades
-    .map((value) => toNumber(value, 0))
-    .filter((value) => value > 0)
+  const validation = getSubjectGradeValidation(subject, 1, schoolInfo)
+  return Array.isArray(validation.allowedGrades) ? validation.allowedGrades : null
 }
 
 function isSubjectAllowedForGrade(subject, grade, schoolInfo) {
-  const allowedGrades = getAllowedGradesForSubject(subject, schoolInfo)
-  if (!allowedGrades) return true
-  return allowedGrades.includes(grade)
+  return getSubjectGradeValidation(subject, grade, schoolInfo).allowed
 }
 
 function buildRequirementMap(classData) {
@@ -389,7 +442,7 @@ function buildScheduledEntriesIndex(scheduleEntries) {
 }
 
 function analyzeClassTimetable(classData, context) {
-  const { bySlotWeek, classroomCapacityMap, schoolInfo } = context
+  const { bySlotWeek, classroomCapacityMap, schoolInfo, aiSettings, classSlotEntryMap } = context
   const className = String(classData.name || '').trim()
   const grade = getGradeFromClassName(className)
   const requirementMap = buildRequirementMap(classData)
@@ -397,11 +450,15 @@ function analyzeClassTimetable(classData, context) {
   const slotRows = []
   const scheduledCountMap = new Map()
   const requirementIssues = []
+  const rawRequirementIssues = []
+  const suppressedRequirementIssues = []
 
   for (let day = 1; day <= 5; day++) {
     for (let period = 1; period <= 7; period++) {
+      const slotKey = `${className}|${day}|${period}`
       const rawCell = classData?.timetable?.[day]?.[period] || classData?.timetable?.[String(day)]?.[String(period)]
-      const entries = expandTimetableCellEntries(className, day, period, rawCell)
+      const fallbackEntries = expandTimetableCellEntries(className, day, period, rawCell)
+      const entries = cloneEntries(classSlotEntryMap?.get(slotKey) || fallbackEntries)
       const issues = []
 
       const subjects = [...new Set(entries.map((entry) => normalizeSubject(entry.subject)).filter(Boolean))]
@@ -433,6 +490,9 @@ function analyzeClassTimetable(classData, context) {
 
         for (const entry of weekEntries) {
           for (const teacher of entry.teacherNames?.length ? entry.teacherNames : splitTeacherNames(entry.teacherName)) {
+            if (shouldSuppressTeacherConflict(teacher, classData, aiSettings)) {
+              continue
+            }
             const clashes = slotWeekEntries.filter(
               (other) => other.className !== className && (other.teacherNames || []).includes(teacher)
             )
@@ -542,17 +602,29 @@ function analyzeClassTimetable(classData, context) {
     const scheduled = scheduledCountMap.get(subject) || 0
     const delta = Math.round((scheduled - required.periods) * 100) / 100
     if (delta !== 0) {
-      requirementIssues.push({
+      const issue = {
         subject,
         required: required.periods,
         scheduled,
         delta,
         teacher: required.teacher,
+        defaultTeacher: required.defaultTeacher || '',
         severity: 'hard',
         message: delta < 0
           ? `少了 ${Math.abs(delta)} 節`
           : `多了 ${Math.abs(delta)} 節`,
-      })
+      }
+
+      rawRequirementIssues.push(issue)
+
+      if (shouldSuppressAiRequirementDelta(required, scheduled, scheduledCountMap, classData)) {
+        suppressedRequirementIssues.push({
+          ...issue,
+          suppressionReason: buildRequirementSuppressionReason(required, scheduledCountMap, classData),
+        })
+      } else {
+        requirementIssues.push(issue)
+      }
     }
   }
 
@@ -565,11 +637,15 @@ function analyzeClassTimetable(classData, context) {
     className,
     grade,
     requirementMap: Object.fromEntries(requirementMap.entries()),
+    rawRequirementIssues,
+    suppressedRequirementIssues,
     requirementIssues,
     issueSlots,
     slotRows,
     scheduledCountMap: Object.fromEntries(scheduledCountMap.entries()),
     topSubjects,
+    rawIssueCount: issueSlots.length + rawRequirementIssues.length,
+    suppressedRequirementIssueCount: suppressedRequirementIssues.length,
     issueCount: issueSlots.length + requirementIssues.length,
   }
 }
@@ -611,21 +687,84 @@ function buildTeacherLoadReport(classes, teachers, normalizedEntries) {
   return report.sort((a, b) => b.overload - a.overload)
 }
 
+function buildIssueDedupKey(issue) {
+  switch (issue.type) {
+    case 'teacher':
+      // 教師衝堂：同一位老師在同一時段（含 week）只算 1 筆
+      // message 格式: "教師 {name} 於第 {day} 天第 {period} 節同時出現在..."
+      return `teacher|${issue.day}|${issue.period}|${issue.week || ''}|${issue._dedupTeacher || ''}`
+    case 'room':
+      // 教室衝堂：同一間教室在同一時段只算 1 筆
+      return `room|${issue.day}|${issue.period}|${issue.week || ''}|${issue._dedupLocation || ''}`
+    case 'multi_assignment':
+      // 多課程配置：同班級同時段只算 1 筆
+      return `multi|${issue.className}|${issue.day}|${issue.period}`
+    case 'grade':
+      // 年級不適用：已天然唯一（每個 classReport 內不會重複）
+      return `grade|${issue.className}|${issue.day}|${issue.period}|${issue._dedupSubject || ''}`
+    case 'requirement':
+      // 需求差異：已在 classReport 層級天然唯一
+      return `requirement|${issue.className}|${issue.subject || ''}`
+    default:
+      return `${issue.type}|${issue.className}|${issue.day}|${issue.period}`
+  }
+}
+
+function deduplicateIssues(rawIssues) {
+  const seen = new Set()
+  const deduplicated = []
+  const byType = new Map()
+
+  for (const issue of rawIssues) {
+    const key = buildIssueDedupKey(issue)
+    if (!seen.has(key)) {
+      seen.add(key)
+      deduplicated.push(issue)
+      byType.set(issue.type, (byType.get(issue.type) || 0) + 1)
+    }
+  }
+
+  return { deduplicated, byType }
+}
+
 function buildIssueIndex(classReports) {
-  const issues = []
+  const rawIssues = []
+
+  // Extract teacher name and location info from message for dedup keys
+  const teacherNameRegex = /教師\s+(\S+)/
+  const roomNameRegex = /教室\s+(\S+)/
+
   for (const classReport of classReports) {
     for (const issue of classReport.issueSlots) {
       for (const detail of issue.issues) {
-        issues.push({
+        const baseIssue = {
           className: classReport.className,
           day: issue.day,
           period: issue.period,
           ...detail,
-        })
+        }
+
+        // Attach dedup metadata based on message content
+        if (detail.type === 'teacher') {
+          const match = detail.message.match(teacherNameRegex)
+          baseIssue._dedupTeacher = match ? match[1] : ''
+          // Extract week from the slot entries if available
+          baseIssue.week = issue.entries?.[0]?.week || 'both'
+        } else if (detail.type === 'room') {
+          const match = detail.message.match(roomNameRegex)
+          baseIssue._dedupLocation = match ? match[1] : ''
+          baseIssue.week = issue.entries?.[0]?.week || 'both'
+        } else if (detail.type === 'grade') {
+          // Extract subject from message: "科目 {subject} 不適用於..."
+          const subjectMatch = detail.message.match(/科目\s+(\S+)/)
+          baseIssue._dedupSubject = subjectMatch ? subjectMatch[1] : ''
+        }
+
+        rawIssues.push(baseIssue)
       }
     }
     for (const issue of classReport.requirementIssues) {
-      issues.push({
+      rawIssues.push({
         className: classReport.className,
         type: 'requirement',
         severity: issue.severity,
@@ -638,7 +777,10 @@ function buildIssueIndex(classReports) {
       })
     }
   }
-  return issues
+
+  const { deduplicated, byType } = deduplicateIssues(rawIssues)
+
+  return { raw: rawIssues, deduplicated, byType }
 }
 
 function buildSwapCandidates(classReports) {
@@ -729,6 +871,44 @@ function buildScheduledEntriesReport(entries) {
   return normalizeScheduleEntries(entries)
 }
 
+function buildGroupedEntries(entries) {
+  const grouped = new Map()
+  for (const entry of entries || []) {
+    const key = `${entry.className}|${entry.day}|${entry.period}|${entry.week}`
+    if (!grouped.has(key)) grouped.set(key, [])
+    grouped.get(key).push(entry)
+  }
+  return grouped
+}
+
+function buildClassSlotEntryMap(entries) {
+  const byClassSlot = new Map()
+  for (const entry of entries || []) {
+    const key = `${entry.className}|${entry.day}|${entry.period}`
+    if (!byClassSlot.has(key)) byClassSlot.set(key, [])
+    byClassSlot.get(key).push(entry)
+  }
+  return byClassSlot
+}
+
+function buildMergedScheduleEntries(scheduleEntries, classes) {
+  const explicitEntries = buildScheduledEntriesReport(scheduleEntries)
+  const timetableEntries = flattenClassTimetablesToEntries(classes)
+  const explicitGroups = buildGroupedEntries(explicitEntries)
+  const timetableGroups = buildGroupedEntries(timetableEntries)
+  const mergedGroups = new Map(timetableGroups)
+
+  for (const [key, entries] of explicitGroups.entries()) {
+    mergedGroups.set(key, entries)
+  }
+
+  const mergedEntries = [...mergedGroups.values()].flat()
+  return {
+    mergedEntries,
+    classSlotEntryMap: buildClassSlotEntryMap(mergedEntries),
+  }
+}
+
 export function buildScheduleAiReport({
   scheduleEntries = [],
   classes = [],
@@ -738,7 +918,9 @@ export function buildScheduleAiReport({
   aiSettings = {},
   engineMeta = {},
 }) {
-  const normalizedEntries = buildScheduledEntriesReport(scheduleEntries)
+  // Explicit schedule entries override timetable-derived entries for the same class/slot/week.
+  const { mergedEntries, classSlotEntryMap } = buildMergedScheduleEntries(scheduleEntries, classes)
+
   const classroomCapacityMap = new Map()
   for (const room of classrooms || []) {
     const subject = normalizeSubject(room.subject)
@@ -746,36 +928,46 @@ export function buildScheduleAiReport({
     classroomCapacityMap.set(subject, (classroomCapacityMap.get(subject) || 0) + 1)
   }
 
-  const { bySlotWeek } = buildScheduledEntriesIndex(normalizedEntries)
+  const { bySlotWeek } = buildScheduledEntriesIndex(mergedEntries)
   const classReports = (classes || []).map((classData) =>
     analyzeClassTimetable(classData, {
       bySlotWeek,
       classroomCapacityMap,
       schoolInfo,
+      aiSettings,
+      classSlotEntryMap,
     })
   )
 
-  const issueIndex = buildIssueIndex(classReports)
-  const teacherLoads = buildTeacherLoadReport(classes, teachers, normalizedEntries)
+  const { raw: rawIssues, deduplicated: dedupedIssues, byType: _byType } = buildIssueIndex(classReports)
+  const teacherLoads = buildTeacherLoadReport(classes, teachers, mergedEntries)
   const swapCandidates = buildSwapCandidates(classReports)
+  const suppressedRequirementIssueCount = classReports.reduce(
+    (sum, classReport) => sum + (classReport.suppressedRequirementIssueCount || 0),
+    0
+  )
   const { candidatePool, candidateMoves } = buildAiTuningCandidatePool({
     classes: classReports,
     summary: {
-      issueCount: issueIndex.length,
+      issueCount: dedupedIssues.length,
     },
   })
   const issueClasses = classReports.filter((classReport) => classReport.issueCount > 0)
+  const rawIssueClasses = classReports.filter((classReport) => (classReport.rawIssueCount || 0) > 0)
 
   const summary = {
     totalClasses: classes.length,
-    totalEntries: normalizedEntries.length,
+    totalEntries: mergedEntries.length,
     issueClassCount: issueClasses.length,
-    issueCount: issueIndex.length,
+    rawIssueClassCount: rawIssueClasses.length,
+    issueCount: dedupedIssues.length,
+    rawIssueCount: rawIssues.length + suppressedRequirementIssueCount,
+    suppressedRequirementIssueCount,
     teacherOverloadCount: teacherLoads.filter((item) => item.overload > 0).length,
     teacherOverloadTotal: teacherLoads
       .filter((item) => item.overload > 0)
       .reduce((sum, item) => sum + item.overload, 0),
-    issueSlotCount: issueIndex.filter((item) => item.day && item.period).length,
+    issueSlotCount: rawIssues.filter((item) => item.day && item.period).length,
     generatedAt: new Date().toISOString(),
   }
 
@@ -785,12 +977,12 @@ export function buildScheduleAiReport({
     engineMeta,
     summary,
     classes: classReports,
-    issues: issueIndex,
+    issues: rawIssues,
     teacherLoads,
     swapCandidates,
     candidatePool,
     candidateMoves,
-    rawSchedule: normalizedEntries,
+    rawSchedule: mergedEntries,
     schoolInfo,
     aiSettings,
   }
@@ -812,6 +1004,7 @@ export function buildScheduleAiMarkdown(report) {
   lines.push(`- 排課筆數：${report.summary.totalEntries}`)
   lines.push(`- 有問題班級：${report.summary.issueClassCount}`)
   lines.push(`- 問題總數：${report.summary.issueCount}`)
+  lines.push(`- 已抑制導師缺漏：${report.summary.suppressedRequirementIssueCount || 0}`)
   lines.push(`- 教師超載數：${report.summary.teacherOverloadCount}`)
   lines.push('')
 
@@ -822,6 +1015,8 @@ export function buildScheduleAiMarkdown(report) {
     ['排課筆數', String(report.summary.totalEntries)],
     ['有問題班級', String(report.summary.issueClassCount)],
     ['問題總數', String(report.summary.issueCount)],
+    ['原始問題總數', String(report.summary.rawIssueCount)],
+    ['已抑制導師缺漏', String(report.summary.suppressedRequirementIssueCount || 0)],
     ['教師超載數', String(report.summary.teacherOverloadCount)],
     ['教師超載總量', String(report.summary.teacherOverloadTotal)],
   ]))
@@ -858,6 +1053,7 @@ export function buildScheduleAiPromptMarkdown(report) {
   lines.push(`- 班級數：${report.summary.totalClasses}`)
   lines.push(`- 問題班級：${report.summary.issueClassCount}`)
   lines.push(`- 問題總數：${report.summary.issueCount}`)
+  lines.push(`- 已抑制導師缺漏：${report.summary.suppressedRequirementIssueCount || 0}`)
   lines.push(`- 教師超載數：${report.summary.teacherOverloadCount}`)
   lines.push('')
 

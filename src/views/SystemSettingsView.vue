@@ -5,6 +5,15 @@
     <div class="setting-card">
       <h3>(1) 基本資訊與班級規模</h3>
       <div class="form-row">
+        <label>學校名稱：</label>
+        <input
+          v-model.trim="scheduleStore.schoolInfo.name"
+          type="text"
+          placeholder="例如：東門國小"
+          @input="scheduleStore.markScheduleDirty"
+        />
+      </div>
+      <div class="form-row">
         <label>學年度：</label>
         <input v-model="scheduleStore.schoolInfo.academic_year" type="number" @input="scheduleStore.markScheduleDirty" />
         <label>學期：</label>
@@ -187,7 +196,7 @@
     <!-- 匯出/匯入設定 -->
     <div class="setting-card export-import-card">
       <h3>(7) 系統設定匯入 / 匯出</h3>
-      <p class="hint">💡 匯出包含學期資訊、班級規模、課綱矩陣、彈性課程、教師超鐘點、專科教室限制，以及 AI 鐵律開關。不包含課表內容與排程結果。</p>
+      <p class="hint">💡 匯出包含：學期資訊、班級規模、課綱矩陣、彈性課程、教師超鐘點、專科教室限制、科任科目年級專科教室使用設定、專科教室資料、AI 鐵律開關，以及教師資料與班級資料。不包含課表內容與排程結果。</p>
       <div class="ei-buttons">
         <button @click="handleExport" class="ei-btn export-btn">📤 匯出設定</button>
         <button @click="triggerImport" class="ei-btn import-btn">📥 匯入設定</button>
@@ -206,7 +215,7 @@
     <div class="setting-card">
       <h3>(8) 科任科目年級專科教室使用設定</h3>
       <p class="hint">💡 勾選特定年級表示該年級上此科目時「會被分派到專科教室上課」（會佔用教室容量且受到衝堂限制）。未勾選的年級則預設在原班級教室上課，不佔用專科教室限制。</p>
-      
+
       <div class="table-responsive">
         <table class="curriculum-table">
           <thead>
@@ -222,8 +231,8 @@
                 {{ subject.name }}
               </td>
               <td v-for="g in 6" :key="g">
-                <input 
-                  type="checkbox" 
+                <input
+                  type="checkbox"
                   :checked="isGradeEnabledForRoom(subject.name, g)"
                   @change="toggleGradeForRoom(subject.name, g)"
                 />
@@ -282,14 +291,17 @@ async function handleImport(event) {
     const text = await file.text()
     const data = parseImportFile(text)
 
-    if (data.teachers.length > 0 || data.standardDomainSettings.length > 0) {
-      if (!confirm('匯入將覆蓋目前設定（包含教師資料、課綱矩陣等）。確定繼續？')) return
+    const hasClassrooms = Array.isArray(data.classrooms) && data.classrooms.length > 0;
+    if (data.teachers.length > 0 || data.standardDomainSettings.length > 0 || hasClassrooms) {
+      const extra = hasClassrooms ? '、專科教室資料' : '';
+      if (!confirm(`匯入將覆蓋目前設定（包含教師資料、課綱矩陣${extra}）。確定繼續？`)) return
     }
 
     applyImport(data)
     scheduleStore.syncClassesFromGradeSettings()
 
-    eiMessage.value = '✅ 設定已匯入，請記得點擊「儲存所有教師與系統設定」以寫入資料庫'
+    const extraMsg = hasClassrooms ? '（包含專科教室資料）' : '';
+    eiMessage.value = `✅ 設定已匯入${extraMsg}，請記得點擊「儲存所有教師與系統設定」以寫入資料庫`
     eiType.value = 'success'
   } catch (e) {
     eiMessage.value = `❌ 匯入失敗：${e.message}`
@@ -391,7 +403,7 @@ const applyDefaultsToAllClasses = () => {
 
 // 🆕 科任科目分配專科教室之年級設定邏輯
 const filterSpecialSubjects = computed(() => {
-  return scheduleStore.standardDomainSettings.filter(sub => 
+  return scheduleStore.standardDomainSettings.filter(sub =>
     ['語文-英語', '音樂', '美勞', '自然科學', '資訊', '體育'].includes(sub.name)
   );
 });
@@ -416,7 +428,7 @@ const isGradeEnabledForRoom = (subjectName, grade) => {
 const toggleGradeForRoom = (subjectName, grade) => {
   const cfg = getSubjectClassroomGrades();
   if (!cfg[subjectName]) cfg[subjectName] = [];
-  
+
   const index = cfg[subjectName].indexOf(grade);
   if (index > -1) {
     cfg[subjectName].splice(index, 1); // 取消勾選

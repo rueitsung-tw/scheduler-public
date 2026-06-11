@@ -12,6 +12,7 @@ base_rules.py — 排課系統基礎建模規則
 不依賴：OR-Tools 以外的外部模組
 """
 
+import terminal_sanitizer
 import re
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
 
@@ -35,7 +36,7 @@ def create_schedule_vars_and_course_demands(model, classes_data, schedule):
         c_name = cls.get("name")
         reqs = cls.get("course_requirements", [])
         total_needed_for_class = 0
-        # 🔧 去重機制：防止同一班級的多筆「交替」課程需求被重複計算
+        # [FIX] 去重機制：防止同一班級的多筆「交替」課程需求被重複計算
         # key: (班級, 交替科目) -> 避免因音樂老師和美勞老師各一筆而导致需求節數翻倍
         seen_alternating = set()
 
@@ -45,17 +46,17 @@ def create_schedule_vars_and_course_demands(model, classes_data, schedule):
             t_name = req.get("teacher_name") or req.get("teacher")
 
             if not t_name:
-                print(f"⚠️ [警告] 班級 {c_name} 的 {subject} 沒有指派老師！這會導致該科無法排課。")
+                print(f"[WARN] [警告] 班級 {c_name} 的 {subject} 沒有指派老師！這會導致該科無法排課。")
                 continue
             if periods_needed <= 0:
                 continue
 
-            # 🔧 交替課去重：同一班級同一名交替科目只處理第一筆（通常是音樂老師那筆）
+            # [FIX] 交替課去重：同一班級同一名交替科目只處理第一筆（通常是音樂老師那筆）
             # 第二筆（美勞老師）直接跳過，因為變數和約束已在第一筆建立
             if "交替" in subject:
                 alt_key = (c_name, subject)
                 if alt_key in seen_alternating:
-                    print(f"  ⏭️ [交替去重] 跳過 {c_name} 的重複交替需求: {subject} ({t_name})")
+                    print(f"  [SKIP] [交替去重] 跳過 {c_name} 的重複交替需求: {subject} ({t_name})")
                     continue
                 seen_alternating.add(alt_key)
 
@@ -69,12 +70,12 @@ def create_schedule_vars_and_course_demands(model, classes_data, schedule):
 
             model.Add(sum(vars_for_this_req) == periods_needed)
 
-            # ✅ 重構後：「音樂美勞_交替」只建立一組變數（以主老師 teacher_name 為 key）
+            # [OK] 重構後：「音樂美勞_交替」只建立一組變數（以主老師 teacher_name 為 key）
             # 實際授課老師由 is_music_odd 方向變數決定，不再為美勞老師建立獨立 BoolVar
             # 這避免了同一班級同一 subject 出現兩組交替變數的問題
 
         raw_grade = cls.get("grade")
-        print(f"📊 [檢查] 班級 {c_name} (前端傳入年級: {raw_grade}) | 本週總需求: {total_needed_for_class} 節")
+        print(f"[INFO] [檢查] 班級 {c_name} (前端傳入年級: {raw_grade}) | 本週總需求: {total_needed_for_class} 節")
 
 
 def create_alternating_vars(model, classes_data):
@@ -120,7 +121,21 @@ def create_alternating_vars(model, classes_data):
             # 若為健/s等單一老師授課，art_t 默認與 music_t 相同
             art_t    = req.get("teacher_art", "") or req.get("teacher_partner", "") or t_name
             raw_grade = cls.get("grade")
-            group_id = req.get("pair_group_id") or f"g_{music_t}_{art_t}_{raw_grade}"
+
+            # [20260610-3 Task 1] pair_group_id 格式修正：
+            # - 音美交替（含"音樂"/"美勞"/"藝術"）：不含年級，跨年級共用同一組
+            # - 泛型交替（如健/s、s/社）：保留年級作用域
+            is_music_art = any(kw in subj for kw in ("音樂", "美勞", "美術", "藝術")) or \
+                           (req.get("teacher_music") and req.get("teacher_art"))
+
+            if req.get("pair_group_id"):
+                group_id = req.get("pair_group_id")
+            elif is_music_art:
+                # 音美交替：不含 grade，跨年級同組老師共用同一 pair_group_id
+                group_id = f"g_{music_t}_{art_t}"
+            else:
+                # 泛型交替：保留 grade 作用域
+                group_id = f"g_{music_t}_{art_t}_{raw_grade}"
 
             safe_name = c_name.replace("年", "").replace("班", "")
             # 使變量名稱具備科目唯一性，避免多個不同交替類型（如音美、健s）使用相同變量而衝突
@@ -129,12 +144,12 @@ def create_alternating_vars(model, classes_data):
 
             # 音樂/主老師 key（與 schedule dict key 一致）
             alternating_class_is_music_odd[(c_name, music_t)] = var
-            print(f"🔄 創建單雙週變量: {c_name} + {music_t} ({subj}) → {var}")
+            print(f"[WARN] 創建單雙週變量: {c_name} + {music_t} ({subj}) → {var}")
 
             # 美勞/副老師也指向同一變數（方向共用）
             if art_t and art_t != music_t:
                 alternating_class_is_music_odd[(c_name, art_t)] = var
-                print(f"🔄 副老師綁定同一變量: {c_name} + {art_t} → {var}")
+                print(f"[WARN] 副老師綁定同一變量: {c_name} + {art_t} → {var}")
 
             # 群組資料
             alternating_group_map.setdefault(group_id, [])
@@ -145,7 +160,7 @@ def create_alternating_vars(model, classes_data):
 
             seen_alt_classes.add(alt_type_key)
 
-    print(f"\n📊 [交替群組] 共 {len(alternating_group_map)} 組師資配對：")
+    print(f"\n[INFO] [交替群組] 共 {len(alternating_group_map)} 組師資配對：")
     for gid, members in alternating_group_map.items():
         print(f"   {gid}: {members}")
 
@@ -170,7 +185,7 @@ def apply_preallocation_locks(model, classes_data, schedule):
     Returns:
         tuple: (locked_count: int, locked_vars: set, lock_audit_log: list[dict])
     """
-    print("\n🔒 [鎖定掃描] 開始掃描手動預排鎖定...")
+    print("\n[LOCK] [鎖定掃描] 開始掃描手動預排鎖定...")
     locked_count = 0
     lock_audit_log = []
     locked_vars = set()
@@ -192,27 +207,29 @@ def apply_preallocation_locks(model, classes_data, schedule):
     # 輸出 Lock Audit 報告
     ghost_candidates = [e for e in lock_audit_log if e["verdict"] == "GHOST_LOCK_CANDIDATE"]
     with open('debug_lock_audit.txt', 'w', encoding='utf-8') as f:
-        f.write("=== 🔍 Lock Audit Report ===\n\n")
-        f.write(f"總計 isLocked 格子：{len(lock_audit_log)} 個\n")
-        f.write(f"成功匹配（有效鎖）：{len(lock_audit_log) - len(ghost_candidates)} 個\n")
-        f.write(f"幽靈鎖候選（無法匹配）：{len(ghost_candidates)} 個\n\n")
+        write = lambda text: f.write(terminal_sanitizer.sanitize_text(text))
+
+        write("=== [DEBUG] Lock Audit Report ===\n\n")
+        write(f"總計 isLocked 格子：{len(lock_audit_log)} 個\n")
+        write(f"成功匹配（有效鎖）：{len(lock_audit_log) - len(ghost_candidates)} 個\n")
+        write(f"幽靈鎖候選（無法匹配）：{len(ghost_candidates)} 個\n\n")
 
         if ghost_candidates:
-            f.write("⚠️ 以下為幽靈鎖候選（isLocked=true 但 solver 找不到對應的課程需求）：\n")
+            write("[WARN] 以下為幽靈鎖候選（isLocked=true 但 solver 找不到對應的課程需求）：\n")
             for e in ghost_candidates:
-                f.write(f"  - {e['class']} 第{e['day']}天第{e['period']}節：subject={e['subject']}, teacher={e['teacher']}\n")
-            f.write("\n這些格子目前不會鎖定任何變數，但若日後加入課程需求後可能造成衝突。\n")
+                write(f"  - {e['class']} 第{e['day']}天第{e['period']}節：subject={e['subject']}, teacher={e['teacher']}\n")
+            write("\n這些格子目前不會鎖定任何變數，但若日後加入課程需求後可能造成衝突。\n")
 
-        f.write("\n=== 完整稽核明細 ===\n")
+        write("\n=== 完整稽核明細 ===\n")
         for e in lock_audit_log:
-            f.write(f"[{e['verdict']}] {e['class']} 第{e['day']}天第{e['period']}節 | {e['subject']} / {e['teacher']} | 匹配變數: {e['match_count']} 個\n")
+            write(f"[{e['verdict']}] {e['class']} 第{e['day']}天第{e['period']}節 | {e['subject']} / {e['teacher']} | 匹配變數: {e['match_count']} 個\n")
 
     if len(locked_vars) > 0:
-        print(f"\n✅ 成功載入並鎖定 {len(locked_vars)} 堂手動預排課程！")
-        print(f"📋 [Lock Audit] 稽核報告已輸出至 debug_lock_audit.txt（幽靈鎖候選: {len(ghost_candidates)} 個）")
+        print(f"\n[OK] 成功載入並鎖定 {len(locked_vars)} 堂手動預排課程！")
+        print(f"[LOG] [Lock Audit] 稽核報告已輸出至 debug_lock_audit.txt（幽靈鎖候選: {len(ghost_candidates)} 個）")
     else:
-        print(f"\n⚪ [鎖定掃描] 未偵測到任何手動鎖定時段")
-        print(f"📋 [Lock Audit] 稽核報告已輸出至 debug_lock_audit.txt（幽靈鎖候選: {len(ghost_candidates)} 個）")
+        print(f"\n [鎖定掃描] 未偵測到任何手動鎖定時段")
+        print(f"[LOG] [Lock Audit] 稽核報告已輸出至 debug_lock_audit.txt（幽靈鎖候選: {len(ghost_candidates)} 個）")
 
     return len(locked_vars), locked_vars, lock_audit_log
 
@@ -250,9 +267,9 @@ def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule,
         locked_vars.add(match_vars[0])
         for ov in other_vars:
             model.Add(ov == 0)
-        print(f"  🔒 [手動鎖定] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})")
+        print(f"  [LOCK] [手動鎖定] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})")
     else:
-        print(f"  👻 [幽靈鎖跳過] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})：無對應課程需求，已略過")
+        print(f"   [幽靈鎖跳過] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})：無對應課程需求，已略過")
 
 
 def _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars):

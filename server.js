@@ -18,7 +18,16 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { buildScheduleAiReport } from './src/utils/scheduleAiReport.js';
+import { validateRepairHardConstraints } from './src/utils/repairHardConstraints.js';
 import { buildAiTuningPromptBundle } from './src/services/aiTuningPrompt.js';
+import { buildInfeasibleAnalysisBundle } from './src/services/aiInfeasibleAnalysisBundle.js';
+import { buildAiInfeasibleAnalysisPrompt, validateAiInfeasibleAnalysisResponse } from './src/services/aiInfeasibleAnalysisPrompt.js';
+import {
+    buildAiErrorDetails,
+    getReportCandidateIds,
+    validateAiCandidateSelections as validateAiCandidateSelectionsFromResponse,
+    validateCandidatePoolConsistency,
+} from './src/services/aiTuningResponseValidation.js';
 
 /**
  * Runtime contract:
@@ -143,7 +152,7 @@ function resolvePythonExecutable() {
     // eslint-disable-next-line no-undef
     const envPython = process.env.SCHEDULER_PYTHON;
     if (envPython) {
-        console.log(`🐍 Python Resolver: 使用 SCHEDULER_PYTHON=${envPython}`);
+        console.log(`[INFO] Python Resolver: 使用 SCHEDULER_PYTHON=${envPython}`);
         return envPython;
     }
 
@@ -158,7 +167,7 @@ function resolvePythonExecutable() {
     for (const candidate of venvCandidates) {
         const venvPath = path.join(__dirname, candidate);
         if (fs.existsSync(venvPath)) {
-            console.log(`🐍 Python Resolver: 使用 venv ${venvPath}`);
+            console.log(`[INFO] Python Resolver: 使用 venv ${venvPath}`);
             return venvPath;
         }
     }
@@ -172,7 +181,7 @@ function resolvePythonExecutable() {
         try {
             const testCmd = cmd === 'py' ? '"py" -3 --version' : `"${cmd}" --version`;
             execSync(testCmd, { stdio: 'ignore', timeout: 5000 });
-            console.log(`🐍 Python Resolver: 使用系統 ${cmd}`);
+            console.log(`[INFO] Python Resolver: 使用系統 ${cmd}`);
             return cmd;
         } catch {
             // 繼續嘗試下一個
@@ -193,7 +202,7 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
     const pythonExe = resolvePythonExecutable();
     if (!pythonExe) {
         const errorMsg = [
-            `❌ 找不到可用的 Python 執行器！`,
+            `[ERROR] 找不到可用的 Python 執行器！`,
             `請確認以下任一條件：`,
             `  1. 設定環境變數 SCHEDULER_PYTHON（例如 /usr/bin/python3 或 C:\\Python39\\python.exe）`,
             `  2. 在專案根目錄建立 venv：python3 -m venv venv && source venv/bin/activate`,
@@ -205,7 +214,7 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
 
     const scriptPath = getScriptAbsolutePath(scriptName);
     if (!fs.existsSync(scriptPath)) {
-        const errorMsg = `❌ Python 腳本不存在: ${scriptPath}`;
+        const errorMsg = `[ERROR] Python 腳本不存在: ${scriptPath}`;
         console.error(errorMsg);
         throw new Error(errorMsg);
     }
@@ -215,8 +224,21 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
         ? ['-3', scriptPath, ...args]
         : [scriptPath, ...args];
 
-    console.log(`🚀 Spawn ${label}: ${pythonExe} ${spawnArgs.join(' ')}`);
-    return spawn(pythonExe, spawnArgs);
+    // 注入 UTF-8 環境變數，避免 Windows cp950 編碼問題
+    const utf8Env = {
+        ...process.env,
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8',
+    };
+
+    console.log(`[INFO] Spawn ${label}: ${pythonExe} ${spawnArgs.join(' ')}`);
+    const child = spawn(pythonExe, spawnArgs, { env: utf8Env });
+
+    // 設定 stdout/stderr 為 UTF-8 文字模式，避免 buffer.toString() 使用預設編碼
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+
+    return child;
 }
 
 // 👇 使用 Adapter 來初始化 Prisma
@@ -349,7 +371,7 @@ app.post('/api/save-all', async (req, res) => {
                         homeroomTeacherId = mappedId;
                         usedTeacherIds.add(mappedId);
                     } else {
-                        console.warn(`⚠️ [防呆攔截] 導師「${htName}」重複指派，已取消對班級「${cls.name}」的綁定以防崩潰。`);
+                        console.warn(`[WARN] [防呆攔截] 導師「${htName}」重複指派，已取消對班級「${cls.name}」的綁定以防崩潰。`);
                     }
                 }
             }
@@ -396,9 +418,16 @@ app.post('/api/save-all', async (req, res) => {
              : "115";
 
          if (schoolInfo) {
+            // 保留既有的 schoolName：若前端已傳入 schoolInfo.name 則使用，否則沿用 DB 既有值
+            const existingSetting = await prisma.systemSetting.findUnique({ where: { id: 1 } });
+            const persistedSchoolName = (schoolInfo.name !== undefined && schoolInfo.name !== '')
+                ? schoolInfo.name
+                : (existingSetting ? existingSetting.schoolName : '');
+
              await prisma.systemSetting.upsert({
                  where: { id: 1 },
                  update: {
+                     schoolName: persistedSchoolName,
                      academic_year: academicYear,
                      semester: schoolInfo.semester || "上學期",
                     grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
@@ -408,10 +437,12 @@ app.post('/api/save-all', async (req, res) => {
                     class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
                     ai_settings: JSON.stringify(aiSettings || {}),
                     classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
-                    subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {})
+                    subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
+                    subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
                 },
                  create: {
                      id: 1,
+                     schoolName: persistedSchoolName,
                      academic_year: academicYear,
                      semester: schoolInfo.semester || "上學期",
                     grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
@@ -420,7 +451,9 @@ app.post('/api/save-all', async (req, res) => {
                     standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
                     class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
                     ai_settings: JSON.stringify(aiSettings || {}),
-                    classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {})
+                    classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
+                    subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
+                    subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
                 }
             });
         }
@@ -473,10 +506,10 @@ app.post('/api/save-all', async (req, res) => {
             }
         }
 
-        console.log(`✅ 全面儲存成功：${teachers.length} 位教師、${classes.length} 個班級`);
+        console.log(`[OK] 全面儲存成功：${teachers.length} 位教師、${classes.length} 個班級`);
         res.json({ success: true, message: '儲存成功' });
     } catch (error) {
-        console.error('❌ 全面儲存失敗:', error);
+        console.error('[ERROR] 全面儲存失敗:', error);
         res.status(500).json({ error: '儲存失敗', details: error.message });
     }
 });
@@ -525,6 +558,7 @@ app.get('/api/schedule', async (req, res) => {
         // 將資料庫格式還原回前端需要的 JSON 格式
         res.json({
             schoolInfo: systemSetting ? {
+                name: systemSetting.schoolName || '',
                 academic_year: systemSetting.academic_year,
                 semester: systemSetting.semester,
                 gradeSettings: JSON.parse(systemSetting.grade_settings || '{}'),
@@ -537,6 +571,7 @@ app.get('/api/schedule', async (req, res) => {
                 },
                 ai_settings: JSON.parse(systemSetting.ai_settings || '{}'),
                 subjectClassroomGrades: JSON.parse(systemSetting.subjectClassroomGrades || '{}'),
+                subjectGradeRules: JSON.parse(systemSetting.subjectGradeRules || '{}'),
              } : null,
             standardDomainSettings: systemSetting ? JSON.parse(systemSetting.standard_domain_settings || '[]') : [],
             teachers: teachers.map(t => ({
@@ -577,12 +612,18 @@ app.get('/api/schedule', async (req, res) => {
 // ==========================================
 
 // 獲取系統初始化狀態
+// 用途：只給初始化流程判斷用 (router gate)
+// 原則：不再把 schoolName 當主系統名稱來源，僅作為安裝快照 fallback
 app.get('/api/system/status', async (req, res) => {
     try {
         const status = await prisma.systemStatus.findUnique({ where: { id: 1 } });
+        const isSetupComplete = status ? status.isSetupComplete : false;
         res.json({
-            isSetupComplete: status ? status.isSetupComplete : false,
-            schoolName: status ? status.schoolName : ''
+            isSetupComplete,
+            // setupSnapshot 僅供安裝紀錄 / fallback 用途，非主系統名稱來源
+            setupSnapshot: isSetupComplete && status?.schoolName
+                ? { schoolName: status.schoolName }
+                : null
         });
     } catch {
         res.status(500).json({ error: '讀取系統狀態失敗' });
@@ -619,7 +660,35 @@ app.post('/api/system/setup', async (req, res) => {
                 }
             });
 
-            // 3. 更新系統狀態
+            // 3. 寫入正式學校名稱到 SystemSetting
+            const existingSetting = await tx.systemSetting.findUnique({ where: { id: 1 } });
+            if (existingSetting) {
+                await tx.systemSetting.update({
+                    where: { id: 1 },
+                    data: { schoolName }
+                });
+            } else {
+                await tx.systemSetting.create({
+                    data: {
+                        id: 1,
+                        schoolName,
+                        academic_year: '115',
+                        semester: '上學期',
+                        grade_settings: '{}',
+                        period_defaults: '{}',
+                        alternative_matrix: '{}',
+                        standard_domain_settings: '[]',
+                        class_exceptions: '[]',
+                        ai_settings: '{}',
+                        classroom_limits: '{}',
+                        aiSystemSettings: '{}',
+                        subjectClassroomGrades: '{}',
+                        subjectGradeRules: '{}'
+                    }
+                });
+            }
+
+            // 4. 更新系統狀態
             if (existingStatus) {
                 await tx.systemStatus.update({
                     where: { id: 1 },
@@ -639,10 +708,31 @@ app.post('/api/system/setup', async (req, res) => {
             }
         });
 
-        console.log(`✅ 系統初始化成功：學校=${schoolName}, 管理員=${username}`);
-        res.json({ success: true, message: '系統初始化成功' });
+        console.log(`[OK] 系統初始化成功：學校=${schoolName}, 管理員=${username}`);
+        // 回應格式對齊 API 契約
+        res.json({
+            success: true,
+            setupCompleted: true,
+            system: {
+                schoolName
+            },
+            adminUser: {
+                username,
+                role: 'admin',
+                loginEnabled: false
+            }
+        });
     } catch (error) {
-        console.error('❌ 系統初始化失敗:', error);
+        console.error('[ERROR] 系統初始化失敗:', error);
+        // 檢查是否因為已初始化而失敗
+        const existingStatus = await prisma.systemStatus.findUnique({ where: { id: 1 } });
+        if (existingStatus && existingStatus.isSetupComplete) {
+            return res.status(400).json({
+                success: false,
+                error: 'SYSTEM_ALREADY_INITIALIZED',
+                message: '系統已完成初始化'
+            });
+        }
         res.status(500).json({ error: '初始化失敗', details: error.message });
     }
 });
@@ -660,7 +750,7 @@ app.get('/api/ai-system-settings', async (req, res) => {
             : { enabled: false, serviceType: 'ollama', apiUrl: '', model: '', systemPrompt: '' };
         res.json(aiSystemSettings);
     } catch (error) {
-        console.error('❌ 讀取 AI 系統設定失敗:', error);
+        console.error('[ERROR] 讀取 AI 系統設定失敗:', error);
         res.status(500).json({ error: '讀取 AI 系統設定失敗' });
     }
 });
@@ -699,10 +789,10 @@ app.put('/api/ai-system-settings', async (req, res) => {
             });
         }
 
-        console.log('✅ AI 系統設定已儲存');
+        console.log('[OK] AI 系統設定已儲存');
         res.json({ success: true, message: 'AI 系統設定已儲存' });
     } catch (error) {
-        console.error('❌ 儲存 AI 系統設定失敗:', error);
+        console.error('[ERROR] 儲存 AI 系統設定失敗:', error);
         res.status(500).json({ error: '儲存 AI 系統設定失敗', details: error.message });
     }
 });
@@ -763,7 +853,7 @@ app.post('/api/ai-test-connection', async (req, res) => {
             data,
         });
     } catch (error) {
-        console.error('❌ AI 連線測試失敗:', error);
+        console.error('[ERROR] AI 連線測試失敗:', error);
         res.status(502).json({
             error: 'AI 連線測試失敗',
             details: error.message,
@@ -782,7 +872,8 @@ function normalizeAiServiceType(serviceType) {
 }
 
 function extractAssistantText(data) {
-    return data?.choices?.[0]?.message?.content
+    const message = data?.choices?.[0]?.message;
+    const content = message?.content
         || data?.choices?.[0]?.text
         || data?.message?.content
         || data?.message
@@ -790,6 +881,9 @@ function extractAssistantText(data) {
         || data?.response
         || data?.rawText
         || '';
+    const reasoningContent = message?.reasoning_content || data?.choices?.[0]?.reasoning_content || '';
+    const finishReason = data?.choices?.[0]?.finish_reason || '';
+    return { content, reasoningContent, finishReason };
 }
 
 function parseStrictJsonFromText(text) {
@@ -840,6 +934,193 @@ function createAiHttpError(status, code, message, details = '') {
     return error;
 }
 
+async function resolveAiRuntimeSettings(clientConnectionSettings = {}) {
+    const systemSetting = await prisma.systemSetting.findUnique({ where: { id: 1 } });
+    const aiSystemSettings = systemSetting && systemSetting.aiSystemSettings
+        ? JSON.parse(systemSetting.aiSystemSettings)
+        : {
+            enabled: false,
+            serviceType: 'ollama',
+            apiUrl: '',
+            model: '',
+            systemPrompt: '',
+            disableThinking: true,
+            maxOutputTokens: 8192,
+            temperature: 0,
+        };
+
+    const resolvedAiSettings = {
+        ...aiSystemSettings,
+        ...(clientConnectionSettings && typeof clientConnectionSettings === 'object' ? {
+            enabled: clientConnectionSettings.enabled ?? aiSystemSettings.enabled,
+            serviceType: clientConnectionSettings.serviceType ?? aiSystemSettings.serviceType,
+            apiUrl: clientConnectionSettings.apiUrl ?? aiSystemSettings.apiUrl,
+            model: clientConnectionSettings.model ?? aiSystemSettings.model,
+            systemPrompt: clientConnectionSettings.systemPrompt ?? aiSystemSettings.systemPrompt,
+            disableThinking: clientConnectionSettings.disableThinking ?? aiSystemSettings.disableThinking,
+            maxOutputTokens: clientConnectionSettings.maxOutputTokens ?? aiSystemSettings.maxOutputTokens,
+            temperature: clientConnectionSettings.temperature ?? aiSystemSettings.temperature,
+        } : {}),
+    };
+
+    if (!resolvedAiSettings.enabled) {
+        throw createAiHttpError(400, 'AI_DISABLED', 'AI 功能尚未啟用');
+    }
+
+    const serviceType = normalizeAiServiceType(resolvedAiSettings.serviceType);
+    const targetUrl = String(resolvedAiSettings.apiUrl || '').trim();
+    const model = String(resolvedAiSettings.model || '').trim() || 'qwen3.6:27b';
+    if (!targetUrl) {
+        throw createAiHttpError(400, 'AI_API_URL_MISSING', 'AI API URL 尚未設定');
+    }
+
+    const disableThinking = resolvedAiSettings.disableThinking !== false;
+    const maxOutputTokens = Number.isFinite(Number(resolvedAiSettings.maxOutputTokens)) && Number(resolvedAiSettings.maxOutputTokens) > 0
+        ? Number(resolvedAiSettings.maxOutputTokens)
+        : 8192;
+    const temperature = Number.isFinite(Number(resolvedAiSettings.temperature))
+        ? Number(resolvedAiSettings.temperature)
+        : 0;
+
+    return {
+        resolvedAiSettings,
+        serviceType,
+        targetUrl,
+        model,
+        disableThinking,
+        maxOutputTokens,
+        temperature,
+    };
+}
+
+async function invokeAiJsonEndpoint({
+    serviceType,
+    targetUrl,
+    model,
+    systemPrompt,
+    userPrompt,
+    disableThinking,
+    maxOutputTokens,
+    temperature,
+    abortSignal = null,
+}) {
+    let finalSystemPrompt = systemPrompt;
+    let finalUserPrompt = userPrompt;
+    if (disableThinking && serviceType !== 'ollama') {
+        const noThinkHeader = [
+            '/no_think',
+            'Do not think. Do not explain. Return final JSON only.',
+            '不要輸出 reasoning、Markdown 或說明文字，只輸出最後 JSON。',
+        ].join('\n');
+        finalSystemPrompt = `${noThinkHeader}\n${systemPrompt}`;
+        finalUserPrompt = `${noThinkHeader}\n${userPrompt}`;
+    }
+
+    const upstreamPayload = serviceType === 'ollama'
+        ? {
+            model,
+            prompt: `${finalSystemPrompt}\n\n${finalUserPrompt}`,
+            stream: false,
+            options: {
+                temperature,
+                num_predict: maxOutputTokens,
+            },
+        }
+        : {
+            model,
+            messages: [
+                { role: 'system', content: finalSystemPrompt },
+                { role: 'user', content: finalUserPrompt },
+            ],
+            stream: false,
+            temperature,
+            max_tokens: maxOutputTokens,
+        };
+
+    const upstreamController = new AbortController();
+    if (abortSignal) {
+        if (abortSignal.aborted) {
+            upstreamController.abort();
+        } else {
+            abortSignal.addEventListener('abort', () => upstreamController.abort(), { once: true });
+        }
+    }
+    const upstreamTimer = setTimeout(() => upstreamController.abort(), AI_TUNING_TIMEOUT_MS);
+    let upstreamResponse;
+    try {
+        upstreamResponse = await fetch(targetUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(upstreamPayload),
+            signal: upstreamController.signal,
+        });
+    } finally {
+        clearTimeout(upstreamTimer);
+    }
+
+    const rawText = await upstreamResponse.text();
+    let upstreamData = {};
+    if (rawText) {
+        try {
+            upstreamData = JSON.parse(rawText);
+        } catch {
+            upstreamData = { rawText };
+        }
+    }
+
+    if (!upstreamResponse.ok) {
+        const errorDetail = typeof extractAssistantText(upstreamData)?.content === 'string'
+            ? extractAssistantText(upstreamData).content
+            : (rawText || `HTTP ${upstreamResponse.status}`);
+        throw createAiHttpError(
+            upstreamResponse.status,
+            'AI_UPSTREAM_ERROR',
+            'AI 上游回應失敗',
+            errorDetail,
+        );
+    }
+
+    const { content: assistantContent, reasoningContent, finishReason } = extractAssistantText(upstreamData);
+    if (!assistantContent || assistantContent.trim() === '') {
+        const detail = reasoningContent ? `reasoning_content 長度 ${reasoningContent.length}（Thinking 模式未關閉）` : '完全無輸出';
+        const code = finishReason === 'length' ? 'AI_UPSTREAM_OUTPUT_TRUNCATED' : 'AI_UPSTREAM_OUTPUT_EMPTY';
+        const message = finishReason === 'length'
+            ? '本地模型輸出被截斷：請調高 max_tokens 或縮小 Prompt 範圍'
+            : '本地模型回應內容為空：請確認 Qwen Thinking 模式已關閉（/no_think）';
+        throw createAiHttpError(500, code, message, detail);
+    }
+
+    if (finishReason === 'length') {
+        throw createAiHttpError(
+            500,
+            'AI_UPSTREAM_OUTPUT_TRUNCATED',
+            '本地模型輸出被截斷：請調高 max_tokens 或縮小 Prompt 範圍',
+            `content 長度 ${assistantContent.length}, finish_reason=length`,
+        );
+    }
+
+    let parsed;
+    try {
+        parsed = parseStrictJsonFromText(assistantContent);
+    } catch (_parseError) {
+        throw createAiHttpError(
+            500,
+            'AI_UPSTREAM_INVALID_JSON',
+            '本地模型回應不是有效 JSON：請檢查 System Prompt 或調整 temperature=0',
+            assistantContent.slice(0, 500),
+        );
+    }
+
+    return {
+        parsed,
+        upstreamData,
+        assistantContent,
+        reasoningContent,
+        finishReason,
+        upstreamPayload,
+    };
+}
+
 function resolveScheduleContext(scheduleContext = {}, fallback = {}) {
     return {
         classes: Array.isArray(scheduleContext?.classes) ? scheduleContext.classes : (Array.isArray(fallback?.classes) ? fallback.classes : []),
@@ -872,7 +1153,13 @@ function buildAiTimetablePrompt(reportMarkdown, report, clientAiSettings = {}, t
     const issues = Array.isArray(report?.issues) ? report.issues.slice(0, 80) : [];
     const swapCandidates = Array.isArray(report?.swapCandidates) ? report.swapCandidates : [];
     const candidateMoves = Array.isArray(report?.candidateMoves) ? report.candidateMoves.slice(0, 24) : [];
+    const legalCandidateIds = candidateMoves
+        .map((item) => String(item?.candidateId || '').trim())
+        .filter(Boolean);
     const promptScope = tuningContext?.promptScope || null;
+    const selectedMovesExample = legalCandidateIds.length > 0
+        ? `[{ "candidateId": "${legalCandidateIds[0]}" , "reason": "..." }]`
+        : '[]';
 
     const compactContext = {
         summary,
@@ -912,6 +1199,7 @@ function buildAiTimetablePrompt(reportMarkdown, report, clientAiSettings = {}, t
             to: item.to,
             score: item.score,
         })),
+        legalCandidateIds,
         clientAiSettings,
     };
 
@@ -934,18 +1222,22 @@ function buildAiTimetablePrompt(reportMarkdown, report, clientAiSettings = {}, t
 
     if (candidateMoves.length > 0) {
         focusLines.push(`合法候選池：共有 ${candidateMoves.length} 個候選交換。請只從 candidateMoves 中挑選，勿自行發明候選池外的座標。`);
+        focusLines.push(`合法 candidateId 清單：${legalCandidateIds.join('、')}`);
+    } else {
+        focusLines.push('本輪沒有合法 candidateMoves；selectedMoves 必須回傳空陣列 []。');
     }
 
     return [
         '你是學校課表微調引擎，只能回傳嚴格 JSON，不要 Markdown，不要解釋文字。',
         '目標：優先降低硬約束衝突，其次改善明顯的軟約束問題。',
         '限制：只允許同一班內的 swap moves，且每個 move 必須維持總節數不變。',
-        '若提供 candidateMoves，請只從合法候選池中挑選，回傳 selectedMoves，且每筆只能包含 candidateId 與 reason，不可自行發明新的座標。',
+        'summary.text 請先用一句話總結全校主要問題，再用第二句明示本輪焦點；不要把單輪焦點寫成全校唯一問題。',
+        '若提供 candidateMoves，請只從 legalCandidateIds 中逐字複製 candidateId，回傳 selectedMoves，且每筆只能包含 candidateId 與 reason，不可自行發明新的座標。',
         '輸出格式必須符合：',
         '{',
-        '  "summary": { "text": "一句話摘要", "confidence": 0.0 },',
+        '  "summary": { "text": "先總結全校，再說明本輪焦點", "confidence": 0.0 },',
         '  "issues": [{ "className": "3年1班", "day": 1, "period": 2, "type": "teacher|room|requirement", "severity": "hard|soft", "message": "..." }],',
-        '  "selectedMoves": [{ "candidateId": "CAND-..." , "reason": "..." }],',
+        `  "selectedMoves": ${selectedMovesExample},`,
         '  "warnings": ["..."],',
         '  "nextFocus": "class|resource|teacher|room|stop",',
         '  "stopReason": "..."',
@@ -966,6 +1258,21 @@ function buildAiTimetablePrompt(reportMarkdown, report, clientAiSettings = {}, t
             ].join('\n')
             : '',
     ].join('\n');
+}
+
+function getPromptLegalCandidateIds(promptReport) {
+    const candidateMoves = Array.isArray(promptReport?.candidateMoves)
+        ? promptReport.candidateMoves.slice(0, 24)
+        : [];
+    const idsFromMoves = candidateMoves
+        .map((item) => String(item?.candidateId || '').trim())
+        .filter(Boolean);
+    if (idsFromMoves.length > 0) return idsFromMoves;
+
+    return (Array.isArray(promptReport?.legalCandidateIds) ? promptReport.legalCandidateIds : [])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 24);
 }
 
 function buildScheduleIndex(scheduleEntries) {
@@ -1302,6 +1609,67 @@ function selectAiTuningFocus({
     };
 }
 
+function buildAiTuningGlobalOverview(report = {}) {
+    const summary = report?.summary || {};
+    const visibleIssueClassCount = Number(summary.issueClassCount) || 0;
+    const visibleIssueCount = Number(summary.issueCount) || 0;
+    const suppressedRequirementIssueCount = Number(summary.suppressedRequirementIssueCount) || 0;
+    const topClasses = (Array.isArray(report?.classes) ? report.classes : [])
+        .filter((item) => (item?.issueCount || 0) > 0)
+        .sort((a, b) =>
+            (b?.issueCount || 0) - (a?.issueCount || 0)
+            || String(a?.className || '').localeCompare(String(b?.className || ''), 'zh-Hant')
+        )
+        .slice(0, 3)
+        .map((item) => String(item?.className || '').trim())
+        .filter(Boolean);
+
+    let text = `全校目前有 ${visibleIssueClassCount} 個需關注班級，AI 可見問題共 ${visibleIssueCount} 項。`;
+    if (topClasses.length > 0) {
+        text += ` 高風險班級包含 ${topClasses.join('、')}。`;
+    }
+    if (suppressedRequirementIssueCount > 0) {
+        text += ` 另有 ${suppressedRequirementIssueCount} 項由導師區塊承接的導師科目缺漏已從 AI 警示排除。`;
+    }
+    return text.trim();
+}
+
+function buildAiTuningFocusOverview(focus = {}) {
+    const focusType = String(focus?.focusType || '').trim();
+    const subject = String(focus?.subject || '').trim();
+    const className = String(focus?.className || '').trim();
+
+    if (focusType === 'resource') {
+        if (subject && className) {
+            return `本輪焦點：${subject} 資源 / ${className}。`;
+        }
+        if (subject) {
+            return `本輪焦點：${subject} 資源。`;
+        }
+    }
+
+    if (className) {
+        return `本輪焦點：${className}。`;
+    }
+
+    return '本輪焦點：目前沒有可辨識的修復焦點。';
+}
+
+function packageAiTuningSummary(rawSummary = {}, report = {}, focus = {}) {
+    const globalOverview = buildAiTuningGlobalOverview(report);
+    const focusOverview = buildAiTuningFocusOverview(focus);
+    const originalText = String(rawSummary?.text || '').trim();
+    const text = [globalOverview, focusOverview].filter(Boolean).join(' ').trim() || originalText;
+
+    return {
+        ...rawSummary,
+        originalText,
+        globalOverview,
+        focusOverview,
+        text,
+    };
+}
+
 async function executeAiTimetableAnalysis({
     report,
     reportMarkdown,
@@ -1328,45 +1696,29 @@ async function executeAiTimetableAnalysis({
         || Array.isArray(scheduleContext.classrooms)
     );
 
-    const effectiveReport = hasScheduleContext
+    const effectiveReportBundle = hasScheduleContext
         ? buildScheduleReportFromContext({
             scheduleEntries: sourceEntries,
             scheduleContext,
             aiSettings: report?.aiSettings || clientAiSettings,
             engineMeta: report?.engineMeta || scheduleContext?.engineMeta || {},
         })
-        : report;
+        : null;
+    const effectiveReport = effectiveReportBundle?.report || report;
 
     const promptReport = tuningContext?.promptReport || effectiveReport;
     const effectiveReportMarkdown = tuningContext?.promptMarkdown
-        || (hasScheduleContext ? effectiveReport.promptMarkdown : (reportMarkdown || ''));
+        || (effectiveReportBundle?.promptMarkdown || reportMarkdown || '');
 
-    const systemSetting = await prisma.systemSetting.findUnique({ where: { id: 1 } });
-    const aiSystemSettings = systemSetting && systemSetting.aiSystemSettings
-        ? JSON.parse(systemSetting.aiSystemSettings)
-        : { enabled: false, serviceType: 'ollama', apiUrl: '', model: '', systemPrompt: '' };
-
-    const resolvedAiSettings = {
-        ...aiSystemSettings,
-        ...(clientConnectionSettings && typeof clientConnectionSettings === 'object' ? {
-            enabled: clientConnectionSettings.enabled ?? aiSystemSettings.enabled,
-            serviceType: clientConnectionSettings.serviceType ?? aiSystemSettings.serviceType,
-            apiUrl: clientConnectionSettings.apiUrl ?? aiSystemSettings.apiUrl,
-            model: clientConnectionSettings.model ?? aiSystemSettings.model,
-            systemPrompt: clientConnectionSettings.systemPrompt ?? aiSystemSettings.systemPrompt,
-        } : {}),
-    };
-
-    if (!resolvedAiSettings.enabled) {
-        throw createAiHttpError(400, 'AI_DISABLED', 'AI 功能尚未啟用');
-    }
-
-    const serviceType = normalizeAiServiceType(resolvedAiSettings.serviceType);
-    const targetUrl = String(resolvedAiSettings.apiUrl || '').trim();
-    const model = String(resolvedAiSettings.model || '').trim() || 'qwen3.6:27b';
-    if (!targetUrl) {
-        throw createAiHttpError(400, 'AI_API_URL_MISSING', 'AI API URL 尚未設定');
-    }
+    const {
+        resolvedAiSettings,
+        serviceType,
+        targetUrl,
+        model,
+        disableThinking,
+        maxOutputTokens,
+        temperature,
+    } = await resolveAiRuntimeSettings(clientConnectionSettings);
 
     const systemPrompt = [
         resolvedAiSettings.systemPrompt,
@@ -1398,9 +1750,11 @@ async function executeAiTimetableAnalysis({
             `estimatedChars=${promptBundle.promptBudget.estimatedChars}, maxPromptChars=${promptBundle.promptBudget.maxPromptChars}`
         );
     }
+    const aiPromptReport = promptBundle.promptReport || promptReport;
+    const promptLegalCandidateIds = getPromptLegalCandidateIds(aiPromptReport);
     const userPrompt = buildAiTimetablePrompt(
         promptBundle.promptMarkdown || effectiveReportMarkdown,
-        promptBundle.promptReport || promptReport,
+        aiPromptReport,
         clientAiSettings,
         {
             ...tuningContext,
@@ -1409,70 +1763,52 @@ async function executeAiTimetableAnalysis({
         },
     );
 
-    const upstreamPayload = serviceType === 'ollama'
-        ? {
-            model,
-            prompt: `${systemPrompt}\n\n${userPrompt}`,
-            stream: false,
-        }
-        : {
-            model,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt },
-            ],
-            stream: false,
-        };
-
-    const upstreamController = new AbortController();
-    if (abortSignal) {
-        if (abortSignal.aborted) {
-            upstreamController.abort();
-        } else {
-            abortSignal.addEventListener('abort', () => upstreamController.abort(), { once: true });
-        }
-    }
-    const upstreamTimer = setTimeout(() => upstreamController.abort(), AI_TUNING_TIMEOUT_MS);
-    let upstreamResponse;
-    try {
-        upstreamResponse = await fetch(targetUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(upstreamPayload),
-            signal: upstreamController.signal,
-        });
-    } finally {
-        clearTimeout(upstreamTimer);
-    }
-
-    const rawText = await upstreamResponse.text();
-    let upstreamData = {};
-    if (rawText) {
-        try {
-            upstreamData = JSON.parse(rawText);
-        } catch {
-            upstreamData = { rawText };
-        }
-    }
-
-    if (!upstreamResponse.ok) {
-        throw createAiHttpError(
-            upstreamResponse.status,
-            'AI_UPSTREAM_ERROR',
-            'AI 上游回應失敗',
-            extractAssistantText(upstreamData) || rawText || `HTTP ${upstreamResponse.status}`,
-        );
-    }
-
-    const assistantText = extractAssistantText(upstreamData);
-    const parsed = parseStrictJsonFromText(assistantText);
+    const {
+        parsed,
+        upstreamData,
+        assistantContent,
+        reasoningContent,
+        finishReason,
+    } = await invokeAiJsonEndpoint({
+        serviceType,
+        targetUrl,
+        model,
+        systemPrompt,
+        userPrompt,
+        disableThinking,
+        maxOutputTokens,
+        temperature,
+        abortSignal,
+    });
     const maxMovesPerRound = Number.parseInt(tuningContext?.maxMovesPerRound, 10);
     const parsedMoves = Array.isArray(parsed.selectedMoves) ? parsed.selectedMoves : [];
     const limitedSelectedMoves = Number.isFinite(maxMovesPerRound) && maxMovesPerRound > 0
         ? parsedMoves.slice(0, maxMovesPerRound)
         : parsedMoves;
+    // Task 7: 可操作摘要 fallback
+    const rawSummary = parsed.summary || { text: '', confidence: 0 };
+    let summary = rawSummary;
+    if (!Array.isArray(rawSummary?.actionableItems)) {
+        const issuesArr = Array.isArray(parsed.issues) ? parsed.issues : [];
+        const topIssues = issuesArr.slice(0, 3);
+        summary = {
+            text: rawSummary.text || '主要問題：AI 未提供可操作摘要。具體時段：請查看 issues 前 3 筆。建議處理：先檢查專科教室容量、科任科目年級設定與可交換時段。',
+            confidence: rawSummary.confidence ?? 0,
+            actionableItems: topIssues.map((issue) => ({
+                className: issue?.className || '',
+                day: issue?.day ?? null,
+                period: issue?.period ?? null,
+                subject: issue?.subject || '',
+                location: issue?.location || '',
+                problem: issue?.message || issue?.type || '未分類問題',
+                suggestedAction: '請檢查相關設定並手動調整',
+            })),
+        };
+    }
+    summary = packageAiTuningSummary(summary, effectiveReport, promptFocus);
+
     const normalizedAnalysis = {
-        summary: parsed.summary || { text: '', confidence: 0 },
+        summary,
         issues: Array.isArray(parsed.issues) ? parsed.issues : [],
         selectedMoves: limitedSelectedMoves,
         swapMoves: [],
@@ -1491,15 +1827,79 @@ async function executeAiTimetableAnalysis({
         ];
     }
 
-    const validation = validateAiCandidateSelections(effectiveReport, normalizedAnalysis.selectedMoves);
-    if (validation.errors.length > 0) {
+    // === 候選池一致性檢查：prompt 給 AI 的 ID 必須在 validation pool 中 ===
+    const poolConsistency = validateCandidatePoolConsistency(
+        promptLegalCandidateIds,
+        effectiveReport,
+    );
+    if (!poolConsistency.ok) {
         throw createAiHttpError(
-            400,
-            'AI_INVALID_CANDIDATE_MOVE',
-            'AI 交換建議包含無效 candidateId',
-            validation.errors[0].reason,
+            500,
+            'AI_TUNING_CANDIDATE_POOL_MISMATCH',
+            `候選池不一致：prompt 給 AI 的 ${poolConsistency.missingInValidation.length} 個 candidateId 不在驗證池中`,
+            buildAiErrorDetails({
+                content: assistantContent,
+                reasoningContent,
+                finishReason,
+                selectedMoves: normalizedAnalysis.selectedMoves,
+                invalidIds: poolConsistency.missingInValidation,
+                promptLegalIds: promptLegalCandidateIds,
+                legalIds: getReportCandidateIds(effectiveReport),
+                extraInfo: [
+                    `promptCount=${poolConsistency.promptCount}`,
+                    `validationCount=${poolConsistency.validationCount}`,
+                    `overlap=${poolConsistency.overlapCount}`,
+                    `missingInValidation=${poolConsistency.missingInValidation.join(',')}`,
+                ].join(', '),
+            }),
         );
     }
+
+    // === 空候選池防護：沒有合法候選時跳過 AI，直接回傳空 selectedMoves ===
+    if (promptLegalCandidateIds.length === 0) {
+        normalizedAnalysis.selectedMoves = [];
+        normalizedAnalysis.warnings.push('本輪沒有合法 candidateMoves，已強制 selectedMoves=[]');
+    }
+
+    const validation = validateAiCandidateSelectionsFromResponse(effectiveReport, normalizedAnalysis.selectedMoves, { allowPartial: true });
+
+    // 部分合法降級策略：有合法 moves 時保留，非法 moves 進 warnings
+    if (validation.errors.length > 0) {
+        if (validation.validMoves.length === 0) {
+            // 全部非法才丟錯 — 強化診斷 details
+            const detail = buildAiErrorDetails({
+                content: assistantContent,
+                reasoningContent,
+                finishReason,
+                selectedMoves: normalizedAnalysis.selectedMoves,
+                invalidIds: validation.invalidIds,
+                promptLegalIds: promptLegalCandidateIds,
+                legalIds: validation.legalIds,
+                extraInfo: [
+                    `finish_reason=${finishReason}`,
+                    `reasoning_content_length=${reasoningContent?.length ?? 0}`,
+                    `promptCandidateCount=${promptLegalCandidateIds.length}`,
+                    `validationCandidateCount=${validation.legalIds.length}`,
+                    `parsedSelectedMoveCount=${normalizedAnalysis.selectedMoves.length}`,
+                    `poolOverlap=${poolConsistency.overlapCount}/${poolConsistency.promptCount}`,
+                ].join(', '),
+            });
+            throw createAiHttpError(
+                400,
+                'AI_INVALID_CANDIDATE_MOVE',
+                'AI 交換建議包含無效 candidateId，且無合法候選可降級執行',
+                detail,
+            );
+        }
+
+        // 部分合法：保留合法 moves，非法 moves 進 warnings
+        normalizedAnalysis.selectedMoves = validation.validMoves;
+        normalizedAnalysis.warnings.push(
+            `已忽略 ${validation.errors.length} 筆非法 candidateId：${validation.invalidIds.join(', ')}`
+        );
+    }
+
+    // 使用驗證後的 validMoves
 
     const previewSchedule = applyAiSwapMoves(sourceEntries, validation.validMoves);
     const previewReport = hasScheduleContext
@@ -1513,7 +1913,7 @@ async function executeAiTimetableAnalysis({
 
     return {
         ok: true,
-        report: effectiveReport,
+        report: effectiveReportBundle || effectiveReport,
         previewReport,
         analysis: {
             ...normalizedAnalysis,
@@ -1529,6 +1929,103 @@ async function executeAiTimetableAnalysis({
             swapMoves: validation.validMoves,
         },
         previewSchedule,
+        resolvedAiSettings,
+        upstreamData,
+    };
+}
+
+async function executeAiInfeasibleAnalysis({
+    bundle = null,
+    jobId = '',
+    connectionSettings: clientConnectionSettings = {},
+    maxPromptChars = 120000,
+    abortSignal = null,
+}) {
+    const normalizedJobId = normalizeDiagnosticReportLine(jobId);
+    const effectiveBundle = bundle && typeof bundle === 'object'
+        ? bundle
+        : buildInfeasibleAnalysisBundleFromArtifacts({
+            jobId: normalizedJobId,
+            reportPath: path.join(__dirname, 'debug_infeasible_report.txt'),
+            payloadPath: normalizedJobId && fs.existsSync(path.join(__dirname, `input_${normalizedJobId}.json`))
+                ? path.join(__dirname, `input_${normalizedJobId}.json`)
+                : (fs.existsSync(path.join(__dirname, 'debug_payload.json'))
+                    ? path.join(__dirname, 'debug_payload.json')
+                    : ''),
+            diagnosticJsonPath: normalizedJobId && fs.existsSync(path.join(__dirname, `debug_schedule_diagnostic_${normalizedJobId}.json`))
+                ? path.join(__dirname, `debug_schedule_diagnostic_${normalizedJobId}.json`)
+                : findLatestArtifactPath('debug_schedule_diagnostic_'),
+        });
+
+    if (!effectiveBundle || typeof effectiveBundle !== 'object' || effectiveBundle.kind !== 'infeasible_analysis') {
+        throw createAiHttpError(400, 'AI_INFEASIBLE_BUNDLE_MISSING', '缺少有效的 infeasible analysis bundle');
+    }
+
+    const {
+        resolvedAiSettings,
+        serviceType,
+        targetUrl,
+        model,
+        disableThinking,
+        maxOutputTokens,
+        temperature,
+    } = await resolveAiRuntimeSettings(clientConnectionSettings);
+
+    const promptResult = buildAiInfeasibleAnalysisPrompt(effectiveBundle, {
+        maxPromptChars: Number.isFinite(Number(maxPromptChars)) && Number(maxPromptChars) > 0
+            ? Number(maxPromptChars)
+            : 120000,
+    });
+
+    if (!promptResult?.promptBudget?.withinBudget) {
+        throw createAiHttpError(
+            413,
+            'AI_INFEASIBLE_PROMPT_TOO_LARGE',
+            'INFEASIBLE 分析 bundle 過大，請縮小輸入範圍或調高 prompt 預算',
+            `estimatedChars=${promptResult?.promptBudget?.estimatedChars || 0}, maxPromptChars=${promptResult?.promptBudget?.maxPromptChars || 0}`,
+        );
+    }
+
+    const systemPrompt = [
+        resolvedAiSettings.systemPrompt,
+        '你是排課引擎 INFEASIBLE 診斷分析器，請只回傳 JSON。',
+        '你的任務是根據 bundle 中的警示、payload 與診斷資料，找出最可能的硬衝突根因。',
+        '不要只重述所有警示，要排序並指出最值得先修的問題。',
+        '嚴格遵守 user prompt 中提供的 schema。',
+    ].filter(Boolean).join('\n\n');
+
+    const {
+        parsed,
+        upstreamData,
+    } = await invokeAiJsonEndpoint({
+        serviceType,
+        targetUrl,
+        model,
+        systemPrompt,
+        userPrompt: promptResult.userPrompt,
+        disableThinking,
+        maxOutputTokens,
+        temperature,
+        abortSignal,
+    });
+
+    let analysis;
+    try {
+        analysis = validateAiInfeasibleAnalysisResponse(parsed);
+    } catch (error) {
+        throw createAiHttpError(
+            500,
+            'AI_INFEASIBLE_INVALID_RESPONSE',
+            'AI infeasible analysis 回應格式不符',
+            error?.message || 'unknown validation error',
+        );
+    }
+
+    return {
+        bundle: effectiveBundle,
+        analysis,
+        promptBudget: promptResult.promptBudget,
+        promptPayload: promptResult.promptPayload,
         resolvedAiSettings,
         upstreamData,
     };
@@ -1553,6 +2050,33 @@ async function handleAiTimetableAnalysis(req, res) {
         const message = error?.name === 'AbortError'
             ? 'AI 課表分析逾時'
             : error?.message || 'AI 課表分析失敗';
+        res.status(status).json({
+            code,
+            error: message,
+            details: error?.details || error?.message || '',
+        });
+    }
+}
+
+async function handleAiInfeasibleAnalysis(req, res) {
+    req.setTimeout(AI_TUNING_TIMEOUT_MS);
+    res.setTimeout(AI_TUNING_TIMEOUT_MS);
+
+    try {
+        const result = await executeAiInfeasibleAnalysis(req.body || {});
+        return res.json({
+            ok: true,
+            analysis: result.analysis,
+            bundle: result.bundle,
+            promptBudget: result.promptBudget,
+        });
+    } catch (error) {
+        console.error('AI INFEASIBLE 分析失敗:', error);
+        const status = error?.status || (error?.name === 'AbortError' ? 502 : 502);
+        const code = error?.code || (error?.name === 'AbortError' ? 'AI_UPSTREAM_TIMEOUT' : 'AI_INFEASIBLE_ANALYSIS_FAILED');
+        const message = error?.name === 'AbortError'
+            ? 'AI INFEASIBLE 分析逾時'
+            : error?.message || 'AI INFEASIBLE 分析失敗';
         res.status(status).json({
             code,
             error: message,
@@ -2385,6 +2909,7 @@ async function runAiTuningBackgroundWorker(jobId) {
 
 app.post('/api/ai-generate', handleAiTimetableAnalysis);
 app.post('/api/ai-timetable-analysis', handleAiTimetableAnalysis);
+app.post('/api/ai-infeasible-analysis', handleAiInfeasibleAnalysis);
 app.post('/api/ai-timetable-tuning/start', handleAiTimetableTuningStart);
 app.post('/api/ai-timetable-tuning/step', handleAiTimetableTuningStep);
 app.post('/api/ai-timetable-tuning/finalize', handleAiTimetableTuningFinalize);
@@ -2560,6 +3085,72 @@ app.get('/api/debug-infeasible-report', async (req, res) => {
     }
 });
 
+app.get('/api/ai-infeasible-analysis-bundle', async (req, res) => {
+    try {
+        const requestedJobId = normalizeDiagnosticReportLine(req.query?.jobId);
+        const bundlePath = requestedJobId
+            ? path.join(__dirname, `debug_infeasible_bundle_${requestedJobId}.json`)
+            : findLatestArtifactPath('debug_infeasible_bundle_');
+
+        if (bundlePath && fs.existsSync(bundlePath)) {
+            const bundle = tryReadJsonFile(bundlePath);
+            if (bundle) {
+                return res.json({
+                    ok: true,
+                    source: 'bundle_file',
+                    bundlePath: path.basename(bundlePath),
+                    bundle,
+                });
+            }
+        }
+
+        let jobRecord = null;
+        if (requestedJobId) {
+            jobRecord = await prisma.scheduleJob.findUnique({ where: { id: requestedJobId } });
+        }
+
+        let parsedResult = {};
+        try {
+            parsedResult = jobRecord?.result ? JSON.parse(jobRecord.result) : {};
+        } catch {
+            parsedResult = {};
+        }
+
+        const reportPath = path.join(__dirname, 'debug_infeasible_report.txt');
+        const payloadPath = requestedJobId && fs.existsSync(path.join(__dirname, `input_${requestedJobId}.json`))
+            ? path.join(__dirname, `input_${requestedJobId}.json`)
+            : (fs.existsSync(path.join(__dirname, 'debug_payload.json'))
+                ? path.join(__dirname, 'debug_payload.json')
+                : '');
+        const diagnosticJsonPath = requestedJobId && fs.existsSync(path.join(__dirname, `debug_schedule_diagnostic_${requestedJobId}.json`))
+            ? path.join(__dirname, `debug_schedule_diagnostic_${requestedJobId}.json`)
+            : findLatestArtifactPath('debug_schedule_diagnostic_');
+
+        const bundle = buildInfeasibleAnalysisBundleFromArtifacts({
+            jobId: requestedJobId || parsedResult?.jobId || '',
+            errorMsg: parsedResult?.error || '',
+            solverStatus: parsedResult?.solverStatus || 'INFEASIBLE',
+            reportPath,
+            payloadPath,
+            diagnosticJsonPath,
+            diagnosticWarnings: parsedResult?.diagnosticWarnings || [],
+        });
+
+        return res.json({
+            ok: true,
+            source: 'rebuilt_from_artifacts',
+            bundle,
+        });
+    } catch (error) {
+        console.error('[AI Infeasible Bundle] 讀取失敗:', error);
+        return res.status(500).json({
+            ok: false,
+            error: '讀取 AI infeasible analysis bundle 失敗',
+            details: error.message,
+        });
+    }
+});
+
 // ==========================================
 // 模組四：OR-Tools 引擎橋接 (新架構)
 // ==========================================
@@ -2575,8 +3166,8 @@ async function runDiagnosticStats(inputPath, resultPath) {
     return new Promise((resolve, _reject) => {
         const diag = spawnPython('diagnostic_stats.py', [inputPath, resultPath], 'Diagnostic Stats');
         let output = '';
-        diag.stdout.on('data', (d) => output += d.toString());
-        diag.stderr.on('data', (d) => console.error(`[Diagnostic Error]: ${d.toString()}`));
+        diag.stdout.on('data', (d) => output += d);
+        diag.stderr.on('data', (d) => console.error(`[Diagnostic Error]: ${d}`));
         diag.on('close', (code) => {
             if (code === 0) {
                 try {
@@ -2612,13 +3203,313 @@ function generateRecommendation(pre, post) {
         tips.push('gradePreferences 命中率良好 (>=85%)');
 
     if ((post.capacityOverloadCount || 0) > (pre.capacityOverloadCount || 0))
-        tips.push('⚠️ Repair 後容量超載惡化，請檢查 Repair Agent');
+        tips.push('[WARN] Repair 後容量超載惡化，請檢查 Repair Agent');
     else if ((post.capacityOverloadCount || 0) === 0)
         tips.push('容量超載已完全消除');
     else
         tips.push(`仍有 ${post.capacityOverloadCount} 次容量超載`);
 
     return tips.join(' | ');
+}
+
+function normalizeDiagnosticReportLine(line) {
+    return String(line || '').replace(/\r/g, '').trim();
+}
+
+function createDiagnosticWarning({ level = 'WARN', category = 'generic_infeasible', message = '', rawLine = '', contextLine = '' } = {}) {
+    const normalizedLevel = String(level || 'WARN').trim().toLowerCase();
+    const normalizedMessage = normalizeDiagnosticReportLine(message);
+    const detail = {
+        level: normalizedLevel || 'warn',
+        category: String(category || 'generic_infeasible').trim() || 'generic_infeasible',
+        message: normalizedMessage,
+        displayText: `[${(normalizedLevel || 'warn').toUpperCase()}] ${normalizedMessage}`,
+    };
+    const normalizedRawLine = normalizeDiagnosticReportLine(rawLine);
+    const normalizedContextLine = normalizeDiagnosticReportLine(contextLine);
+    if (normalizedRawLine) detail.rawLine = normalizedRawLine;
+    if (normalizedContextLine) detail.contextLine = normalizedContextLine;
+    return detail;
+}
+
+function getDiagnosticReportLevel(line) {
+    const normalized = normalizeDiagnosticReportLine(line);
+    const match = normalized.match(/\[(WARN|ERROR|ALERT)\]/i);
+    if (match) return match[1].toUpperCase();
+    if (normalized.includes('❌')) return 'ERROR';
+    if (normalized.includes('⚠️')) return 'WARN';
+    return '';
+}
+
+function findPreviousDiagnosticContext(lines, index) {
+    for (let i = index - 1; i >= 0; i -= 1) {
+        const candidate = normalizeDiagnosticReportLine(lines[i]);
+        if (!candidate) continue;
+        if (candidate.startsWith('[DEBUG]')) break;
+        return candidate;
+    }
+    return '';
+}
+
+function buildGenericInfeasibleAnalysis() {
+    return ['[WARN] 排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。'];
+}
+
+function buildGenericInfeasibleWarnings() {
+    return [
+        createDiagnosticWarning({
+            level: 'WARN',
+            category: 'generic_infeasible',
+            message: '排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。',
+        }),
+    ];
+}
+
+function diagnosticWarningsToAiAnalysis(diagnosticWarnings) {
+    return (Array.isArray(diagnosticWarnings) ? diagnosticWarnings : [])
+        .map((warning) => normalizeDiagnosticReportLine(
+            warning?.displayText
+            || (warning?.message ? `[${String(warning.level || 'warn').toUpperCase()}] ${warning.message}` : '')
+        ))
+        .filter(Boolean);
+}
+
+function formatGenericDiagnosticAnalysisLine(level, line) {
+    const normalized = normalizeDiagnosticReportLine(line);
+    const withoutBullet = normalized.replace(/^\-\s*/, '');
+    const withoutLevelTag = withoutBullet.replace(/\[(WARN|ERROR|ALERT)\]\s*/i, '').trim();
+    return `[${level}] ${withoutLevelTag || withoutBullet}`;
+}
+
+function buildDiagnosticWarningDetail({ level, line, contextLine }) {
+    const normalized = normalizeDiagnosticReportLine(line);
+
+    if (level === 'ALERT' && normalized.includes('診斷報告')) {
+        return null;
+    }
+
+    const classOverloadMatch = normalized.match(/^\-\s*(.+?):\s*共需排\s*(\d+)\s*節課\s*\(該年級上限:\s*(\d+)\s*節\)\s*\[ERROR\]/i);
+    if (classOverloadMatch) {
+        const [, className, needed, limit] = classOverloadMatch;
+        return createDiagnosticWarning({
+            level: 'ERROR',
+            category: 'class_overload',
+            message: `【班級節數超限】${className} 需排 ${needed} 節，超過年級上限 ${limit} 節。`,
+            rawLine: normalized,
+            contextLine,
+        });
+    }
+
+    const periodMatch = normalized.match(/^\-\s*(.+?):\s*科任需求\s*(\d+)\s*節\s*\/\s*有效時段\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
+    if (periodMatch) {
+        const [, className, needed, available] = periodMatch;
+        return createDiagnosticWarning({
+            level,
+            category: 'period_shortage',
+            message: `【有效時段不足】${className} 科任需求 ${needed} 節，高於有效時段 ${available} 節。`,
+            rawLine: normalized,
+            contextLine,
+        });
+    }
+
+    const capacityMatch = normalized.match(/^\-\s*(.+?):\s*容量\s*(\d+)\s*間\s*\(週容量=?\s*(\d+)節\)\s*\/\s*總需求\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
+    if (capacityMatch) {
+        const [, subject, roomCount, weeklyCapacity, needed] = capacityMatch;
+        return createDiagnosticWarning({
+            level,
+            category: 'room_capacity_shortage',
+            message: `【教室容量不足】${subject} 總需求 ${needed} 節，高於 ${roomCount} 間教室的週容量 ${weeklyCapacity} 節。`,
+            rawLine: normalized,
+            contextLine,
+        });
+    }
+
+    if (normalized.includes('交替班級')) {
+        const teacherContextMatch = normalizeDiagnosticReportLine(contextLine).match(/^\-\s*(.+?):\s*負責\s*(\d+)\s*個交替班級(?:\s*\((.+)\))?/);
+        if (teacherContextMatch) {
+            const [, teacher, classCount] = teacherContextMatch;
+            const limitMatch = normalized.match(/最多只能上\s*(\d+)\s*個交替班級/i);
+            const limit = limitMatch ? limitMatch[1] : '2';
+            return createDiagnosticWarning({
+                level: 'WARN',
+                category: 'alternating_conflict',
+                message: `【交替課衝突】${teacher} 負責 ${classCount} 個交替班級，同一時段上限 ${limit} 個，可能導致衝突。`,
+                rawLine: normalized,
+                contextLine,
+            });
+        }
+        return createDiagnosticWarning({
+            level: 'WARN',
+            category: 'alternating_conflict',
+            message: `【交替課衝突】${normalized.replace(/\[WARN\]\s*/i, '').trim()}`,
+            rawLine: normalized,
+            contextLine,
+        });
+    }
+
+    const swimmingMatch = normalized.match(/游泳班數\((\d+)\)\s*>\s*泳池數\((\d+)\)/i);
+    if (swimmingMatch) {
+        const [, classCount, poolCount] = swimmingMatch;
+        return createDiagnosticWarning({
+            level: 'WARN',
+            category: 'swimming_resource_pressure',
+            message: `【游泳資源壓力】游泳班數 ${classCount} 高於泳池數 ${poolCount}，目前僅靠軟懲罰吸收衝突。`,
+            rawLine: normalized,
+            contextLine,
+        });
+    }
+
+    return createDiagnosticWarning({
+        level,
+        category: level === 'ALERT' ? 'report_alert' : 'generic_warning',
+        message: formatGenericDiagnosticAnalysisLine(level, normalized).replace(/^\[(WARN|ERROR|ALERT)\]\s*/i, ''),
+        rawLine: normalized,
+        contextLine,
+    });
+}
+
+function parseInfeasibleDiagnosticReport(reportContent) {
+    const rawLines = String(reportContent || '').split('\n');
+    const diagnosticWarnings = [];
+    const seen = new Set();
+
+    rawLines.forEach((line, index) => {
+        const normalized = normalizeDiagnosticReportLine(line);
+        const level = getDiagnosticReportLevel(normalized);
+        if (!level) return;
+
+        const detail = buildDiagnosticWarningDetail({
+            level,
+            line: normalized,
+            contextLine: findPreviousDiagnosticContext(rawLines, index),
+        });
+        const key = detail ? `${detail.level}|${detail.category}|${detail.message}` : '';
+        if (!detail || !key || seen.has(key)) return;
+        seen.add(key);
+        diagnosticWarnings.push(detail);
+    });
+
+    const finalizedWarnings = diagnosticWarnings.length > 0 ? diagnosticWarnings : buildGenericInfeasibleWarnings();
+    return {
+        diagnosticWarnings: finalizedWarnings,
+        aiAnalysis: diagnosticWarningsToAiAnalysis(finalizedWarnings),
+    };
+}
+
+function tryReadJsonFile(filePath) {
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    try {
+        return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (error) {
+        console.warn(`[Diagnostic Bundle] JSON 讀取失敗: ${filePath}`, error);
+        return null;
+    }
+}
+
+function findLatestArtifactPath(prefix, suffix = '.json') {
+    try {
+        const candidates = fs.readdirSync(__dirname)
+            .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
+            .map((name) => ({
+                name,
+                fullPath: path.join(__dirname, name),
+                mtimeMs: fs.statSync(path.join(__dirname, name)).mtimeMs,
+            }))
+            .sort((a, b) => b.mtimeMs - a.mtimeMs);
+        return candidates[0]?.fullPath || '';
+    } catch {
+        return '';
+    }
+}
+
+function persistInfeasibleAnalysisArtifacts({
+    jobId,
+    errorMsg,
+    solverStatus = 'INFEASIBLE',
+    reportContent = '',
+    reportPath = '',
+    payloadPath = '',
+    diagnosticWarnings = [],
+    aiAnalysis = [],
+}) {
+    const generatedAt = new Date().toISOString();
+    const diagnosticReport = {
+        jobId,
+        status: 'FAILED',
+        solverStatus,
+        error: errorMsg,
+        generatedAt,
+        reportWarningCount: Array.isArray(diagnosticWarnings) ? diagnosticWarnings.length : 0,
+        diagnosticWarnings,
+        aiAnalysis,
+    };
+    const diagnosticFileName = `debug_schedule_diagnostic_${jobId}.json`;
+    const diagnosticFilePath = path.join(__dirname, diagnosticFileName);
+    fs.writeFileSync(diagnosticFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
+
+    const payload = tryReadJsonFile(payloadPath);
+    const bundle = buildInfeasibleAnalysisBundle({
+        jobId,
+        jobStatus: 'FAILED',
+        solverStatus,
+        error: errorMsg,
+        reportText: reportContent,
+        diagnosticWarnings,
+        payload,
+        diagnosticJson: diagnosticReport,
+        artifactPaths: {
+            reportPath,
+            payloadPath,
+            diagnosticJsonPath: diagnosticFilePath,
+        },
+        generatedAt,
+    });
+    const bundleFileName = `debug_infeasible_bundle_${jobId}.json`;
+    const bundleFilePath = path.join(__dirname, bundleFileName);
+    fs.writeFileSync(bundleFilePath, JSON.stringify(bundle, null, 2), 'utf-8');
+
+    return {
+        diagnosticReport,
+        diagnosticFileName,
+        diagnosticFilePath,
+        bundle,
+        bundleFileName,
+        bundleFilePath,
+    };
+}
+
+function buildInfeasibleAnalysisBundleFromArtifacts({
+    jobId = '',
+    errorMsg = '',
+    solverStatus = 'INFEASIBLE',
+    reportPath = '',
+    payloadPath = '',
+    diagnosticJsonPath = '',
+    diagnosticWarnings = [],
+}) {
+    const reportContent = reportPath && fs.existsSync(reportPath)
+        ? fs.readFileSync(reportPath, 'utf-8')
+        : '';
+    const diagnosticJson = tryReadJsonFile(diagnosticJsonPath);
+    const payload = tryReadJsonFile(payloadPath);
+
+    return buildInfeasibleAnalysisBundle({
+        jobId,
+        jobStatus: diagnosticJson?.status || 'FAILED',
+        solverStatus: diagnosticJson?.solverStatus || solverStatus,
+        error: diagnosticJson?.error || errorMsg,
+        reportText: reportContent,
+        diagnosticWarnings: Array.isArray(diagnosticWarnings) && diagnosticWarnings.length > 0
+            ? diagnosticWarnings
+            : (diagnosticJson?.diagnosticWarnings || []),
+        payload,
+        diagnosticJson,
+        artifactPaths: {
+            reportPath,
+            payloadPath,
+            diagnosticJsonPath,
+        },
+    });
 }
 
 async function runSchedulingWorker(jobId, payload) {
@@ -2647,8 +3538,8 @@ async function runSchedulingWorker(jobId, payload) {
         });
 
         const pythonProcess = spawnPython('solver.py', [inputPath, outputPath], 'Solver');
-        pythonProcess.stdout.on('data', (data) => console.log(`[Python 輸出]: ${data.toString()}`));
-        pythonProcess.stderr.on('data', (data) => console.error(`[Python 錯誤]: ${data.toString()}`));
+        pythonProcess.stdout.on('data', (data) => console.log(`[Python 輸出]: ${data}`));
+        pythonProcess.stderr.on('data', (data) => console.error(`[Python 錯誤]: ${data}`));
 
         pythonProcess.on('close', async (code) => {
             try {
@@ -2662,16 +3553,16 @@ async function runSchedulingWorker(jobId, payload) {
                 });
 
                 if (code === 0 && fs.existsSync(outputPath)) {
-                    // 📊 [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
+                    // [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
                     let preRepairStats = null;
                     try {
                         preRepairStats = await runDiagnosticStats(inputPath, outputPath);
-                        console.log(`📊 [Diagnostic] preRepair stats:`, JSON.stringify(preRepairStats));
+                        console.log(`[Diagnostic] preRepair stats:`, JSON.stringify(preRepairStats));
                     } catch (e) {
-                        console.error(`📊 [Diagnostic] preRepair 統計失敗:`, e);
+                        console.error(`[Diagnostic] preRepair 統計失敗:`, e);
                     }
 
-                    // 🔧 [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
+                    // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
                     await prisma.scheduleJob.update({
                         where: { id: jobId },
                         data: {
@@ -2685,11 +3576,11 @@ async function runSchedulingWorker(jobId, payload) {
                         const repair = spawnPython('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
                         let repairLog = '';
                         repair.stdout.on('data', (d) => {
-                            const msg = d.toString();
+                            const msg = d;
                             console.log(`[Repair Agent]: ${msg}`);
                             repairLog += msg;
                         });
-                        repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d.toString()}`));
+                        repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d}`));
                         repair.on('close', (rc) => {
                             if (rc === 0 && fs.existsSync(repairOutputPath)) {
                                 resolve('repaired');
@@ -2704,22 +3595,34 @@ async function runSchedulingWorker(jobId, payload) {
                     let postRepairStats = null;
                     let resultData;
                     if (repairStatus === 'repaired') {
-                        resultData = fs.readFileSync(repairOutputPath, 'utf-8');
-                        console.log(`✅ [Repair Agent] 優化成功，使用修復後結果`);
+                        const repairedContent = fs.readFileSync(repairOutputPath, 'utf-8');
+                        const repairedObj = JSON.parse(repairedContent);
+                        const scheduleEntries = repairedObj.schedule || [];
+
+                        // [Phase 0 止血] 驗證 repair 結果
+                        const validationErrors = validateRepairHardConstraints(scheduleEntries, payload);
+                        if (validationErrors.length > 0) {
+                            console.warn(`[Repair] Hard constraint violation detected: ${validationErrors.join('; ')}. Falling back to solver output.`);
+                            resultData = fs.readFileSync(outputPath, 'utf-8');
+                            console.log(`[WARN] [Repair Agent] 驗證失敗，回退使用原始 solver 結果`);
+                        } else {
+                            resultData = repairedContent;
+                            console.log(`[OK] [Repair Agent] 優化成功且通過硬約束驗證，使用修復後結果`);
+                        }
                         try {
                             postRepairStats = await runDiagnosticStats(inputPath, repairOutputPath);
-                            console.log(`📊 [Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
+                            console.log(`[Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
                         } catch (e) {
-                            console.error(`📊 [Diagnostic] postRepair 統計失敗:`, e);
+                            console.error(`[Diagnostic] postRepair 統計失敗:`, e);
                         }
                         if (fs.existsSync(repairOutputPath)) fs.unlinkSync(repairOutputPath);
                     } else {
                         resultData = fs.readFileSync(outputPath, 'utf-8');
-                        console.log(`⚠️ [Repair Agent] 優化失敗或跳過，使用原始結果`);
+                        console.log(`[WARN] [Repair Agent] 優化失敗或跳過，使用原始結果`);
                         postRepairStats = preRepairStats;
                     }
 
-                    // 📊 [Diagnostic] Step 3: 組合報表並儲存
+                    // [Diagnostic] Step 3: 組合報表並儲存
                     try {
                         if (preRepairStats && postRepairStats) {
                             const round2 = (v) => Math.round(v * 100) / 100;
@@ -2740,10 +3643,10 @@ async function runSchedulingWorker(jobId, payload) {
                             const diagFileName = `debug_schedule_diagnostic_${jobId}.json`;
                             const diagFilePath = path.join(__dirname, diagFileName);
                             fs.writeFileSync(diagFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
-                            console.log(`📊 [Diagnostic] 報表已儲存至 ${diagFilePath}`);
+                            console.log(`[Diagnostic] 報表已儲存至 ${diagFilePath}`);
                         }
                     } catch (diagErr) {
-                        console.error(`📊 [Diagnostic] 報表儲存失敗:`, diagErr);
+                        console.error(`[Diagnostic] 報表儲存失敗:`, diagErr);
                     }
 
                     await prisma.scheduleJob.update({
@@ -2760,111 +3663,39 @@ async function runSchedulingWorker(jobId, payload) {
                 } else {
                     const errorMsg = code === null ? 'Python 進程被強制終止' : `Exit code ${code}`;
 
-                    // 🔍 AI 診斷分析：讀取 debug_infeasible_report.txt 並萃取建議
-                    let aiAnalysis = [];
+                    // 規則式診斷分析：讀取 debug_infeasible_report.txt 並萃取警示摘要
+                    let aiAnalysis = buildGenericInfeasibleAnalysis();
+                    let diagnosticWarnings = buildGenericInfeasibleWarnings();
+                    let analysisBundlePath = '';
                     try {
-                        const systemSetting = await prisma.systemSetting.findUnique({ where: { id: 1 } });
-                        const aiSysSettings = systemSetting && systemSetting.aiSystemSettings
-                            ? JSON.parse(systemSetting.aiSystemSettings)
-                            : { enabled: false };
-
-                        if (aiSysSettings.enabled) {
-                            const reportPath = path.join(__dirname, 'debug_infeasible_report.txt');
-                            if (fs.existsSync(reportPath)) {
-                                const reportContent = fs.readFileSync(reportPath, 'utf-8');
-                                const lines = reportContent.split('\n');
-
-                                // 聚合統計
-                                const capacityErrors = [];       // 教室容量不足
-                                const periodGradeCount = {};     // 按年級統計時段不足班級數
-                                // const periodTotalCount = 0;      // 時段不足總班數
-                                let periodTotalCountNum = 0;
-                                const alternatingWarnings = [];  // 交替課警告
-                                const swimmingWarnings = [];     // 游泳資源警告
-
-
-                                for (const line of lines) {
-                                    if (line.includes('❌')) {
-                                        // 教室容量不足
-                                        const capacityMatch = line.match(/(.+?):\s*容量.*總需求\s*(\d+).*/);
-                                        if (capacityMatch) {
-                                            capacityErrors.push({
-                                                subject: capacityMatch[1].trim(),
-                                                needed: capacityMatch[2]
-                                            });
-                                            continue;
-                                        }
-                                        // 有效時段不足（按年級聚合）
-                                        const periodMatch = line.match(/(\d+)年.+?:\s*科任需求\s*(\d+).*有效時段\s*(\d+)/);
-                                        if (periodMatch) {
-                                            const grade = periodMatch[1];
-                                            const needed = parseInt(periodMatch[2]);
-                                            const available = parseInt(periodMatch[3]);
-                                            periodTotalCountNum++;
-                                            if (!periodGradeCount[grade]) {
-                                                periodGradeCount[grade] = { count: 0, needed, available, shortage: needed - available };
-                                            }
-                                            periodGradeCount[grade].count++;
-                                            continue;
-                                        }
-                                    } else if (line.includes('⚠️')) {
-                                        const warnMatch = line.match(/⚠️\s*(.+)/);
-                                        if (warnMatch) {
-                                            const msg = warnMatch[1];
-                                            // 交替課警告：提取教師名稱（從前一行獲取）
-                                            if (msg.includes('交替班級')) {
-                                                // 從上一行提取教師名稱
-                                                const lineIdx = lines.indexOf(line);
-                                                if (lineIdx > 0) {
-                                                    const prevLine = lines[lineIdx - 1];
-                                                    const teacherMatch = prevLine.match(/-\s*(.+?):\s*負責/);
-                                                    const teacher = teacherMatch ? teacherMatch[1] : '某教師';
-                                                    alternatingWarnings.push({ teacher, message: msg });
-                                                }
-                                            } else if (msg.includes('游泳')) {
-                                                swimmingWarnings.push(msg);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // 匯總輸出
-                                if (capacityErrors.length > 0) {
-                                    capacityErrors.forEach(err => {
-                                        aiAnalysis.push(`📊 【教室容量不足】${err.subject} 總需求 ${err.needed} 節超過現有教室容量，請考慮新增教室或減少課程需求。`);
-                                    });
-                                }
-
-                                if (periodTotalCountNum > 0) {
-                                    const gradeDetails = Object.entries(periodGradeCount)
-                                        .map(([grade, data]) => `${grade}年級${data.count}班（需求${data.needed}節/可用${data.available}節，差${data.shortage}節）`)
-                                        .join('、');
-                                    aiAnalysis.push(`⏰ 【有效時段不足】共 ${periodTotalCountNum} 個班級的科任需求超過有效時段：${gradeDetails}。請檢查排課時段設定或減少科任節數。`);
-                                }
-
-                                alternatingWarnings.forEach(w => {
-                                    aiAnalysis.push(`🔄 【交替課衝突】${w.teacher}：${w.message}`);
-                                });
-
-                                swimmingWarnings.forEach(w => {
-                                    aiAnalysis.push(`🏊 【游泳資源】${w}`);
-                                });
-
-                                // 若未萃取出任何錯誤，給一個通用提示
-                                if (aiAnalysis.length === 0) {
-                                    aiAnalysis.push('⚠️ 排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。');
-                                }
-                            }
+                        const reportPath = path.join(__dirname, 'debug_infeasible_report.txt');
+                        let reportContent = '';
+                        if (fs.existsSync(reportPath)) {
+                            reportContent = fs.readFileSync(reportPath, 'utf-8');
+                            const parsedDiagnostics = parseInfeasibleDiagnosticReport(reportContent);
+                            aiAnalysis = parsedDiagnostics.aiAnalysis;
+                            diagnosticWarnings = parsedDiagnostics.diagnosticWarnings;
                         }
+                        const artifactResult = persistInfeasibleAnalysisArtifacts({
+                            jobId,
+                            errorMsg,
+                            solverStatus: 'INFEASIBLE',
+                            reportContent,
+                            reportPath,
+                            payloadPath: inputPath,
+                            diagnosticWarnings,
+                            aiAnalysis,
+                        });
+                        analysisBundlePath = artifactResult.bundleFileName;
                     } catch (parseError) {
-                        console.error('AI 診斷解析失敗:', parseError);
+                        console.error('診斷報告解析失敗:', parseError);
                     }
 
                     await prisma.scheduleJob.update({
                         where: { id: jobId },
                         data: {
                           status: 'FAILED',
-                          result: JSON.stringify({ error: errorMsg, aiAnalysis }),
+                          result: JSON.stringify({ error: errorMsg, aiAnalysis, diagnosticWarnings, analysisBundlePath }),
                           progressPhase: 'FAILED',
                           progressMessage: `排課失敗：${errorMsg}`,
                           finishedAt: new Date()
@@ -2915,7 +3746,7 @@ app.post('/api/schedule', async (req, res) => {
 
         res.status(202).json({ message: "排課任務已進入排程", jobId: job.id });
     } catch (error) {
-        console.error("🔥 排課 API 發生錯誤：", error);
+        console.error("[ERROR] 排課 API 發生錯誤：", error);
  	res.status(500).json({ error: error.message });
     }
 });
@@ -2950,8 +3781,7 @@ app.get('/api/schedule/:jobId', async (req, res) => {
 // eslint-disable-next-line no-undef
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
-    console.log(`🚀 智慧排課引擎 (API + OR-Tools) 已啟動於 http://localhost:${PORT}`);
+    console.log(`[INFO] 智慧排課引擎 (API + OR-Tools) 已啟動於 http://localhost:${PORT}`);
 });
 // [Blueprint_Extend_Timeout] 設定 Server 層級超時為 1800000ms (30 分鐘)，防止 HTTP 連線中斷
 server.setTimeout(1800000);
-

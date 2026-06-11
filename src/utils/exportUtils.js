@@ -7,6 +7,7 @@ import * as XLSX from 'xlsx'
 import { Document, Packer, Table, TableRow, TableCell, WidthType, TextRun, Paragraph, AlignmentType, PageBreak } from 'docx'
 import { saveAs } from 'file-saver'
 import { expandTimetableCellEntries, getOccurrenceWeight, normalizeWeekTag, splitTeacherNames } from './scheduleAiReport.js'
+import { normalizeSubject } from './subjectCanonical.js'
 
 /**
  * 取得導師姓名 (反查 ID → name)
@@ -142,7 +143,7 @@ export function exportClassesTimetableXLSX(scheduleStore) {
  * 空間視角，含晨光時間、午休、打掃時間
  */
 export async function exportClassroomTimetable(scheduleStore) {
-  const { classrooms, classes } = scheduleStore
+  const { classrooms, classes, schoolInfo } = scheduleStore
 
   // 🔍 [防呆診斷] 專科教室匯出前資料快照
   console.group('[專科教室匯出] 資料診斷')
@@ -255,7 +256,7 @@ export async function exportClassroomTimetable(scheduleStore) {
             }),
             ...days.map((_, dayIdx) => {
               const day = dayIdx + 1
-              const matched = findClassForCell(classes, room, day, period)
+              const matched = findClassForCell(classes, room, day, period, schoolInfo)
               return new TableCell({
                 children: [new Paragraph(matched || '')],
               })
@@ -287,7 +288,7 @@ export async function exportClassroomTimetable(scheduleStore) {
             }),
             ...days.map((_, dayIdx) => {
               const day = dayIdx + 1
-              const matched = findClassForCell(classes, room, day, period)
+              const matched = findClassForCell(classes, room, day, period, schoolInfo)
               return new TableCell({
                 children: [new Paragraph(matched || '')],
               })
@@ -313,7 +314,7 @@ export async function exportClassroomTimetable(scheduleStore) {
     let matchCount = 0
     for (let day = 1; day <= 5; day++) {
       for (let period = 1; period <= 7; period++) {
-        const result = findClassForCell(classes, room, day, period)
+        const result = findClassForCell(classes, room, day, period, schoolInfo)
         if (result) matchCount++
       }
     }
@@ -343,20 +344,15 @@ export async function exportClassroomTimetable(scheduleStore) {
   saveAs(blob, '專科教室課表.docx')
 }
 
+// normalizeSubject is now imported from ./subjectCanonical.js (shared canonical mapping)
+
 /**
- * 科目名稱正規化（與 schedule.js normalizeRoomSubject 保持一致）
- * 確保 room.subject 與 cell.subject 在比對前都使用相同的 canonical key
+ * 從班級名稱提取年級數字
+ * "3年1班" → 3, "一年2班" → null（中文數字不支援）
  */
-function normalizeSubject(subj) {
-  if (!subj) return ''
-  const s = String(subj).trim()
-  if (s === '英語') return '語文-英語'
-  if (s === '自然') return '自然科學'
-  if (s === '科技-資訊' || s === '電腦') return '資訊'
-  if (s === '健康與體育') return '體育'
-  if (s === '本土語言' || s === '閩南語' || s === '客語') return '本土語'
-  if (s === '語文-本土語') return '本土語'
-  return s
+function extractGrade(className) {
+  const match = String(className || '').match(/(\d+)年/);
+  return match ? parseInt(match[1], 10) : null;
 }
 
 /**
@@ -366,7 +362,7 @@ function normalizeSubject(subj) {
  *   Layer 2: 正規化 subject 後比對，不強制要求 teacher 完全一致
  *   Layer 3: 若 room 無 subject，只以 teacher 名稱包含比對（模糊）
  */
-function findClassForCell(classes, room, day, period) {
+function findClassForCell(classes, room, day, period, schoolInfo = null) {
   const matches = []
   const roomSubjectNorm = normalizeSubject(room.subject)
 
@@ -404,8 +400,26 @@ function findClassForCell(classes, room, day, period) {
         matches.push(cls.name)
       }
     } else {
-      // 教室無 primaryTeacher，只以科目判斷
-      if (subjectMatch) matches.push(cls.name)
+      // 教室無 primaryTeacher，只以科目判斷 + 年級過濾
+      if (!subjectMatch) return;
+
+      // 套用 subjectClassroomGrades 過濾
+      if (schoolInfo?.subjectClassroomGrades && roomSubjectNorm) {
+        const grade = extractGrade(cls.name);
+        if (grade !== null) {
+          const gradesConfig = schoolInfo.subjectClassroomGrades;
+          const matchedKey = Object.keys(gradesConfig).find(key =>
+            normalizeSubject(key) === roomSubjectNorm
+          );
+          if (matchedKey && Array.isArray(gradesConfig[matchedKey])) {
+            if (!gradesConfig[matchedKey].includes(grade)) {
+              return; // 該年級不需使用此專科教室
+            }
+          }
+        }
+      }
+
+      matches.push(cls.name)
     }
   })
 

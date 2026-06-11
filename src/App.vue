@@ -2,7 +2,7 @@
   <div class="app-layout">
     <aside class="sidebar">
       <div class="logo-area">
-        <h2>東門國小排課系統</h2>
+        <h2>{{ scheduleStore.schoolInfo.name ? `${scheduleStore.schoolInfo.name}排課系統` : '學校排課系統' }}</h2>
       </div>
       <nav class="nav-menu">
         <router-link to="/" class="nav-item"><span>🏠</span> 系統總覽</router-link>

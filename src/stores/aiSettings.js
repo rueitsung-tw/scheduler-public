@@ -9,6 +9,7 @@ const api = axios.create({
 })
 
 const VALID_SERVICE_TYPES = ['ollama', 'llama.cpp', 'lmstudio']
+const DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
 function normalizeServiceType(value) {
   return VALID_SERVICE_TYPES.includes(value) ? value : 'ollama'
@@ -22,7 +23,12 @@ export const useAiStore = defineStore('aiSettings', {
     model: localStorage.getItem('dongmen_ai_model') || 'gemma4:e4b',
     systemPrompt:
       localStorage.getItem('dongmen_ai_prompt') ||
-      '雿?冽?梢?????瘛望?隤脣?摰嗚????玨蝟餌絞?潛?鈭??隤歹?隢蝜?銝剜???隤脫颲虫犖?脰?隤芣?嚗n1. ?函閰望?閫????蝒誨銵其?暻潭???\n2. ?琿?撱箄降?輯齒鈭箏蝟餌絞?鋆∩耨?寞?隞塚?\n隢?亦策?箏遣霅堆???皜嚗?閬?撱Ｚ店??',
+      '你是學校課表微調引擎，請只回傳 JSON。若提供 candidateMoves，請只從候選池選擇 candidateId，不可自行發明座標。只能提出同一班內的 swap moves，不能改變各班總節數。優先處理教師衝堂、教室容量超額、需求節數不符。',
+    // 本地模型進階參數 (Qwen Thinking 模式穩定化)
+    // 建議值：maxOutputTokens=8192, temperature=0, disableThinking=true
+    disableThinking: JSON.parse(localStorage.getItem('dongmen_ai_disable_thinking') ?? 'true'),
+    maxOutputTokens: Number(localStorage.getItem('dongmen_ai_max_output_tokens') ?? String(DEFAULT_MAX_OUTPUT_TOKENS)),
+    temperature: Number(localStorage.getItem('dongmen_ai_temperature') ?? '0'),
   }),
   actions: {
     async loadFromApi() {
@@ -33,6 +39,9 @@ export const useAiStore = defineStore('aiSettings', {
         this.apiUrl = data.apiUrl ?? this.apiUrl
         this.model = data.model ?? this.model
         this.systemPrompt = data.systemPrompt ?? this.systemPrompt
+        this.disableThinking = data.disableThinking !== undefined ? data.disableThinking : true
+        this.maxOutputTokens = data.maxOutputTokens !== undefined ? Number(data.maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS
+        this.temperature = data.temperature !== undefined ? Number(data.temperature) : 0
         this.saveSettings()
       } catch (error) {
         console.warn('AI 設定 API 載入失敗，改用 localStorage', error)
@@ -47,6 +56,9 @@ export const useAiStore = defineStore('aiSettings', {
           apiUrl: this.apiUrl,
           model: this.model,
           systemPrompt: this.systemPrompt,
+          disableThinking: this.disableThinking,
+          maxOutputTokens: this.maxOutputTokens,
+          temperature: this.temperature,
         })
       } catch (error) {
         console.error('儲存 AI 設定失敗:', error)
@@ -60,6 +72,9 @@ export const useAiStore = defineStore('aiSettings', {
       localStorage.setItem('dongmen_ai_url', this.apiUrl)
       localStorage.setItem('dongmen_ai_model', this.model)
       localStorage.setItem('dongmen_ai_prompt', this.systemPrompt)
+      localStorage.setItem('dongmen_ai_disable_thinking', JSON.stringify(this.disableThinking))
+      localStorage.setItem('dongmen_ai_max_output_tokens', String(this.maxOutputTokens))
+      localStorage.setItem('dongmen_ai_temperature', String(this.temperature))
     },
   },
 })
