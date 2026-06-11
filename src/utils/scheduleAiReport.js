@@ -1,15 +1,6 @@
 import { buildAiTuningCandidatePool } from '../services/aiTuningCandidates.js'
-import { normalizeSubject as _normalizeSubject } from './subjectNormalize.js'
 
 const EMPTY_CELL = '--'
-
-// Re-export shared normalizeSubject for backward compatibility
-export const normalizeSubject = Object.assign(
-  function (subject) {
-    return _normalizeSubject(subject)
-  },
-  { __shared: true },
-)
 
 function toNumber(value, fallback = 0) {
   const n = Number(value)
@@ -33,6 +24,10 @@ export function getGradeFromClassName(className) {
   return match ? Number.parseInt(match[1], 10) : 0
 }
 
+export function normalizeSubject(subject) {
+  if (!subject) return ''
+  return String(subject).trim()
+}
 
 export function normalizeTeacher(teacher) {
   if (!teacher) return ''
@@ -437,18 +432,9 @@ function analyzeClassTimetable(classData, context) {
         const slotWeekEntries = bySlotWeek.get(buildSlotWeekKey(day, period, week)) || []
 
         for (const entry of weekEntries) {
-          // 修復：排除「導師區塊」的教師衝堂判定
-          // 原因：不同班級的導師在同一時段授課是正常的，不應視為衝堂
-          const entrySubject = normalizeSubject(entry.subject)
-          if (entrySubject === '導師區塊') continue
-
           for (const teacher of entry.teacherNames?.length ? entry.teacherNames : splitTeacherNames(entry.teacherName)) {
-            // 修復：只檢查非「導師區塊」的衝突，避免將導師課誤判為衝堂
             const clashes = slotWeekEntries.filter(
-              (other) =>
-                other.className !== className &&
-                (other.teacherNames || []).includes(teacher) &&
-                normalizeSubject(other.subject) !== '導師區塊'
+              (other) => other.className !== className && (other.teacherNames || []).includes(teacher)
             )
             if (clashes.length > 0) {
               const issueKey = `teacher|${day}|${period}|${week}|${teacher}`
@@ -487,8 +473,6 @@ function analyzeClassTimetable(classData, context) {
 
       if (!hasExplicitRoom) {
         for (const subject of subjects) {
-          // 修復：排除「導師區塊」的容量檢查（導師課在原班教室，不佔用專科教室）
-          if (subject === '導師區塊') continue
           if (!isSubjectAllowedForGrade(subject, grade, schoolInfo)) {
             const allowedGrades = getAllowedGradesForSubject(subject, schoolInfo) || []
             issues.push({
@@ -523,8 +507,6 @@ function analyzeClassTimetable(classData, context) {
         }
       } else {
         for (const subject of subjects) {
-          // 修復：排除「導師區塊」的年級適用性檢查
-          if (subject === '導師區塊') continue
           if (!isSubjectAllowedForGrade(subject, grade, schoolInfo)) {
             const allowedGrades = getAllowedGradesForSubject(subject, schoolInfo) || []
             issues.push({
@@ -579,13 +561,6 @@ function analyzeClassTimetable(classData, context) {
     .slice(0, 8)
     .map(([subject, count]) => ({ subject, count }))
 
-  // Debug info: canonical subject keys used for requirement vs scheduled comparison
-  const debugInfo = {
-    requirementSubjects: [...requirementMap.keys()],
-    scheduledSubjects: [...scheduledCountMap.keys()],
-    homeroomTeacher: classData?.homeroom_teacher || '',
-  }
-
   return {
     className,
     grade,
@@ -596,7 +571,6 @@ function analyzeClassTimetable(classData, context) {
     scheduledCountMap: Object.fromEntries(scheduledCountMap.entries()),
     topSubjects,
     issueCount: issueSlots.length + requirementIssues.length,
-    debugInfo,
   }
 }
 
@@ -639,13 +613,9 @@ function buildTeacherLoadReport(classes, teachers, normalizedEntries) {
 
 function buildIssueIndex(classReports) {
   const issues = []
-  // 用於計算唯一問題節次：key = "className-day-period"
-  const uniqueSlotKeys = new Set()
   for (const classReport of classReports) {
     for (const issue of classReport.issueSlots) {
       for (const detail of issue.issues) {
-        // 記錄唯一節次 key
-        uniqueSlotKeys.add(`${classReport.className}-${issue.day}-${issue.period}`)
         issues.push({
           className: classReport.className,
           day: issue.day,
@@ -655,8 +625,6 @@ function buildIssueIndex(classReports) {
       }
     }
     for (const issue of classReport.requirementIssues) {
-      // requirement issues 沒有 day/period，以 subject 為 key
-      uniqueSlotKeys.add(`${classReport.className}-req-${issue.subject}`)
       issues.push({
         className: classReport.className,
         type: 'requirement',
@@ -670,11 +638,7 @@ function buildIssueIndex(classReports) {
       })
     }
   }
-  return {
-    issues,
-    rawIssueCount: issues.length,
-    uniqueIssueSlotCount: uniqueSlotKeys.size,
-  }
+  return issues
 }
 
 function buildSwapCandidates(classReports) {
@@ -791,13 +755,13 @@ export function buildScheduleAiReport({
     })
   )
 
-  const { issues: issueList, rawIssueCount, uniqueIssueSlotCount } = buildIssueIndex(classReports)
+  const issueIndex = buildIssueIndex(classReports)
   const teacherLoads = buildTeacherLoadReport(classes, teachers, normalizedEntries)
   const swapCandidates = buildSwapCandidates(classReports)
   const { candidatePool, candidateMoves } = buildAiTuningCandidatePool({
     classes: classReports,
     summary: {
-      issueCount: rawIssueCount,
+      issueCount: issueIndex.length,
     },
   })
   const issueClasses = classReports.filter((classReport) => classReport.issueCount > 0)
@@ -806,14 +770,12 @@ export function buildScheduleAiReport({
     totalClasses: classes.length,
     totalEntries: normalizedEntries.length,
     issueClassCount: issueClasses.length,
-    rawIssueCount,
-    uniqueIssueSlotCount,
-    issueCount: rawIssueCount,
+    issueCount: issueIndex.length,
     teacherOverloadCount: teacherLoads.filter((item) => item.overload > 0).length,
     teacherOverloadTotal: teacherLoads
       .filter((item) => item.overload > 0)
       .reduce((sum, item) => sum + item.overload, 0),
-    issueSlotCount: issueList.filter((item) => item.day && item.period).length,
+    issueSlotCount: issueIndex.filter((item) => item.day && item.period).length,
     generatedAt: new Date().toISOString(),
   }
 
@@ -823,7 +785,7 @@ export function buildScheduleAiReport({
     engineMeta,
     summary,
     classes: classReports,
-    issues: issueList,
+    issues: issueIndex,
     teacherLoads,
     swapCandidates,
     candidatePool,
@@ -849,8 +811,6 @@ export function buildScheduleAiMarkdown(report) {
   lines.push(`- 班級數：${report.summary.totalClasses}`)
   lines.push(`- 排課筆數：${report.summary.totalEntries}`)
   lines.push(`- 有問題班級：${report.summary.issueClassCount}`)
-  lines.push(`- 原始問題數（展開）：${report.summary.rawIssueCount ?? report.summary.issueCount}`)
-  lines.push(`- 唯一問題節次：${report.summary.uniqueIssueSlotCount ?? '?'}`)
   lines.push(`- 問題總數：${report.summary.issueCount}`)
   lines.push(`- 教師超載數：${report.summary.teacherOverloadCount}`)
   lines.push('')
@@ -861,8 +821,6 @@ export function buildScheduleAiMarkdown(report) {
     ['班級數', String(report.summary.totalClasses)],
     ['排課筆數', String(report.summary.totalEntries)],
     ['有問題班級', String(report.summary.issueClassCount)],
-    ['原始問題數（展開）', String(report.summary.rawIssueCount ?? report.summary.issueCount)],
-    ['唯一問題節次', String(report.summary.uniqueIssueSlotCount ?? '?')],
     ['問題總數', String(report.summary.issueCount)],
     ['教師超載數', String(report.summary.teacherOverloadCount)],
     ['教師超載總量', String(report.summary.teacherOverloadTotal)],

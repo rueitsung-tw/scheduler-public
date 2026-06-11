@@ -7,13 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test",
     "lint": "run-s lint:*",
     "lint:oxlint": "oxlint . --fix",
     "lint:eslint": "eslint . --fix --cache",
-    "format": "prettier --write --experimental-cli src/",
-    "public:check": "node scripts/public-repo-sync.mjs check",
-    "public:sync": "node scripts/public-repo-sync.mjs sync"
+    "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.8.0",

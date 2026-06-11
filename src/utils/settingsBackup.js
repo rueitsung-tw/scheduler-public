@@ -74,17 +74,6 @@ export function buildExportPayload() {
       course_requirements: cloneDeep(c.course_requirements) || [],
       timetable: cloneDeep(c.timetable) || {},
     })),
-    // 🔒 完整匯出專科教室資料
-    classrooms: (store.classrooms || []).map((room) => ({
-      id: room.id,
-      name: room.name,
-      subject: room.subject,
-      primaryTeacher: room.primaryTeacher || '',
-      allowSharing: room.allowSharing !== false,
-      gradePreferences: Array.isArray(room.gradePreferences)
-        ? [...room.gradePreferences]
-        : [],
-    })),
   }
 }
 
@@ -123,9 +112,6 @@ export function parseImportFile(text) {
     teachers: Array.isArray(payload.teachers) ? payload.teachers : [],
     // 🔒 解析班級資料
     classes: Array.isArray(payload.classes) ? payload.classes : [],
-    // 🔒 解析專科教室資料 — 保留是否有出現 classrooms 欄位的資訊
-    hasClassrooms: Object.prototype.hasOwnProperty.call(payload, 'classrooms'),
-    classrooms: Array.isArray(payload.classrooms) ? payload.classrooms : [],
   }
 }
 
@@ -213,20 +199,6 @@ export function applyImport(data) {
     })
   }
 
-  // 🔒 完整還原專科教室資料
-  // 只有在備份檔明確包含 classrooms 欄位時才處理
-  // 舊版備份沒有 classrooms → 不觸動現有教室資料
-  if (data.hasClassrooms === true) {
-    store.classrooms = data.classrooms.map((room) => ({
-      id: room.id || generateClassroomId(),
-      name: room.name || '',
-      subject: normalizeClassroomSubject(room.subject),
-      primaryTeacher: room.primaryTeacher || '',
-      allowSharing: room.allowSharing !== false,
-      gradePreferences: Array.isArray(room.gradePreferences) ? [...room.gradePreferences] : [],
-    }))
-  }
-
   store.markScheduleDirty()
 }
 
@@ -288,25 +260,4 @@ function normalizeAiSettings(ai) {
 function cloneDeep(v) {
   if (v === null || typeof v !== 'object') return v
   return JSON.parse(JSON.stringify(v))
-}
-
-/**
- * 專科教室科目名稱 normalization — 與 schedule store 的 canonical mapping 保持一致
- */
-function normalizeClassroomSubject(subj) {
-  if (!subj) return ''
-  const s = String(subj).trim()
-  if (s === '英語') return '語文-英語'
-  if (s === '自然') return '自然科學'
-  if (s === '科技-資訊' || s === '電腦') return '資訊'
-  if (s === '健康與體育') return '體育'
-  if (s === '本土語言' || s === '閩南語' || s === '客語') return '本土語'
-  return s
-}
-
-/**
- * 產生專科教室唯一 ID — 與 schedule store 的 addClassroom 一致
- */
-function generateClassroomId() {
-  return Date.now().toString() + '-' + Math.random().toString(36).substring(2, 9)
 }

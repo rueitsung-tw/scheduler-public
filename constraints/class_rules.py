@@ -11,7 +11,6 @@ class_rules.py — 班級維度約束
 依賴：config, utils
 """
 
-import terminal_sanitizer
 from collections import defaultdict
 import re
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS, LUNCH_BOUNDARY
@@ -44,8 +43,8 @@ def apply_daily_subject_limit(model, classes_data, schedule, locked_vars=None):
     """
     [硬約束 6] 每日科任課上限
 
-    [INFO] 豁免一：人類預排鎖定之變數跳過硬約束
-     豁免二：藝才班 + 虛擬/外聘/待排教師的課程跳過硬約束
+    🛡️ 豁免一：人類預排鎖定之變數跳過硬約束
+    🎭 豁免二：藝才班 + 虛擬/外聘/待排教師的課程跳過硬約束
 
     Args:
         model: CpModel
@@ -90,11 +89,11 @@ def apply_daily_subject_limit(model, classes_data, schedule, locked_vars=None):
                 if not subject_vars:
                     continue
 
-                # [INFO] 豁免一：人類預排神聖不可侵犯
+                # 🛡️ 豁免一：人類預排神聖不可侵犯
                 if any(v in locked_vars for v in subject_vars):
                     continue
 
-                #  豁免二：藝才班 + 虛擬教師專長課程
+                # 🎭 豁免二：藝才班 + 虛擬教師專長課程
                 if is_arts_class:
                     teachers_in_vars = [t for t, s, var in schedule_by_class_period.get((c_name, p), []) if var in subject_vars]
                     if all(is_virtual_teacher(t) for t in teachers_in_vars if t):
@@ -153,8 +152,8 @@ def apply_no_consecutive_subject(model, classes_data, schedule, locked_vars=None
     """
     [硬約束 8] 科任課不連堂（通用版）
 
-    [INFO] 豁免一：人類預排鎖定之變數跳過硬約束
-     豁免二：藝才班 + 虛擬/外聘/待排教師的課程跳過硬約束
+    🛡️ 豁免一：人類預排鎖定之變數跳過硬約束
+    🎭 豁免二：藝才班 + 虛擬/外聘/待排教師的課程跳過硬約束
 
     排除自然、美勞、音樂、導師區塊（各有專門約束處理）
 
@@ -182,7 +181,7 @@ def apply_no_consecutive_subject(model, classes_data, schedule, locked_vars=None
             if "自然" in subj or "美勞" in subj or "音樂" in subj or "導師區塊" in subj:
                 continue
 
-            #  豁免二：藝才班 + 虛擬教師專長課程
+            # 🎭 豁免二：藝才班 + 虛擬教師專長課程
             teacher_name = req.get("teacher_name") or req.get("teacher", "")
             if is_arts_class and is_virtual_teacher(teacher_name):
                 continue
@@ -197,7 +196,7 @@ def apply_no_consecutive_subject(model, classes_data, schedule, locked_vars=None
                     v1 = [var for t, s, var in schedule_by_class_period.get((c_name, p1), []) if subj in s]
                     v2 = [var for t, s, var in schedule_by_class_period.get((c_name, p2), []) if subj in s]
                     if v1 and v2:
-                        # [INFO] 豁免一：人類預排神聖不可侵犯
+                        # 🛡️ 豁免一：人類預排神聖不可侵犯
                         if v1[0] in locked_vars or v2[0] in locked_vars:
                             continue
                         model.Add(v1[0] + v2[0] <= 1)
@@ -288,7 +287,7 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
     active_classrooms = list(classrooms)
     for core_subj, fallback_count in core_subjects_fallback.items():
         if core_subj not in existing_subjects:
-            print(f"  [NOTE] [安全預設] 未偵測到【{core_subj}】教室建檔，系統自動套用預設防護網: {fallback_count} 間共享教室")
+            print(f"  📢 [安全預設] 未偵測到【{core_subj}】教室建檔，系統自動套用預設防護網: {fallback_count} 間共享教室")
             for i in range(fallback_count):
                 active_classrooms.append({
                     "id": f"virtual_{core_subj}_{i}",
@@ -319,7 +318,7 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
             class_active_vars = []
 
             for c, t, s, var in schedule_by_period.get(p, []):
-                # [NEW] 讀取動態年級使用設定
+                # 🆕 讀取動態年級使用設定
                 grade = class_grade_map.get(c, 1)
                 classroom_grades_cfg = {}
                 if school_info and "subjectClassroomGrades" in school_info:
@@ -426,11 +425,11 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                         "var": av
                     })
 
-                    # -- 軟約束 A：非優先年級使用此教室的懲罰 (GRADE_AFFINITY_MISS_PENALTY) --
+                    # ── 軟約束 A：非優先年級使用此教室的懲罰 (GRADE_AFFINITY_MISS_PENALTY) ──
                     if is_mismatch:
                         penalty_vars.append(400 * av)
 
-                    # -- 軟約束 B：主責教師未命中主場教室的懲罰 (PRIMARY_TEACHER_MISS_PENALTY) --
+                    # ── 軟約束 B：主責教師未命中主場教室的懲罰 (PRIMARY_TEACHER_MISS_PENALTY) ──
                     primary_teacher = room.get("primaryTeacher", "")
                     if primary_teacher and t_name and primary_teacher != t_name:
                         penalty_vars.append(800 * av)

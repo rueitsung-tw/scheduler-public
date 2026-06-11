@@ -6,7 +6,7 @@
 import * as XLSX from 'xlsx'
 import { Document, Packer, Table, TableRow, TableCell, WidthType, TextRun, Paragraph, AlignmentType, PageBreak } from 'docx'
 import { saveAs } from 'file-saver'
-import { normalizeSubject } from './subjectNormalize.js'
+import { expandTimetableCellEntries, getOccurrenceWeight, normalizeWeekTag, splitTeacherNames } from './scheduleAiReport.js'
 
 /**
  * 取得導師姓名 (反查 ID → name)
@@ -343,6 +343,21 @@ export async function exportClassroomTimetable(scheduleStore) {
   saveAs(blob, '專科教室課表.docx')
 }
 
+/**
+ * 科目名稱正規化（與 schedule.js normalizeRoomSubject 保持一致）
+ * 確保 room.subject 與 cell.subject 在比對前都使用相同的 canonical key
+ */
+function normalizeSubject(subj) {
+  if (!subj) return ''
+  const s = String(subj).trim()
+  if (s === '英語') return '語文-英語'
+  if (s === '自然') return '自然科學'
+  if (s === '科技-資訊' || s === '電腦') return '資訊'
+  if (s === '健康與體育') return '體育'
+  if (s === '本土語言' || s === '閩南語' || s === '客語') return '本土語'
+  if (s === '語文-本土語') return '本土語'
+  return s
+}
 
 /**
  * 找出匹配教室的班級名稱
@@ -827,7 +842,7 @@ export function exportSubjectTeacherTimetablesLegacy(scheduleStore) {
     aoa.push(['', '節次', ...Array(teachers.length).fill('')])
 
     // Data rows: days × periods
-    const totals = Array.from({ length: teachers.length }, () => 0)
+    const totals = new Array(teachers.length).fill(0)
 
     for (let dayNum = 1; dayNum <= 5; dayNum++) {
       for (const period of PERIODS) {

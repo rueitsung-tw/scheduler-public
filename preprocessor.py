@@ -4,7 +4,6 @@
 不碰 OR-Tools model
 """
 
-import terminal_sanitizer
 import re
 import math
 from utils import parse_grade
@@ -72,7 +71,7 @@ def _clean_ghost_art(cls):
             base = re.sub(r'_(固定|交替|homeroom)', '', norm)
             key = (base, req.get("teacher_name", ""))
             if key in seen_normalized:
-                print(f"  [CLEAN] [Ghost Art 清理] 跳過重複科目: {subject} ({req.get('teacher_name', '')}) @ {cls.get('name', '')}")
+                print(f"  🧹 [Ghost Art 清理] 跳過重複科目: {subject} ({req.get('teacher_name', '')}) @ {cls.get('name', '')}")
                 continue
             seen_normalized.add(key)
         cleaned.append(req)
@@ -142,7 +141,7 @@ def _homeroom_blockization(cls, ai_settings):
             other_reqs.insert(0, merged)
             
         cls["course_requirements"] = other_reqs
-        print(f"  [LINK] [Homeroom Blockization] {cls.get('name', '')}: 已合併 {len(homeroom_subs_to_block)} 個導師科目，共 {total_blocked_periods} 節課至「導師區塊」")
+        print(f"  🔗 [Homeroom Blockization] {cls.get('name', '')}: 已合併 {len(homeroom_subs_to_block)} 個導師科目，共 {total_blocked_periods} 節課至「導師區塊」")
     else:
         _homeroom_blockization_legacy(cls)
 
@@ -173,7 +172,7 @@ def _homeroom_blockization_legacy(cls):
             "allow_consecutive": True
         }
         cls["course_requirements"] = [merged] + other_reqs
-        print(f"  [LINK] [Homeroom Block] {cls.get('name', '')}: 合併 {len(homeroom_reqs)} 個導師區塊 → {total_hr_periods} 節")
+        print(f"  🔗 [Homeroom Block] {cls.get('name', '')}: 合併 {len(homeroom_reqs)} 個導師區塊 → {total_hr_periods} 節")
 
 
 def _split_arts_15_15(cls, metadata):
@@ -248,7 +247,7 @@ def _split_arts_15_15(cls, metadata):
         })
 
     cls["course_requirements"] = other_reqs + new_reqs
-    print(f"  ️ [Arts Split] {c_name}: 音樂 1.5 + 美勞 1.5 → 音樂_固定(1) + 美勞_固定(1) + 交替(1) [group={pair_group_id}]")
+    print(f"  ✂️ [Arts Split] {c_name}: 音樂 1.5 + 美勞 1.5 → 音樂_固定(1) + 美勞_固定(1) + 交替(1) [group={pair_group_id}]")
 
 
 def _process_generic_alternating_subjects(cls):
@@ -275,7 +274,7 @@ def _process_generic_alternating_subjects(cls):
             req["pair_group_id"] = pair_group_id
             # 默認不可連堂，每週1節
             req["allow_consecutive"] = False
-            print(f"  [WARN] [Generic Alt] {c_name}: 識別交替科目 {subj} (老師: {t_name}) [group={pair_group_id}]")
+            print(f"  🔄 [Generic Alt] {c_name}: 識別交替科目 {subj} (老師: {t_name}) [group={pair_group_id}]")
 
 
 def _fix_existing_pair_group_ids(cls):
@@ -302,3 +301,4 @@ def _fix_existing_pair_group_ids(cls):
             
             req["pair_group_id"] = new_gid
             req["is_alternating"] = True
+

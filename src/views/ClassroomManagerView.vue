@@ -80,20 +80,7 @@
     </div>
 
     <div class="list-card">
-      <div class="list-header">
-        <h3>🏢 已建檔之專科教室</h3>
-        <div class="classroom-backup-actions">
-          <button class="btn-export-classroom" @click="exportClassroomsOnly">匯出教室資料</button>
-          <button class="btn-import-classroom" @click="triggerImportFile">匯入教室資料</button>
-          <input
-            type="file"
-            ref="classroomFileInput"
-            accept=".json,application/json"
-            style="display: none"
-            @change="importClassroomsOnly"
-          />
-        </div>
-      </div>
+      <h3>🏢 已建檔之專科教室</h3>
       <table class="room-table">
         <thead>
           <tr>
@@ -378,126 +365,6 @@ const printTimetable = () => {
 }
 
 // ==========================================
-// 📦 專科教室資料匯出 / 匯入
-// ==========================================
-
-const classroomFileInput = ref(null)
-
-/**
- * 科目名稱 normalization — 與 schedule store 的 canonical mapping 保持一致
- */
-function normalizeClassroomSubject(subj) {
-  if (!subj) return ''
-  const s = String(subj).trim()
-  if (s === '英語') return '語文-英語'
-  if (s === '自然') return '自然科學'
-  if (s === '科技-資訊' || s === '電腦') return '資訊'
-  if (s === '健康與體育') return '體育'
-  if (s === '本土語言' || s === '閩南語' || s === '客語') return '本土語'
-  return s
-}
-
-/**
- * 產生專科教室唯一 ID
- */
-function generateClassroomId() {
-  return Date.now().toString() + '-' + Math.random().toString(36).substring(2, 9)
-}
-
-/**
- * 觸發檔案選擇對話框
- */
-function triggerImportFile() {
-  classroomFileInput.value?.click()
-}
-
-/**
- * 匯出專科教室資料為獨立 JSON 檔
- */
-function exportClassroomsOnly() {
-  const payload = {
-    backupType: 'classrooms_backup',
-    backupVersion: '1.0.0',
-    exportedAt: new Date().toISOString(),
-    classrooms: (scheduleStore.classrooms || []).map((room) => ({
-      id: room.id,
-      name: room.name,
-      subject: room.subject,
-      primaryTeacher: room.primaryTeacher || '',
-      allowSharing: room.allowSharing !== false,
-      gradePreferences: Array.isArray(room.gradePreferences)
-        ? [...room.gradePreferences]
-        : [],
-    })),
-  }
-
-  const json = JSON.stringify(payload, null, 2)
-  const blob = new Blob([json], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  const dateStr = new Date().toISOString().slice(0, 10)
-  a.href = url
-  a.download = `專科教室資料_${dateStr}.json`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-/**
- * 匯入專科教室資料（含雲端同步失敗回滾）
- */
-async function importClassroomsOnly(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-
-  // 清空 input value，確保同檔案可重選
-  classroomFileInput.value = ''
-
-  // 備份當前教室資料，用於失敗時回滾
-  const originalClassrooms = [...scheduleStore.classrooms]
-
-  try {
-    const text = await file.text()
-    const payload = JSON.parse(text)
-
-    // 檢查檔案格式
-    if (payload.backupType !== 'classrooms_backup' || !Array.isArray(payload.classrooms)) {
-      alert('檔案格式不正確，請選擇專科教室備份檔。')
-      return
-    }
-
-    const confirmed = confirm(`即將匯入 ${payload.classrooms.length} 筆教室資料，會覆蓋現有教室設定，是否繼續？`)
-    if (!confirmed) return
-
-    // 正規化後整批寫入
-    scheduleStore.classrooms = payload.classrooms.map((room) => ({
-      id: room.id || generateClassroomId(),
-      name: room.name || '',
-      subject: normalizeClassroomSubject(room.subject),
-      primaryTeacher: room.primaryTeacher || '',
-      allowSharing: room.allowSharing !== false,
-      gradePreferences: Array.isArray(room.gradePreferences) ? [...room.gradePreferences] : [],
-    }))
-
-    scheduleStore.markScheduleDirty()
-
-    // 同步雲端
-    const success = await scheduleStore.syncToCloud()
-    if (!success) {
-      // 同步失敗，回滾到匯入前狀態
-      scheduleStore.classrooms = originalClassrooms
-      alert('匯入失敗，已還原原本的教室資料。')
-      return
-    }
-
-    alert(`已成功匯入 ${payload.classrooms.length} 筆教室資料`)
-  } catch (err) {
-    // 異常時回滾
-    scheduleStore.classrooms = originalClassrooms
-    alert(`匯入失敗：${err.message}`)
-  }
-}
-
-// ==========================================
 // 🚀 核心重構：全域視野 (Global View) 教室分流器 + 中年級自然科例外規則 (Qwen 優化版)
 // ==========================================
 const getRoomClassesLegacy = (day, period) => {
@@ -523,10 +390,10 @@ const getRoomClassesLegacy = (day, period) => {
 
       if (isAssigned) {
         let label = String(cls.name).replace('年', '0').replace('班', '');
-
+        
         // 針對交替課 (如 "音樂(單)/美勞(雙)") 做人性化後綴顯示
         if (course.subject.includes('單') || course.subject.includes('雙')) {
-          const matchesSubj = course.subject.match(/([^(/]+)\((單|雙)\)/g);
+          const matchesSubj = course.subject.match(/([^\(/]+)\((單|雙)\)/g);
           if (matchesSubj) {
             const matchedPart = matchesSubj.find(p => p.includes(selectedRoom.value.subject));
             if (matchedPart) {
@@ -894,46 +761,6 @@ const getRoomClasses = (day, period) => {
 .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
 .badge-grade { background: #dbeafe; color: #1e40af; }
 .badge-shared { background: #d1fae5; color: #065f46; }
-
-/* 📦 專科教室匯出/匯入操作區 */
-.list-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.list-header h3 {
-  margin: 0 !important;
-  border-bottom: none !important;
-  padding-bottom: 0 !important;
-}
-
-.classroom-backup-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.btn-export-classroom,
-.btn-import-classroom {
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid #2e75b6;
-  font-size: 0.88rem;
-  cursor: pointer;
-  transition: transform 0.15s, background 0.15s;
-  background: #f0f7ff;
-  color: #2e75b6;
-}
-
-.btn-export-classroom:hover,
-.btn-import-classroom:hover {
-  background: #2e75b6;
-  color: white;
-  transform: translateY(-1px);
-}
 
 @media print {
   body * { visibility: hidden; }

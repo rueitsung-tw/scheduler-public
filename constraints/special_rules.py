@@ -12,12 +12,11 @@ special_rules.py — 特殊規則（例外型、專題型）
 依賴：config, utils
 """
 
-import terminal_sanitizer
 import re
 
 from config import DAYS, PERIODS_PER_DAY, LUNCH_BOUNDARY, TOTAL_PERIODS
 
-# --------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────
 # 有效相鄰節次對：唯一規則來源（single source of truth）
 #
 # 規則說明：
@@ -25,9 +24,9 @@ from config import DAYS, PERIODS_PER_DAY, LUNCH_BOUNDARY, TOTAL_PERIODS
 #   下午合法：(4,5), (5,6)
 #   禁止：    (3,4) 跨午休邊界
 #
-# [WARN] special_rules.py 的建模端與 solver.py 的驗證端
+# ⚠️ special_rules.py 的建模端與 solver.py 的驗證端
 #    必須共用此函式，不得各自重新判斷邊界。
-# --------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────
 
 def get_valid_consecutive_pairs(base: int) -> list[tuple[int, int]]:
     """
@@ -199,7 +198,7 @@ def apply_art_consecutive_constraint(model, classes_data, schedule):
         # 4. 強制至少一組連堂
         if consecutive_patterns:
             model.Add(sum(consecutive_patterns) >= 1)
-            print(f"  [OK] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對)")
+            print(f"  ✅ [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對)")
 
 
 def apply_alternating_perfect_pairing(
@@ -212,7 +211,7 @@ def apply_alternating_perfect_pairing(
     class_pair_group,
     class_teacher_pair,
     phase2_penalty_vars,
-    ai_settings=None,  # [NEW] 傳入 ai_settings 以讀取配置
+    ai_settings=None,  # 🆕 傳入 ai_settings 以讀取配置
 ):
     """
     [硬/軟約束 14] 班對班互補配對約束（支援硬性/軟性/奇數班級降級）
@@ -268,7 +267,7 @@ def apply_alternating_perfect_pairing(
             if len(class_vars) < 2:
                 continue
 
-            # -- 容量軟懲罰：同時段活躍班數 > pair_capacity × 2
+            # ── 容量軟懲罰：同時段活躍班數 > pair_capacity × 2
             active_bvars = [v for _, v in class_vars]
             if len(active_bvars) > pair_capacity * 2:
                 overload = model.NewIntVar(
@@ -278,7 +277,7 @@ def apply_alternating_perfect_pairing(
                 model.Add(overload >= sum(active_bvars) - pair_capacity * 2)
                 phase2_penalty_vars.append(10000 * overload)
 
-            # -- 決定約束強度：
+            # ── 決定約束強度：
             # 1. 總班級數不等於 2 的大群組或奇數群組，自動降為軟性約束 (soft)，防範著色矛盾 (完全圖 K_k 當 k >= 3 時為 2-不可著色)
             # 2. 只有剛好 2 個班的完美配對群組才保留 hard 模式
             total_members = group_classes_count.get(gid, 0)
@@ -294,7 +293,7 @@ def apply_alternating_perfect_pairing(
             else:
                 strictness = "soft"
 
-            # -- 兩兩互補約束建立
+            # ── 兩兩互補約束建立
             for i in range(len(class_vars)):
                 for j in range(i + 1, len(class_vars)):
                     c_i, var_i = class_vars[i]
@@ -313,12 +312,12 @@ def apply_alternating_perfect_pairing(
                     model.Add(both_active <= var_j)
 
                     if strictness == "hard":
-                        # [OK] 硬約束模式
+                        # ✅ 硬約束模式
                         model.Add(bool_i + bool_j >= 1).OnlyEnforceIf(both_active)
                         model.Add(bool_i + bool_j <= 1).OnlyEnforceIf(both_active)
-                        # print(f"  [LOCK] [Pair 硬約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已硬鎖定")
+                        # print(f"  🔒 [Pair 硬約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已硬鎖定")
                     else:
-                        # -- 軟性約束模式（奇數班群或特定設定下使用）
+                        # ── 軟性約束模式（奇數班群或特定設定下使用）
                         # 我們希望：both_active 成立時，bool_i != bool_j
                         # 若相同 (bool_i == bool_j)，則產生 mismatch
                         same = model.NewBoolVar(f'alt_same_{gid}_p{p}_{c_i}_{c_j}')
@@ -334,7 +333,7 @@ def apply_alternating_perfect_pairing(
                         
                         penalty_weight = ai_settings.get("pairingPenaltyWeight", 5000)
                         phase2_penalty_vars.append(penalty_weight * mismatch)
-                        # print(f"  [CONSTRAINT] [Pair 軟約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已建立為軟約束 (權重: {penalty_weight})")
+                        # print(f"  ⚡ [Pair 軟約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已建立為軟約束 (權重: {penalty_weight})")
 
 
 def apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_penalty_vars):

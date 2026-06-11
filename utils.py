@@ -3,7 +3,6 @@
 所有純函式、無副作用的公用邏輯都放在此模組。
 """
 
-import terminal_sanitizer
 import re
 from config import VIRTUAL_TEACHER_KEYWORDS, CLASSROOM_LIMITS_FALLBACK
 
@@ -23,7 +22,7 @@ def parse_grade(cls):
             grade = int(raw_grade)
             # 驗證：如果名稱中有年級資訊且與 grade 不同，相信名稱
             if name_grade is not None and grade != name_grade:
-                print(f"  [WARN] [Grade 修正] {c_name}: grade={raw_grade} 與名稱不符，修正為 {name_grade}")
+                print(f"  ⚠️ [Grade 修正] {c_name}: grade={raw_grade} 與名稱不符，修正為 {name_grade}")
                 return name_grade
             return grade
         except (ValueError, TypeError):
@@ -87,7 +86,7 @@ def get_subject_capacity(subject_key, classrooms_count_map, classroom_limits_con
     if fallback_map is None:
         fallback_map = CLASSROOM_LIMITS_FALLBACK
     
-    # [NOTE] 修復核心：將傳入的原始科目名稱進行正規化 (例如 "自然科學" -> "自然", "科技-資訊" -> "資訊")
+    # 🔔 修復核心：將傳入的原始科目名稱進行正規化 (例如 "自然科學" -> "自然", "科技-資訊" -> "資訊")
     norm_key = normalize_room_name(subject_key)
     
     # ① 優先：若有實體教室資料，使用真實教室數量
@@ -130,7 +129,7 @@ def add_consecutive_constraint(model, schedule, class_name, subject, consecutive
             subject_vars_by_period[p].append(var)
     
     if not subject_vars_by_period:
-        print(f"  [WARN] [連堂約束] {class_name} - {subject}: 找不到對應的 schedule 變數，跳過")
+        print(f"  ⚠️ [連堂約束] {class_name} - {subject}: 找不到對應的 schedule 變數，跳過")
         return
     
     # Step 2: 為每一天建立「連堂配對」布林變數
@@ -168,6 +167,6 @@ def add_consecutive_constraint(model, schedule, class_name, subject, consecutive
     # Step 3: 強制至少達到 consecutive_groups 組連堂
     if total_consecutive_pairs:
         model.Add(sum(total_consecutive_pairs) >= consecutive_groups)
-        print(f"  [OK] [連堂約束] {class_name} - {subject}: 強制至少 {consecutive_groups} 組連堂 (共 {len(total_consecutive_pairs)} 個合法配對位置)")
+        print(f"  ✅ [連堂約束] {class_name} - {subject}: 強制至少 {consecutive_groups} 組連堂 (共 {len(total_consecutive_pairs)} 個合法配對位置)")
     else:
-        print(f"  [WARN] [連堂約束] {class_name} - {subject}: 無合法連堂配對位置")
+        print(f"  ⚠️ [連堂約束] {class_name} - {subject}: 無合法連堂配對位置")

@@ -12,7 +12,6 @@ solver.py — 排課系統主入口
 不改 CLI 介面、不改輸入 JSON schema、不改輸出 JSON schema、不改排課結果邏輯。
 """
 
-import terminal_sanitizer
 import sys
 import json
 import time
@@ -61,7 +60,7 @@ from constraints.special_rules import (
 
 def main():
     if len(sys.argv) != 3:
-        print("[ERROR] 參數錯誤：需提供 input_path 與 output_path")
+        print("❌ 參數錯誤：需提供 input_path 與 output_path")
         sys.exit(1)
 
     input_path = sys.argv[1]
@@ -71,7 +70,7 @@ def main():
         with open(input_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception as e:
-        print(f"[ERROR] 讀取 JSON 失敗: {e}")
+        print(f"❌ 讀取 JSON 失敗: {e}")
         sys.exit(1)
 
     job_id = data.get("jobId", "UNKNOWN")
@@ -105,7 +104,7 @@ def main():
         classrooms_count_map[norm] = classrooms_count_map.get(norm, 0) + 1
 
     # ============================================================
-    # [NEW] [gradePreferences] 組建教室親和力映射表
+    # 🆕 [gradePreferences] 組建教室親和力映射表
     # room_grade_affinity: dict[subject_str, list[int]]
     #   key = 科目正規名稱（如 "自然科學"），value = 偏好年級列表（如 [6]），空列表表示共享
     # room_primary_teacher_map: dict[subject_str, str]
@@ -153,8 +152,8 @@ def main():
         if pt and subj not in room_primary_teacher_map:
             room_primary_teacher_map[subj] = pt
 
-    print(f"[INFO] [gradePreferences] 教室年級親和力映射: {room_grade_affinity}")
-    print(f"[INFO] [primaryTeacher 主場映射] 教室主責教師映射: {room_primary_teacher_map}")
+    print(f"📌 [gradePreferences] 教室年級親和力映射: {room_grade_affinity}")
+    print(f"📌 [primaryTeacher 主場映射] 教室主責教師映射: {room_primary_teacher_map}")
 
     # 計算各科目總需求
     subject_demand_count = defaultdict(int)
@@ -186,10 +185,10 @@ def main():
         # ============================================================
         # Phase 1: 基礎建模
         # ============================================================
-        print("[INFO] [建模] 創建 schedule 變數與課程需求約束. ..")
+        print("📦 [建模] 創建 schedule 變數與課程需求約束. ..")
         create_schedule_vars_and_course_demands(model, classes_data, schedule)
 
-        print("[WARN] [建模] 創建 alternating BoolVar. ..")
+        print("🔄 [建模] 創建 alternating BoolVar. ..")
         (
             alternating_class_is_music_odd,
             alternating_group_map,
@@ -197,40 +196,40 @@ def main():
             class_teacher_pair,
         ) = create_alternating_vars(model, classes_data)
 
-        print("[LOCK] [建模] 掃描手動預排鎖定. ..")
+        print("🔒 [建模] 掃描手動預排鎖定. ..")
         locked_count, locked_vars, lock_audit_log = apply_preallocation_locks(model, classes_data, schedule)
 
         # ============================================================
         # Phase 2: 教師維度約束
         # ============================================================
-        print("[CONSTRAINT] [核心約束] 加入教師衝堂防護. ..")
+        print("⚡ [核心約束] 加入教師衝堂防護. ..")
         apply_anti_collision(model, schedule, class_names, teacher_names, classes_data, ai_settings)
 
-        print("[CONSTRAINT] [核心約束] 加入教師配額限制. ..")
+        print("⚡ [核心約束] 加入教師配額限制. ..")
         apply_teacher_quota(model, classes_data, teachers_data, schoolInfo)
 
-        print("[CONSTRAINT] [核心約束] 加入不排課時段限制. ..")
+        print("⚡ [核心約束] 加入不排課時段限制. ..")
         apply_teacher_unavailable_slots(model, schedule, teachers_data)
 
-        print("[CONSTRAINT] [核心約束] 加入特殊課程鎖定. ..")
+        print("⚡ [核心約束] 加入特殊課程鎖定. ..")
         apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings)
 
         # ============================================================
         # Phase 3: 班級維度約束
         # ============================================================
-        print("[CONSTRAINT] [核心約束] 加入每日科任課上限. ..")
+        print("⚡ [核心約束] 加入每日科任課上限. ..")
         apply_daily_subject_limit(model, classes_data, schedule, locked_vars)
 
-        print("[CONSTRAINT] [核心約束] 加入低年級下午禁排. ..")
+        print("⚡ [核心約束] 加入低年級下午禁排. ..")
         apply_afternoon_prohibition(model, classes_data, schedule)
 
-        print("[CONSTRAINT] [核心約束] 加入科任課不連堂. ..")
+        print("⚡ [核心約束] 加入科任課不連堂. ..")
         apply_no_consecutive_subject(model, classes_data, schedule, locked_vars)
 
-        print("[CONSTRAINT] [核心約束] 加入自然課排課習慣...")
+        print("⚡ [核心約束] 加入自然課排課習慣...")
         science_consec_map = apply_science_habits(model, classes_data, schedule, ai_settings)
 
-        print("[CONSTRAINT] [核心約束] 加入專科教室容量限制...")
+        print("⚡ [核心約束] 加入專科教室容量限制...")
         classrooms = data.get("classrooms", [])
         apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                                          science_consec_map=science_consec_map,
@@ -242,16 +241,16 @@ def main():
         # Phase 4: 特殊規則
         # ============================================================
         # 英文專科教室容量已整合進 apply_special_classroom_capacity 中，此處予以註銷
-        # print("[CONSTRAINT] [核心約束] 加入英語容量限制...")
+        # print("⚡ [核心約束] 加入英語容量限制...")
         # apply_english_capacity(model, classes_data, schedule, subject_room_count)
 
-        print("[CONSTRAINT] [核心約束] 加入體育不連堂. ..")
+        print("⚡ [核心約束] 加入體育不連堂. ..")
         apply_no_consecutive_pe(model, classes_data, schedule)
 
-        print("[CONSTRAINT] [核心約束] 加入音樂美勞至少一組連堂. ..")
+        print("⚡ [核心約束] 加入音樂美勞至少一組連堂. ..")
         apply_art_consecutive_constraint(model, classes_data, schedule)
 
-        print("[CONSTRAINT] [核心約束] 加入完美互補配對約束...")
+        print("⚡ [核心約束] 加入完美互補配對約束...")
         apply_alternating_perfect_pairing(
             model,
             classes_data,
@@ -265,11 +264,11 @@ def main():
             ai_settings,
         )
 
-        print("[CONSTRAINT] [核心約束] 加入游泳引擎 v2. ..")
+        print("⚡ [核心約束] 加入游泳引擎 v2. ..")
         apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_penalty_vars)
 
         # 通用連堂約束
-        print("[CONSTRAINT] [連堂約束] 掃描通用連堂需求. ..")
+        print("⚡ [連堂約束] 掃描通用連堂需求. ..")
         consecutive_subjects = ai_settings.get("consecutiveSubjects", [])
         consecutive_count = 0
 
@@ -302,7 +301,7 @@ def main():
                 )
                 consecutive_count += 1
 
-        print(f"  [OK] [連堂約束] 共處理 {consecutive_count} 個科目的連堂需求\n")
+        print(f"  ✅ [連堂約束] 共處理 {consecutive_count} 個科目的連堂需求\n")
 
         # ============================================================
         # 執行引擎與求解
@@ -312,7 +311,7 @@ def main():
             TOTAL_PERIODS, DAYS, PERIODS_PER_DAY,
             teachers_data=teachers_data,
             external_penalty_vars=phase2_penalty_vars,
-            # [NEW] 傳入教室親和力與主責教師映射
+            # 🆕 傳入教室親和力與主責教師映射
             room_grade_affinity=room_grade_affinity,
             room_primary_teacher_map=room_primary_teacher_map,
             classes_data=classes_data,
@@ -339,7 +338,7 @@ def main():
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             result["message"] = "成功產出課表"
 
-            # ========== [NEW] 輸出 AI 排定與湊班後的特殊專案/抽離課程 ==========
+            # ========== 🆕 輸出 AI 排定與湊班後的特殊專案/抽離課程 ==========
             result["specialCourses"] = []
             if hasattr(model, "sc_decision_vars"):
                 for sc_entry in model.sc_decision_vars:
@@ -384,7 +383,7 @@ def main():
                     }
                     result["specialCourses"].append(updated_sc)
 
-            # -- 預先建立 pair 對照表：(group_id, period) -> [class_name]
+            # ── 預先建立 pair 對照表：(group_id, period) -> [class_name]
             active_alt_at = {}
             for (c, p, t, s), var in schedule.items():
                 if "音樂美勞_交替" in s and solver.Value(var) == 1:
@@ -395,7 +394,7 @@ def main():
                         if c not in active_alt_at[key]:
                             active_alt_at[key].append(c)
 
-            # [NEW] 建立 (className, period_index) -> roomName 的對照表
+            # 🆕 建立 (className, period_index) -> roomName 的對照表
             assigned_rooms = {}
             if hasattr(model, "classroom_assignments"):
                 for item in model.classroom_assignments:
@@ -405,7 +404,7 @@ def main():
                     except Exception:
                         pass
 
-            # -- 主輸出迴圈
+            # ── 主輸出迴圈
             for (c, p, t, s), var in schedule.items():
                 if solver.Value(var) != 1:
                     continue
@@ -449,7 +448,7 @@ def main():
                     pair_partner = partners[0] if partners else None
 
                     if pair_partner is None:
-                        print(f"  [WARN] [Pair 診斷] {c} 第{day}天第{period}節 找不到配對班！group={gid}")
+                        print(f"  ⚠️ [Pair 診斷] {c} 第{day}天第{period}節 找不到配對班！group={gid}")
 
                     pair_fields = {
                         "pairGroupId":      gid,
@@ -466,12 +465,12 @@ def main():
                     "className":   c,
                     "teacherName": t,
                     "subject":     final_subject,
-                    "classroomName": classroom_name, # [NEW] 新增此屬性
+                    "classroomName": classroom_name, # 🆕 新增此屬性
                 }
                 entry.update(pair_fields)
                 result["schedule"].append(entry)
 
-            # [DEBUG] 求解後診斷：驗證美勞固定課與交替課連堂
+            # 🔍 求解後診斷：驗證美勞固定課與交替課連堂
             _validate_art_alternating_consecutive(result["schedule"], classes_data)
 
         elif status == cp_model.INFEASIBLE:
@@ -484,7 +483,7 @@ def main():
     except Exception as e:
         import traceback
         error_msg = f"演算法崩潰: {str(e)}\n{traceback.format_exc()}"
-        print(f"[ERROR] 嚴重錯誤: \n{error_msg}")
+        print(f"❌ 嚴重錯誤: \n{error_msg}")
 
         error_result = {
             "jobId": job_id,
@@ -518,10 +517,10 @@ def _validate_art_alternating_consecutive(schedule_entries, classes_data):
             alt_classes.append(c_name)
 
     if not alt_classes:
-        print("\n[DEBUG] [診斷] 無交替班級，跳過美勞連堂驗證")
+        print("\n🔍 [診斷] 無交替班級，跳過美勞連堂驗證")
         return True
 
-    print(f"\n[DEBUG] [診斷] 檢查 {len(alt_classes)} 個交替班級的美勞連堂狀況...")
+    print(f"\n🔍 [診斷] 檢查 {len(alt_classes)} 個交替班級的美勞連堂狀況...")
     all_ok = True
 
     for c_name in alt_classes:
@@ -537,13 +536,13 @@ def _validate_art_alternating_consecutive(schedule_entries, classes_data):
                 alt_pos = (entry["day"], entry["period"])
 
         if art_fixed_pos is None or alt_pos is None:
-            print(f"  [WARN]  {c_name}: 找不到完整的美勞_固定或交替課位置 (art={art_fixed_pos}, alt={alt_pos})")
+            print(f"  ⚠️  {c_name}: 找不到完整的美勞_固定或交替課位置 (art={art_fixed_pos}, alt={alt_pos})")
             all_ok = False
             continue
 
         # 檢查是否同一天且相鄰
         if art_fixed_pos[0] != alt_pos[0]:
-            print(f"  [ERROR] {c_name}: 美勞_固定(第{art_fixed_pos[0]}天)與交替(第{alt_pos[0]}天)不同天!")
+            print(f"  ❌ {c_name}: 美勞_固定(第{art_fixed_pos[0]}天)與交替(第{alt_pos[0]}天)不同天!")
             all_ok = False
             continue
 
@@ -552,23 +551,23 @@ def _validate_art_alternating_consecutive(schedule_entries, classes_data):
         diff = abs(p1 - p2)
 
         if diff != 1:
-            print(f"  [ERROR] {c_name}: 美勞_固定(第{p1}節)與交替(第{p2}節)不相鄰! (差距={diff})")
+            print(f"  ❌ {c_name}: 美勞_固定(第{p1}節)與交替(第{p2}節)不相鄰! (差距={diff})")
             all_ok = False
             continue
 
         # 檢查是否跨午休 (LUNCH_BOUNDARY=4, 即第4節與第5節之間)
         min_p = min(p1, p2)
         if min_p == LUNCH_BOUNDARY:
-            print(f"  [ERROR] {c_name}: 美勞連堂跨午休!(第{min_p}節與第{min_p+1}節)")
+            print(f"  ❌ {c_name}: 美勞連堂跨午休!(第{min_p}節與第{min_p+1}節)")
             all_ok = False
             continue
 
-        print(f"  [OK] {c_name}: 美勞_固定(第{day}天第{p1}節) + 交替(第{day}天第{p2}節) → 連堂OK")
+        print(f"  ✅ {c_name}: 美勞_固定(第{day}天第{p1}節) + 交替(第{day}天第{p2}節) → 連堂OK")
 
     if all_ok:
-        print("  [OK] 所有交替班級的美勞連堂驗證通過!")
+        print("  ✅ 所有交替班級的美勞連堂驗證通過!")
     else:
-        print("  [WARN]  部分交替班級的美勞連堂驗證失敗!")
+        print("  ⚠️  部分交替班級的美勞連堂驗證失敗!")
 
     return all_ok
 
@@ -585,11 +584,9 @@ def _write_infeasible_report(data, classes_data, teachers_data, schedule, subjec
                 teacher_loads[t] = teacher_loads.get(t, 0) + int(req.get("periods", 0))
 
     with open('debug_infeasible_report.txt', 'w', encoding='utf-8') as f:
-        write = lambda text: f.write(terminal_sanitizer.sanitize_text(text))
+        f.write("=== 🚨 智慧排課 INFEASIBLE 增強診斷報告 ===\n\n")
 
-        write("=== [ALERT] 智慧排課 INFEASIBLE 增強診斷報告 ===\n\n")
-
-        write("[DEBUG] 1. 【班級總節數與空堂極限掃描】\n")
+        f.write("🔍 1. 【班級總節數與空堂極限掃描】\n")
         for cls in classes_data:
             reqs = cls.get("course_requirements", [])
             # 避免交替課被重複計算總節數
@@ -605,30 +602,30 @@ def _write_infeasible_report(data, classes_data, teachers_data, schedule, subjec
                     total_p += int(r.get("periods", 0))
             grade = int(cls.get("name")[0]) if cls.get("name") and cls.get("name")[0].isdigit() else 1
             max_slots = 23 if grade in [1, 2] else (29 if grade in [3, 4] else 32)
-            write(f" - {cls.get('name')}: 共需排 {total_p} 節課 (該年級上限: {max_slots} 節)")
+            f.write(f" - {cls.get('name')}: 共需排 {total_p} 節課 (該年級上限: {max_slots} 節)")
             if total_p > max_slots:
-                write(" [ERROR] 嚴重錯誤：排課需求大於可用空堂！\n")
+                f.write(" ❌ 嚴重錯誤：排課需求大於可用空堂！\n")
             else:
-                write(" [OK] 正常\n")
+                f.write(" ✅ 正常\n")
 
-        write("\n[DEBUG] 2. 【教師負載與專長掃描】\n")
+        f.write("\n🔍 2. 【教師負載與專長掃描】\n")
         for t, load in teacher_loads.items():
-            write(f" - {t}: 被分配了 {load} 節課\n")
+            f.write(f" - {t}: 被分配了 {load} 節課\n")
             if load > 24:
-                write("   [WARN] 警告：該教師超鐘點過多，可能導致空堂不足！\n")
+                f.write("   ⚠️ 警告：該教師超鐘點過多，可能導致空堂不足！\n")
 
-        write("\n[DEBUG] 3. 【交替課配對可行性】\n")
+        f.write("\n🔍 3. 【交替課配對可行性】\n")
         alt_teacher_stats = {}
         for (c, p, t, s), var in schedule.items():
             if "音樂美勞_交替" in s:
                 alt_teacher_stats[t] = alt_teacher_stats.get(t, set()) | {c}
         for t, classes_set in alt_teacher_stats.items():
             num_classes = len(classes_set)
-            write(f" - {t}: 負責 {num_classes} 個交替班級 ({', '.join(classes_set)})\n")
+            f.write(f" - {t}: 負責 {num_classes} 個交替班級 ({', '.join(classes_set)})\n")
             if num_classes > 2:
-                write(f"   [WARN] 警告：同一時段最多只能上 2 個交替班級，{num_classes}>2 可能導致衝突！\n")
+                f.write(f"   ⚠️ 警告：同一時段最多只能上 2 個交替班級，{num_classes}>2 可能導致衝突！\n")
 
-        write("\n[DEBUG] 4. 【有效時段充足性】\n")
+        f.write("\n🔍 4. 【有效時段充足性】\n")
         for cls in classes_data:
             c_name = cls.get("name", "")
             grade_match = re.search(r'(\d+)年', c_name)
@@ -655,47 +652,47 @@ def _write_infeasible_report(data, classes_data, teachers_data, schedule, subjec
             elif grade in [5, 6]:
                 forbidden_days = [2]
             effective_periods = TOTAL_PERIODS - len(forbidden_days) * 3
-            write(f" - {c_name}: 科任需求 {total_sci} 節 / 有效時段 {effective_periods} 節")
+            f.write(f" - {c_name}: 科任需求 {total_sci} 節 / 有效時段 {effective_periods} 節")
             if total_sci > effective_periods:
-                write(" [ERROR] 需求超過有效時段！\n")
+                f.write(" ❌ 需求超過有效時段！\n")
             else:
-                write(" [OK]\n")
+                f.write(" ✅\n")
 
-        write("\n[DEBUG] 5. 【游泳資源分析】\n")
+        f.write("\n🔍 5. 【游泳資源分析】\n")
         swim_classes = [
             cls for cls in classes_data
             if re.search(r'\d+年', cls.get("name", ""))
             and int(re.search(r'(\d+)年', cls.get("name", "")).group(1)) in [4, 5, 6]
         ]
-        write(f" - 4-6年級班級數: {len(swim_classes)}\n")
-        write(f" - 泳池容量: 3 個\n")
+        f.write(f" - 4-6年級班級數: {len(swim_classes)}\n")
+        f.write(f" - 泳池容量: 3 個\n")
         if len(swim_classes) > 3:
-            write(f"   [WARN] 游泳班數({len(swim_classes)}) > 泳池數(3)，軟懲罰已啟用但可能仍有壓力\n")
+            f.write(f"   ⚠️ 游泳班數({len(swim_classes)}) > 泳池數(3)，軟懲罰已啟用但可能仍有壓力\n")
 
-        write("\n[DEBUG] 6. 【教室容量 vs 總需求】\n")
+        f.write("\n🔍 6. 【教室容量 vs 總需求】\n")
         for room_key, count in subject_room_count.items():
             demand = subject_demand_count.get(room_key, 0)
             max_capacity = count * TOTAL_PERIODS
-            write(f" - {room_key}: 容量 {count} 間 (週容量={max_capacity}節) / 總需求 {demand} 節")
+            f.write(f" - {room_key}: 容量 {count} 間 (週容量={max_capacity}節) / 總需求 {demand} 節")
             if demand > max_capacity:
-                write(" [ERROR] 需求超過容量！\n")
+                f.write(" ❌ 需求超過容量！\n")
             else:
-                write(" [OK]\n")
+                f.write(" ✅\n")
 
-        write("\n[DEBUG] 7. 【教師同一時段能力掃描】\n")
+        f.write("\n🔍 7. 【教師同一時段能力掃描】\n")
         for t_data in teachers_data:
             t_name = t_data.get("name", "")
             safe_max = t_data.get("_safe_max_quota", 20)
             actual = teacher_loads.get(t_name, 0)
             if actual > 0:
-                write(f" - {t_name}: 需求 {actual} 節 / 配額 {safe_max} 節")
+                f.write(f" - {t_name}: 需求 {actual} 節 / 配額 {safe_max} 節")
                 if actual > safe_max:
-                    write(" [WARN] 超出配額！\n")
+                    f.write(" ⚠️ 超出配額！\n")
                 else:
-                    write(" [OK]\n")
+                    f.write(" ✅\n")
 
-        write("\n[DEBUG] 8. 【前端 Payload 原始資料檢查】\n")
-        write("請同步查看專案根目錄的 debug_payload.json，確認前端送來的老師名字是否有空值或錯字。\n")
+        f.write("\n🔍 8. 【前端 Payload 原始資料檢查】\n")
+        f.write("請同步查看專案根目錄的 debug_payload.json，確認前端送來的老師名字是否有空值或錯字。\n")
 
     with open('debug_payload.json', 'w', encoding='utf-8') as payload_file:
         json.dump(data, payload_file, ensure_ascii=False, indent=2)

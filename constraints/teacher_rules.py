@@ -10,7 +10,6 @@ teacher_rules.py — 教師維度約束
 依賴：config, utils
 """
 
-import terminal_sanitizer
 import json
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
 from utils import is_virtual_teacher
@@ -133,7 +132,7 @@ def apply_teacher_quota(model, classes_data, teachers_data, schoolInfo):
 
         if teacher_teaches_arts_class:
             effective_max_periods = 9999
-            print(f"   [藝才班特規] {t_name} 豁免配額上限 (max_periods → 9999)")
+            print(f"  🎭 [藝才班特規] {t_name} 豁免配額上限 (max_periods → 9999)")
         else:
             effective_max_periods = int(t_data.get("base_periods") or t_data.get("max_periods") or fallback_base)
 
@@ -165,8 +164,8 @@ def apply_teacher_quota(model, classes_data, teachers_data, schoolInfo):
         t_data["_expertise_quotas"] = expertise_quotas
 
         if expertise_quotas:
-            print(f"  [INFO] [專長配額] {t_name}: {expertise_quotas}")
-        print(f"  [CONSTRAINT] [Soft Quota] {t_name} 總上限: {safe_max_quota} (硬約束已移除，改用懲罰權重)")
+            print(f"  📊 [專長配額] {t_name}: {expertise_quotas}")
+        print(f"  ⚡ [Soft Quota] {t_name} 總上限: {safe_max_quota} (硬約束已移除，改用懲罰權重)")
 
 
 def apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings):

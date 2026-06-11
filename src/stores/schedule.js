@@ -198,11 +198,11 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           ...data.schoolInfo,
           classroomLimits: {
             ...DEFAULT_CLASSROOM_LIMITS,
-            ...data.schoolInfo?.classroomLimits,
+            ...(data.schoolInfo?.classroomLimits ?? {}),
           },
           subjectClassroomGrades: {
             ...DEFAULT_SUBJECT_CLASSROOM_GRADES,
-            ...data.schoolInfo?.subjectClassroomGrades,
+            ...(data.schoolInfo?.subjectClassroomGrades ?? {}),
           }
         };
       }

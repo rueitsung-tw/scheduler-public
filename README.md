@@ -15,7 +15,6 @@
 | **排課引擎** | Python (OR-Tools CP-SAT) | 核心約規劃求解，使用滿意度約束求解器計算全校可行解 |
 | **後處理優化** | Python (Simulated Annealing) | 實作專責優化代理 `repair_agent.py`（模擬退火演算法）微調課表與消除衝突 |
 | **報表匯出** | XLSX (xlsx) / DOCX (docx) | 前端自動推導與生成教育部標準配課表、直式全校課表及專科教室課表 |
-| **構建優化** | Vite Route-level Lazy Loading | 路由級別動態載入，拆分頁面 chunk 降低初始載入體積 |
 
 ---
 
@@ -27,8 +26,7 @@ scheduler-frontend/
 │   ├── components/               # 核心功能組件 (如 ProgressPanel, SubjectAssignmentForm)
 │   ├── composables/              # 組合式邏輯 (如 useClassSync 班級同步, useTimetableConflicts 衝突檢測)
 │   ├── stores/                   # Pinia 狀態管理 (schedule.js 核心資料儲存庫)
-│   ├── utils/                    # 前端工具函式 (exportUtils 報表生成, alternatingHelper 交替課輔助, subjectCanonical.js 科目正規化, settingsBackup.js 設定備份)
-│   ├── services/                 # AI 微調服務層 (aiTuningCandidates.js 候選池產生器, aiTuningResponseValidation.js AI 回應驗證)
+│   ├── utils/                    # 前端工具函式 (exportUtils 報表生成, alternatingHelper 交替課輔助)
 │   ├── views/                    # 主要頁面視圖 (TimetableEditorView 全域預排畫布, ExportHubView 匯出中心)
 │   ├── App.vue                   # 根元件
 │   └── main.js                   # 應用入口
@@ -39,7 +37,7 @@ scheduler-frontend/
 │   ├── class_rules.py            # 班級與年級習慣約束
 │   ├── teacher_rules.py          # 教師與特教/抽離課程約束
 │   └── special_rules.py          # 交替配對、專科教室指派與游泳課容量約束
-├── docs/                         # 系統開發、修復計畫與 AI 運行手冊文檔倉庫
+├── docs/                         # 系統開發與中後期修復計畫文檔倉庫
 ├── server.js                     # Express API 伺服器 & Python 橋接主程式
 ├── solver.py                     # Python 智慧排課求解器主入口
 ├── phase2_engine.py              # 特殊/複雜科目（游泳、特教）的二階段求解引擎
@@ -156,72 +154,6 @@ graph TD
   * 後端 `solver.py` 串接並傳遞前端 `aiSettings` Payload 至 `preprocess_classes` 函數。
   * 修改 `preprocessor.py` 中的 `_homeroom_blockization`，在啟用該功能時，遍歷並加總所有非生活、非游泳、非體育的導師普通學科，將其吞併合併為名為「導師區塊」的單一條目以大伏減少 OR-Tools 限制網絡的規模，降載求解器，並把剩餘的普通科目留存於前端背包，以保留大片灰色空白時段給導師手動微調。
 
-### 13. AI 微調候選池驅動架構 (Candidate Pool Architecture)
-* **修復背景**：AI 微調過去允許模型自由指定 swap 座標，可能改寫不存在的時段或不合法的調課組合，且 AI 回傳的錯誤碼（如 `AI_INVALID_CANDIDATE_MOVE`）在前端無對應映射，導致用戶看到不可理解的 `unknown_error`。
-* **解決方案**：
-  * 實作候選池驅動流程：`aiTuningCandidates.js` 依報告內容動態產生合法調課候選，每筆分配不透明 ID（`M-000001` 格式），前端顯示時呈現可讀摘要與選擇理由。
-  * Prompt 僅要求 AI「逐字複製 candidateId」，禁止自行生成或改寫。
-  * 後端 `server.js` 新增 `validateAiCandidateSelections()` 白名單驗證，並實作「部分合法降級」策略：若 AI 回傳部分合法 ID，保留合法 moves 並將非法 moves 放入 warnings；僅當全部非法時才拋出 `AI_INVALID_CANDIDATE_MOVE`。
-  * 前端 `ScheduleView.vue` 改以 `selectedMoves` 為主顯示，新增 `AI_INVALID_CANDIDATE_MOVE` 錯誤碼映射，保留舊版 `swapMoves` 作為 debug fallback。
-
-### 14. Windows Terminal 編碼統一與 Emoji 清理 (Terminal Encoding & Emoji Sanitization)
-* **修復背景**：Windows 預設終端使用 `cp950` 編碼，Python 求解器與診斷腳本在輸出 emoji（如 ✅、⚠️、❌）時觸發 `UnicodeEncodeError: 'cp950' codec can't encode`，導致終端日誌出現亂碼，且 `server.js` 橋接 Python 子程序時未注入 UTF-8 環境變數。
-* **解決方案**：
-  * 在 `server.js` 的 `spawnPython()` 為所有 Python 子程序注入 `PYTHONUTF8=1` 與 `PYTHONIOENCODING=utf-8` 環境變數，並將 stdout/stderr 設為 `setEncoding('utf8')`。
-  * 實作 `terminal_sanitizer.py` 共用模組：hook `sys.stdout`/`sys.stderr`，將 emoji 轉換為純文字標記（`✅`→`[OK]`、`⚠️`→`[WARN]`、`❌`→`[ERROR]`、`🔍`→`[DEBUG]`）。
-  * 於所有 Python CLI 入口（`solver.py`、`repair_agent.py`、`diagnostic_stats.py`、`preprocessor.py` 等）最前端導入 `terminal_sanitizer`，確保 Windows 直接執行時亦不會回到 cp950 預設輸出。
-  * 同步清理 `constraints/*.py`、`phase2_engine.py`、`utils.py` 及診斷腳本中的 emoji 日誌。
-
-### 15. 專科教室衝堂誤報根除 (False Alarm Elimination)
-* **修復背景**：排課完成後，系統在多個維度產生嚴重假警報——低年級英語課（在班級教室上課）被計入專科教室容量統計；班導師多科目授課在科任報表中被標記為衝堂；音樂/美勞交替課因科目名稱正規化不一致導致全數顯示衝堂。
-* **解決方案**：
-  * 建立 `subjectCanonical.js` 共用科目正規化模組，統一 `英語`/`英文`/`語文-英語`、`本土語言`/`閩南語`/`客語`→`本土語` 等映射，`scheduleAiReport.js` 與 `exportUtils.js` 共用同一套規則。
-  * 修正容量統計邏輯：`sameSubjectCount` 計算時排除已豁免班級（如 1 年級英語），避免使用專科教室的班級因豁免班級被計入而觸發假警報。
-  * 重構科任教師報表衝突判定：支援 `/` 分隔的多教師比對、單雙週交替課拆分、雙週衝突校對，班導師多科目不再被誤判為衝堂。
-  * 實作問題數去重機制：`buildIssueDedupKey()` 與 `deduplicateIssues()` 將同一衝突點（如同一位老師在同一時段的不同班級）合併為 1 筆，新增 `rawIssueCount` 保留原始數值。
-
-### 16. 專科教室資料持久化與匯出年級過濾 (Classroom Data Persistence & Grade Filtering)
-* **修復背景**：求解器算出的 `classroomName`、`pairGroupId`、`pairRole` 等欄位在 `ScheduleView.vue` 寫回班級課表時被丟棄（僅保留 `subject`/`teacher`）；匯出工具 `exportUtils.js` 的 fallback 層未套用 `subjectClassroomGrades` 年級過濾，導致共享英語教室「吃掉」所有年級的英語課（含免使用專科教室的 1 年級）。
-* **解決方案**：
-  * 修改 `ScheduleView.vue` 的 `applyAndGoToEditor()`：寫回 timetable 時保留 `classroomName`、`pairGroupId`、`pairRole`；音樂/美勞交替格新增 `oddWeek.classroomName` 與 `evenWeek.classroomName`。
-  * 修改 `exportUtils.js` 的 `findClassForCell()`：fallback 層新增 `schoolInfo` 參數，套用 `subjectClassroomGrades` 年級過濾（如 `subjectClassroomGrades['語文-英語'] = [2,3,4,5,6]` 時 1 年級不被匹配）。
-  * 新增 `settingsBackup.js` 共用備份格式，支援專科教室獨立匯出/匯入，並整合至系統設定頁的備份流程。
-
-### 17. 本地 AI 穩定化與 Qwen 調校 (Local AI Stabilization & Qwen Tuning)
-* **修復背景**：本地 Qwen MTP 模型在 llama.cpp 服務端啟用 speculative decoding 時，長上下文下產生嚴重 Token 錯位（Vocabulary Index Shift），導致輸出 JSON 含亂碼、candidateId 損毀；Qwen thinking 模式則會吃掉正式輸出（`content` 為空、`reasoning_content` 有數千字）。
-* **解決方案**：
-  * 建立 `local-ai-qwen-runbook.md` 運行手冊：建議關閉 speculative/MTP（移除 `--speculative`、`-md`、`--spec-type mtp`），或改用非 MTP 模型（Qwen2.5-Coder-32B-Instruct）。
-  * 強化 prompt contract：`/no_think` 同時注入 system 與 user prompt，加入 `Do not think. Return final JSON only.` 英文約束。
-  * 調整建議預設值：`maxOutputTokens=8192`、`temperature=0`、`disableThinking=true`；統一前後端 fallback 預設值。
-  * 抽出 `aiTuningResponseValidation.js` 純函式模組：集中處理 AI 回應提取、JSON 解析、candidateId 驗證，實作「空 content 優先分類」（`AI_UPSTREAM_OUTPUT_TRUNCATED` / `AI_UPSTREAM_OUTPUT_EMPTY`）避免誤報為 candidateId 錯誤。
-  * 修正 `aiTuningSubmissionBundle.js` 中 `validateBundleConsistency()` 的資料結構錯誤（`boolean false is not iterable`），將 checks 陣列從混用布林值改為統一 `[pass, message]` 二元組。
-  * 成功回報新增 `actionableSummary` 欄位與 `actionableItems` 清單，摘要須列出具體班級/星期/節次/科目/場域。
-
-### 18. 排課塑形規則全軟化 (Shaping Rules Softening)
-* **修復背景**：診斷報告顯示求解器在真實資料下返回 `INFEASIBLE`，所有資源檢查均為 `[OK]`，問題根源在於四類「塑形規則」（美勞連堂、自然連堂、游泳連堂、交替配對）被設定為硬約束，與真實師資分布矛盾。
-* **解決方案**：
-  * **第一波單階段全軟化**：將四類塑形規則統一改為軟限制，使用 BoolVar indicator 模式施加罰分：
-    * 美勞連堂（`apply_art_consecutive_constraint`）→ 權重 1000
-    * 自然連堂 3-4 年級（`apply_science_habits`）→ 權重 800；5-6 年級 → 權重 1200
-    * 游泳連堂（`apply_swimming_engine_v2`）→ 權重 1200
-    * 交替配對（`apply_alternating_perfect_pairing`）→ `defaultPairingStrictness` 改為 `"soft"`，pairing 權重維持 5000
-  * **權重校準原則**：塑形規則權重限定於 500-2000 區間，禁止 15000/20000 等準硬限制權重。
-  * **三大硬限制維持不變**：實體教師衝堂、專科教室容量聚合、低年級禁科。
-  * 交替課教師高負載納入診斷報告，標記為高風險訊號。
-  * 第二波（僅在第一波仍 INFEASIBLE 時才實作）：二階段求解，feasibility-recovery 階段進一步降權。
-
----
-
-## ⚖️ 開源授權與智慧財產權行使說明 (Licensing & Intellectual Property)
-
-本專案之原始碼以 **AGPL-3.0 (GNU Affero General Public License v3.0)** 條款全面開源，完整授權條文請見 [LICENSE.md](./LICENSE.md)。任何個人、學術機構及開源社群皆可依該條款免費使用、研究、修改與散布本專案。
-
-根據 AGPL-3.0 條款，若您在商業環境、閉源專案或雲端服務（SaaS）中引用、修改、部署或對外提供本軟體之衍生系統，且該系統與使用者透過網路互動，您有義務依條款公開對應衍生系統的完整原始碼。
-
-若貴公司基於商業機密、合規或智慧財產管理考量，無法履行 AGPL-3.0 的開源義務，本軟體作者（著作權人）接受合法的商用智慧財產權授權專案洽談。取得獨立商業授權後，貴公司即可在閉源商業環境中合法使用本技術，並依雙方授權契約內容免除 AGPL-3.0 所要求之對外開源義務。
-
-欲洽談技術授權對價與合約細節，請透過電子郵件聯繫：`ruei@mail.tmps.tp.edu.tw`
-
 ---
 
 ## 🏃‍♂️ 本地開發與部署指引 (Installation & Startup)
@@ -244,12 +176,9 @@ graph TD
 
 ### Windows 安裝步驟
 
-1. 先安裝 PowerShell 7。
-   - Windows 預設的 Windows PowerShell 在處理 UTF-8 檔案與終端機編碼時較容易出現亂碼或相容性問題。
-   - 建議先安裝 PowerShell 7，再進行後續安裝與啟動步驟，以確保 UTF-8 檔案與指令執行更穩定。
-2. 安裝 Node.js 20.19+ 或 22.12+。
-3. 安裝 Python 3.9+，並確認 PowerShell 可以執行 `python --version`。
-4. 在專案根目錄執行：
+1. 安裝 Node.js 20.19+ 或 22.12+。
+2. 安裝 Python 3.9+，並確認 PowerShell 可以執行 `python --version`。
+3. 在專案根目錄執行：
 ```powershell
 npm install
 python -m venv venv
@@ -257,15 +186,15 @@ python -m venv venv
 pip install ortools numpy pandas
 npx prisma db push
 ```
-5. 啟動後端：
+4. 啟動後端：
 ```powershell
 node server.js
 ```
-6. 開啟另一個終端機啟動前端：
+5. 開啟另一個終端機啟動前端：
 ```powershell
 npm run dev
 ```
-7. 瀏覽器開啟 `http://localhost:5173`。
+6. 瀏覽器開啟 `http://localhost:5173`。
 
 ### Ubuntu 安裝步驟
 

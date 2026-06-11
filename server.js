@@ -19,11 +19,6 @@ import path from 'path';
 import os from 'os';
 import { buildScheduleAiReport } from './src/utils/scheduleAiReport.js';
 import { buildAiTuningPromptBundle } from './src/services/aiTuningPrompt.js';
-import {
-    isOptionalScriptAvailable,
-    runOptionalDiagnosticStats,
-    runOptionalRepairAgent,
-} from './src/services/publicSchedulerFallback.js';
 
 /**
  * Runtime contract:
@@ -148,7 +143,7 @@ function resolvePythonExecutable() {
     // eslint-disable-next-line no-undef
     const envPython = process.env.SCHEDULER_PYTHON;
     if (envPython) {
-        console.log(`[INFO] Python Resolver: 使用 SCHEDULER_PYTHON=${envPython}`);
+        console.log(`🐍 Python Resolver: 使用 SCHEDULER_PYTHON=${envPython}`);
         return envPython;
     }
 
@@ -163,7 +158,7 @@ function resolvePythonExecutable() {
     for (const candidate of venvCandidates) {
         const venvPath = path.join(__dirname, candidate);
         if (fs.existsSync(venvPath)) {
-            console.log(`[INFO] Python Resolver: 使用 venv ${venvPath}`);
+            console.log(`🐍 Python Resolver: 使用 venv ${venvPath}`);
             return venvPath;
         }
     }
@@ -177,7 +172,7 @@ function resolvePythonExecutable() {
         try {
             const testCmd = cmd === 'py' ? '"py" -3 --version' : `"${cmd}" --version`;
             execSync(testCmd, { stdio: 'ignore', timeout: 5000 });
-            console.log(`[INFO] Python Resolver: 使用系統 ${cmd}`);
+            console.log(`🐍 Python Resolver: 使用系統 ${cmd}`);
             return cmd;
         } catch {
             // 繼續嘗試下一個
@@ -198,7 +193,7 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
     const pythonExe = resolvePythonExecutable();
     if (!pythonExe) {
         const errorMsg = [
-            `[ERROR] 找不到可用的 Python 執行器！`,
+            `❌ 找不到可用的 Python 執行器！`,
             `請確認以下任一條件：`,
             `  1. 設定環境變數 SCHEDULER_PYTHON（例如 /usr/bin/python3 或 C:\\Python39\\python.exe）`,
             `  2. 在專案根目錄建立 venv：python3 -m venv venv && source venv/bin/activate`,
@@ -210,7 +205,7 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
 
     const scriptPath = getScriptAbsolutePath(scriptName);
     if (!fs.existsSync(scriptPath)) {
-        const errorMsg = `[ERROR] Python 腳本不存在: ${scriptPath}`;
+        const errorMsg = `❌ Python 腳本不存在: ${scriptPath}`;
         console.error(errorMsg);
         throw new Error(errorMsg);
     }
@@ -220,21 +215,8 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
         ? ['-3', scriptPath, ...args]
         : [scriptPath, ...args];
 
-    // 注入 UTF-8 環境變數，避免 Windows cp950 編碼問題
-    const utf8Env = {
-        ...process.env,
-        PYTHONUTF8: '1',
-        PYTHONIOENCODING: 'utf-8',
-    };
-
-    console.log(`[INFO] Spawn ${label}: ${pythonExe} ${spawnArgs.join(' ')}`);
-    const child = spawn(pythonExe, spawnArgs, { env: utf8Env });
-
-    // 設定 stdout/stderr 為 UTF-8 文字模式，避免 buffer.toString() 使用預設編碼
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-
-    return child;
+    console.log(`🚀 Spawn ${label}: ${pythonExe} ${spawnArgs.join(' ')}`);
+    return spawn(pythonExe, spawnArgs);
 }
 
 // 👇 使用 Adapter 來初始化 Prisma
@@ -367,7 +349,7 @@ app.post('/api/save-all', async (req, res) => {
                         homeroomTeacherId = mappedId;
                         usedTeacherIds.add(mappedId);
                     } else {
-                        console.warn(`[WARN] [防呆攔截] 導師「${htName}」重複指派，已取消對班級「${cls.name}」的綁定以防崩潰。`);
+                        console.warn(`⚠️ [防呆攔截] 導師「${htName}」重複指派，已取消對班級「${cls.name}」的綁定以防崩潰。`);
                     }
                 }
             }
@@ -491,10 +473,10 @@ app.post('/api/save-all', async (req, res) => {
             }
         }
 
-        console.log(`[OK] 全面儲存成功：${teachers.length} 位教師、${classes.length} 個班級`);
+        console.log(`✅ 全面儲存成功：${teachers.length} 位教師、${classes.length} 個班級`);
         res.json({ success: true, message: '儲存成功' });
     } catch (error) {
-        console.error('[ERROR] 全面儲存失敗:', error);
+        console.error('❌ 全面儲存失敗:', error);
         res.status(500).json({ error: '儲存失敗', details: error.message });
     }
 });
@@ -657,10 +639,10 @@ app.post('/api/system/setup', async (req, res) => {
             }
         });
 
-        console.log(`[OK] 系統初始化成功：學校=${schoolName}, 管理員=${username}`);
+        console.log(`✅ 系統初始化成功：學校=${schoolName}, 管理員=${username}`);
         res.json({ success: true, message: '系統初始化成功' });
     } catch (error) {
-        console.error('[ERROR] 系統初始化失敗:', error);
+        console.error('❌ 系統初始化失敗:', error);
         res.status(500).json({ error: '初始化失敗', details: error.message });
     }
 });
@@ -678,7 +660,7 @@ app.get('/api/ai-system-settings', async (req, res) => {
             : { enabled: false, serviceType: 'ollama', apiUrl: '', model: '', systemPrompt: '' };
         res.json(aiSystemSettings);
     } catch (error) {
-        console.error('[ERROR] 讀取 AI 系統設定失敗:', error);
+        console.error('❌ 讀取 AI 系統設定失敗:', error);
         res.status(500).json({ error: '讀取 AI 系統設定失敗' });
     }
 });
@@ -717,10 +699,10 @@ app.put('/api/ai-system-settings', async (req, res) => {
             });
         }
 
-        console.log('[OK] AI 系統設定已儲存');
+        console.log('✅ AI 系統設定已儲存');
         res.json({ success: true, message: 'AI 系統設定已儲存' });
     } catch (error) {
-        console.error('[ERROR] 儲存 AI 系統設定失敗:', error);
+        console.error('❌ 儲存 AI 系統設定失敗:', error);
         res.status(500).json({ error: '儲存 AI 系統設定失敗', details: error.message });
     }
 });
@@ -781,7 +763,7 @@ app.post('/api/ai-test-connection', async (req, res) => {
             data,
         });
     } catch (error) {
-        console.error('[ERROR] AI 連線測試失敗:', error);
+        console.error('❌ AI 連線測試失敗:', error);
         res.status(502).json({
             error: 'AI 連線測試失敗',
             details: error.message,
@@ -2590,12 +2572,23 @@ app.get('/api/debug-infeasible-report', async (req, res) => {
  * @returns {object|null} 統計結果物件
  */
 async function runDiagnosticStats(inputPath, resultPath) {
-    return runOptionalDiagnosticStats({
-        inputPath,
-        resultPath,
-        baseDir: __dirname,
-        spawnPython,
-        logger: console,
+    return new Promise((resolve, _reject) => {
+        const diag = spawnPython('diagnostic_stats.py', [inputPath, resultPath], 'Diagnostic Stats');
+        let output = '';
+        diag.stdout.on('data', (d) => output += d.toString());
+        diag.stderr.on('data', (d) => console.error(`[Diagnostic Error]: ${d.toString()}`));
+        diag.on('close', (code) => {
+            if (code === 0) {
+                try {
+                    resolve(JSON.parse(output));
+                } catch (e) {
+                    console.error('診斷統計 JSON 解析失敗:', e);
+                    resolve(null);
+                }
+            } else {
+                resolve(null);
+            }
+        });
     });
 }
 
@@ -2619,7 +2612,7 @@ function generateRecommendation(pre, post) {
         tips.push('gradePreferences 命中率良好 (>=85%)');
 
     if ((post.capacityOverloadCount || 0) > (pre.capacityOverloadCount || 0))
-        tips.push('[WARN] Repair 後容量超載惡化，請檢查 Repair Agent');
+        tips.push('⚠️ Repair 後容量超載惡化，請檢查 Repair Agent');
     else if ((post.capacityOverloadCount || 0) === 0)
         tips.push('容量超載已完全消除');
     else
@@ -2654,8 +2647,8 @@ async function runSchedulingWorker(jobId, payload) {
         });
 
         const pythonProcess = spawnPython('solver.py', [inputPath, outputPath], 'Solver');
-        pythonProcess.stdout.on('data', (data) => console.log(`[Python 輸出]: ${data}`));
-        pythonProcess.stderr.on('data', (data) => console.error(`[Python 錯誤]: ${data}`));
+        pythonProcess.stdout.on('data', (data) => console.log(`[Python 輸出]: ${data.toString()}`));
+        pythonProcess.stderr.on('data', (data) => console.error(`[Python 錯誤]: ${data.toString()}`));
 
         pythonProcess.on('close', async (code) => {
             try {
@@ -2669,61 +2662,64 @@ async function runSchedulingWorker(jobId, payload) {
                 });
 
                 if (code === 0 && fs.existsSync(outputPath)) {
-                    // [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
+                    // 📊 [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
                     let preRepairStats = null;
                     try {
                         preRepairStats = await runDiagnosticStats(inputPath, outputPath);
-                        console.log(`[Diagnostic] preRepair stats:`, JSON.stringify(preRepairStats));
+                        console.log(`📊 [Diagnostic] preRepair stats:`, JSON.stringify(preRepairStats));
                     } catch (e) {
-                        console.error(`[Diagnostic] preRepair 統計失敗:`, e);
+                        console.error(`📊 [Diagnostic] preRepair 統計失敗:`, e);
                     }
 
-                    // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
-                    const repairAgentAvailable = isOptionalScriptAvailable('repair_agent.py', {
-                        baseDir: __dirname,
+                    // 🔧 [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
+                    await prisma.scheduleJob.update({
+                        where: { id: jobId },
+                        data: {
+                          progressPhase: 'REPAIRING',
+                          progressMessage: '模擬退火優化中... (Repair Agent)'
+                        }
                     });
-
-                    if (repairAgentAvailable) {
-                        await prisma.scheduleJob.update({
-                            where: { id: jobId },
-                            data: {
-                              progressPhase: 'REPAIRING',
-                              progressMessage: '模擬退火優化中... (Repair Agent)'
-                            }
-                        });
-                    } else {
-                        console.warn('[Public Fallback] repair_agent.py not found. Skipping repair stage and using solver output.');
-                    }
 
                     const repairOutputPath = path.join(__dirname, `output_repaired_${jobId}.json`);
-                    const repairStatus = await runOptionalRepairAgent({
-                        inputPath,
-                        outputPath,
-                        repairOutputPath,
-                        baseDir: __dirname,
-                        spawnPython,
-                        logger: console,
+                    const repairResult = new Promise((resolve, _reject) => {
+                        const repair = spawnPython('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
+                        let repairLog = '';
+                        repair.stdout.on('data', (d) => {
+                            const msg = d.toString();
+                            console.log(`[Repair Agent]: ${msg}`);
+                            repairLog += msg;
+                        });
+                        repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d.toString()}`));
+                        repair.on('close', (rc) => {
+                            if (rc === 0 && fs.existsSync(repairOutputPath)) {
+                                resolve('repaired');
+                            } else {
+                                resolve('original');
+                            }
+                        });
                     });
+
+                    const repairStatus = await repairResult;
 
                     let postRepairStats = null;
                     let resultData;
                     if (repairStatus === 'repaired') {
                         resultData = fs.readFileSync(repairOutputPath, 'utf-8');
-                        console.log(`[OK] [Repair Agent] 優化成功，使用修復後結果`);
+                        console.log(`✅ [Repair Agent] 優化成功，使用修復後結果`);
                         try {
                             postRepairStats = await runDiagnosticStats(inputPath, repairOutputPath);
-                            console.log(`[Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
+                            console.log(`📊 [Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
                         } catch (e) {
-                            console.error(`[Diagnostic] postRepair 統計失敗:`, e);
+                            console.error(`📊 [Diagnostic] postRepair 統計失敗:`, e);
                         }
                         if (fs.existsSync(repairOutputPath)) fs.unlinkSync(repairOutputPath);
                     } else {
                         resultData = fs.readFileSync(outputPath, 'utf-8');
-                        console.log(`[WARN] [Repair Agent] 優化失敗或跳過，使用原始結果`);
+                        console.log(`⚠️ [Repair Agent] 優化失敗或跳過，使用原始結果`);
                         postRepairStats = preRepairStats;
                     }
 
-                    // [Diagnostic] Step 3: 組合報表並儲存
+                    // 📊 [Diagnostic] Step 3: 組合報表並儲存
                     try {
                         if (preRepairStats && postRepairStats) {
                             const round2 = (v) => Math.round(v * 100) / 100;
@@ -2744,10 +2740,10 @@ async function runSchedulingWorker(jobId, payload) {
                             const diagFileName = `debug_schedule_diagnostic_${jobId}.json`;
                             const diagFilePath = path.join(__dirname, diagFileName);
                             fs.writeFileSync(diagFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
-                            console.log(`[Diagnostic] 報表已儲存至 ${diagFilePath}`);
+                            console.log(`📊 [Diagnostic] 報表已儲存至 ${diagFilePath}`);
                         }
                     } catch (diagErr) {
-                        console.error(`[Diagnostic] 報表儲存失敗:`, diagErr);
+                        console.error(`📊 [Diagnostic] 報表儲存失敗:`, diagErr);
                     }
 
                     await prisma.scheduleJob.update({
@@ -2764,7 +2760,7 @@ async function runSchedulingWorker(jobId, payload) {
                 } else {
                     const errorMsg = code === null ? 'Python 進程被強制終止' : `Exit code ${code}`;
 
-                    // AI 診斷分析：讀取 debug_infeasible_report.txt 並萃取建議
+                    // 🔍 AI 診斷分析：讀取 debug_infeasible_report.txt 並萃取建議
                     let aiAnalysis = [];
                     try {
                         const systemSetting = await prisma.systemSetting.findUnique({ where: { id: 1 } });
@@ -2835,7 +2831,7 @@ async function runSchedulingWorker(jobId, payload) {
                                 // 匯總輸出
                                 if (capacityErrors.length > 0) {
                                     capacityErrors.forEach(err => {
-                                        aiAnalysis.push(`[INFO] 【教室容量不足】${err.subject} 總需求 ${err.needed} 節超過現有教室容量，請考慮新增教室或減少課程需求。`);
+                                        aiAnalysis.push(`📊 【教室容量不足】${err.subject} 總需求 ${err.needed} 節超過現有教室容量，請考慮新增教室或減少課程需求。`);
                                     });
                                 }
 
@@ -2843,20 +2839,20 @@ async function runSchedulingWorker(jobId, payload) {
                                     const gradeDetails = Object.entries(periodGradeCount)
                                         .map(([grade, data]) => `${grade}年級${data.count}班（需求${data.needed}節/可用${data.available}節，差${data.shortage}節）`)
                                         .join('、');
-                                    aiAnalysis.push(`[WARN] 【有效時段不足】共 ${periodTotalCountNum} 個班級的科任需求超過有效時段：${gradeDetails}。請檢查排課時段設定或減少科任節數。`);
+                                    aiAnalysis.push(`⏰ 【有效時段不足】共 ${periodTotalCountNum} 個班級的科任需求超過有效時段：${gradeDetails}。請檢查排課時段設定或減少科任節數。`);
                                 }
 
                                 alternatingWarnings.forEach(w => {
-                                    aiAnalysis.push(`[WARN] 【交替課衝突】${w.teacher}：${w.message}`);
+                                    aiAnalysis.push(`🔄 【交替課衝突】${w.teacher}：${w.message}`);
                                 });
 
                                 swimmingWarnings.forEach(w => {
-                                    aiAnalysis.push(`[WARN] 【游泳資源】${w}`);
+                                    aiAnalysis.push(`🏊 【游泳資源】${w}`);
                                 });
 
                                 // 若未萃取出任何錯誤，給一個通用提示
                                 if (aiAnalysis.length === 0) {
-                                    aiAnalysis.push('[WARN] 排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。');
+                                    aiAnalysis.push('⚠️ 排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。');
                                 }
                             }
                         }
@@ -2919,7 +2915,7 @@ app.post('/api/schedule', async (req, res) => {
 
         res.status(202).json({ message: "排課任務已進入排程", jobId: job.id });
     } catch (error) {
-        console.error("[ERROR] 排課 API 發生錯誤：", error);
+        console.error("🔥 排課 API 發生錯誤：", error);
  	res.status(500).json({ error: error.message });
     }
 });
@@ -2954,7 +2950,8 @@ app.get('/api/schedule/:jobId', async (req, res) => {
 // eslint-disable-next-line no-undef
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
-    console.log(`[INFO] 智慧排課引擎 (API + OR-Tools) 已啟動於 http://localhost:${PORT}`);
+    console.log(`🚀 智慧排課引擎 (API + OR-Tools) 已啟動於 http://localhost:${PORT}`);
 });
 // [Blueprint_Extend_Timeout] 設定 Server 層級超時為 1800000ms (30 分鐘)，防止 HTTP 連線中斷
 server.setTimeout(1800000);
+

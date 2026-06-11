@@ -120,9 +120,6 @@
         <button @click="applyAiPreviewAndGoToEditor" class="apply-btn">套用此課表並前往編輯器</button>
         <button @click="downloadAiMarkdown" class="secondary-btn">匯出 Markdown</button>
         <button @click="downloadAiJson" class="secondary-btn">匯出 JSON</button>
-        <button @click="downloadSubmissionBundle" class="secondary-btn" :disabled="isGeneratingBundle">
-          {{ isGeneratingBundle ? '產生中…' : '下載預送出封包' }}
-        </button>
         <button @click="requestAiTuning" class="ai-tune-btn" :disabled="isAiTuning">
           {{ isAiTuning ? 'AI 分析中…' : '送交 AI 微調' }}
         </button>
@@ -305,40 +302,15 @@ import {
   buildAiTuningPromptBundle,
   selectAiTuningFocusPreview,
 } from '../services/aiTuningPrompt';
-import { createSubmissionBundle, downloadJson } from '../services/aiTuningSubmissionBundle';
 
 const dataStore = useScheduleStore();
 const aiStore = useAiStore();
 const router = useRouter();
-const API_BASE = (() => {
-  const configuredBase = String(import.meta.env.VITE_API_BASE_URL || '').trim();
-  if (configuredBase) {
-    try {
-      const parsed = new URL(configuredBase, window.location.origin);
-      const isLocalhostTarget = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
-      if (!isLocalhostTarget || parsed.origin === window.location.origin) {
-        return parsed.toString().replace(/\/$/, '');
-      }
-    } catch {
-      return configuredBase.replace(/\/$/, '');
-    }
-  }
-
-  return '/api';
-})();
-const AI_TUNING_PROMPT_LIMITS = {
-  resource_first: 60000,
-  class_first: 40000,
-};
-
-const getAiTuningPromptMaxChars = (focusStrategy) => (
-  AI_TUNING_PROMPT_LIMITS[String(focusStrategy || '').trim()] || AI_TUNING_PROMPT_LIMITS.resource_first
-);
+const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:3000/api`;
 
 // ?? AI 閮箸 Modal ?批
 const showAiModal = ref(false);
 const isAiTuning = ref(false);
-const isGeneratingBundle = ref(false);
 const aiTuningError = ref(null);
 const aiTuningResult = ref(null);
 const aiPreviewSchedule = ref(null);
@@ -349,6 +321,7 @@ const aiTuningHistoryError = ref(null);
 const isCancellingAiTuningJob = ref(false);
 const aiTuningPromptPreview = ref(null);
 const aiTuningFocusStrategy = ref('resource_first');
+const MAX_AI_TUNING_PROMPT_CHARS = 100000;
 
 const hasAiTuningError = computed(() => Boolean(aiTuningError.value?.message));
 const aiTuningFocusLabel = computed(() => (
@@ -361,7 +334,7 @@ const aiTuningPromptPreviewSummary = computed(() => {
   const preview = aiTuningPromptPreview.value;
   if (!preview) return '尚未預估';
   const chars = preview.promptBudget?.estimatedChars ?? 0;
-  const maxChars = preview.promptBudget?.maxPromptChars ?? getAiTuningPromptMaxChars(aiTuningFocusStrategy.value);
+  const maxChars = preview.promptBudget?.maxPromptChars ?? MAX_AI_TUNING_PROMPT_CHARS;
   const status = preview.promptBudget?.withinBudget ? '安全' : '過大';
   return `${status} / 約 ${chars.toLocaleString('zh-TW')} chars / 上限 ${maxChars.toLocaleString('zh-TW')}`;
 });
@@ -439,8 +412,6 @@ const buildAiTuningPromptPreview = () => {
     return null;
   }
 
-  const maxPromptChars = getAiTuningPromptMaxChars(aiTuningFocusStrategy.value);
-
   const focus = selectAiTuningFocusPreview({
     report: aiReportJson.value,
     scheduleContext: {
@@ -466,7 +437,7 @@ const buildAiTuningPromptPreview = () => {
         focusStrategy: aiTuningFocusStrategy.value,
         maxMovesPerRound: 3,
       },
-      maxPromptChars,
+      maxPromptChars: MAX_AI_TUNING_PROMPT_CHARS,
     }),
   };
 };
@@ -1067,45 +1038,6 @@ const downloadAiJson = () => {
   downloadTextFile(`AI課表分析報告_${stamp}.json`, JSON.stringify(aiReportJson.value, null, 2), 'application/json;charset=utf-8');
 };
 
-const downloadSubmissionBundle = async () => {
-  if (!aiReportJson.value || !dataStore.engineResult?.schedule) return;
-
-  isGeneratingBundle.value = true;
-  try {
-    const bundle = createSubmissionBundle(
-      {
-        classes: dataStore.classes,
-        teachers: dataStore.teachers,
-        classrooms: dataStore.classrooms,
-        schoolInfo: dataStore.schoolInfo,
-        engineResult: dataStore.engineResult,
-        engineMeta: {
-          jobId: dataStore.engineJobId,
-          status: dataStore.engineStatus,
-          finishedAt: dataStore.engineFinishedAt,
-        },
-      },
-      dataStore.aiSettings,
-      {
-        enabled: aiStore.enabled,
-        serviceType: aiStore.serviceType,
-        apiUrl: aiStore.apiUrl,
-        model: aiStore.model,
-        systemPrompt: aiStore.systemPrompt,
-      },
-      aiTuningFocusStrategy.value
-    );
-
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    downloadJson(bundle, `ai-tuning-bundle_${stamp}.json`);
-  } catch (error) {
-    console.error('[ScheduleView] Bundle generation failed:', error);
-    alert(`封包產生失敗：${error.message}`);
-  } finally {
-    isGeneratingBundle.value = false;
-  }
-};
-
 const clearAiTuningState = () => {
   aiTuningError.value = null;
   aiTuningResult.value = null;
@@ -1142,13 +1074,12 @@ const requestAiTuning = async () => {
   const promptPreview = buildAiTuningPromptPreview();
   aiTuningPromptPreview.value = promptPreview;
   if (promptPreview?.promptBudget && !promptPreview.promptBudget.withinBudget) {
-    const maxPromptChars = getAiTuningPromptMaxChars(aiTuningFocusStrategy.value);
     aiTuningError.value = buildAiTuningError({
       responseStatus: 413,
       responseData: {
         code: 'AI_TUNING_PROMPT_TOO_LARGE',
         error: '本輪焦點摘要仍超過安全門檻，請縮小修復範圍後再試。',
-        details: `strategy=${aiTuningFocusStrategy.value}, estimated=${promptPreview.promptBudget.estimatedChars}, max=${maxPromptChars}`,
+        details: `estimated=${promptPreview.promptBudget.estimatedChars}, max=${promptPreview.promptBudget.maxPromptChars}`,
       },
     });
     return;
@@ -1184,7 +1115,7 @@ const requestAiTuning = async () => {
       maxIterations: 3,
       maxMovesPerRound: 3,
       tuningContext: {
-        maxPromptChars: getAiTuningPromptMaxChars(aiTuningFocusStrategy.value),
+        maxPromptChars: MAX_AI_TUNING_PROMPT_CHARS,
         focusStrategy: aiTuningFocusStrategy.value,
         promptRisk: promptPreview?.promptBudget || null,
         promptWarnings: promptPreview?.promptWarnings || [],
@@ -1236,7 +1167,7 @@ const cancelCurrentAiTuningJob = async () => {
     });
     await refreshAiTuningJobHistory();
     aiTuningJobState.value = {
-      ...aiTuningJobState.value,
+      ...(aiTuningJobState.value || {}),
       status: 'CANCELLED',
       progressPhase: 'CANCELLED',
       progressMessage: '使用者已取消背景 job',
@@ -1344,17 +1275,13 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
     const gradeMatch = String(cls.name).match(/(\d+)年/) || String(cls.name).match(/^(\d)/);
     const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : 1;
 
-    // 取得該班導師姓名（修復：優先使用班級導師欄位，避免 requirement 的 teacher 覆蓋）
-    // 根因：若 requirement 的 teacher 欄位與班級導師不同，會造成導師課被寫入錯誤老師
-    // 後續衝堂分析會依據錯誤老師欄位計算，產生誤報
-    const homeroomTeacher = cls.homeroom_teacher
-      || (cls.course_requirements || []).find(r =>
-        r.defaultTeacher === 'homeroom' && r.subject !== '導師區塊'
-      )?.teacher_name
-      || (cls.course_requirements || []).find(r =>
-        r.defaultTeacher === 'homeroom' && r.subject !== '導師區塊'
-      )?.teacher
-      || '';
+    // 取得該班導師姓名
+    const homeroomReq = (cls.course_requirements || []).find(r =>
+      r.defaultTeacher === 'homeroom' && r.subject !== '導師區塊'
+    );
+    const homeroomTeacher = homeroomReq
+      ? (homeroomReq.teacher_name || homeroomReq.teacher || cls.homeroom_teacher || '')
+      : (cls.homeroom_teacher || '');
 
     for (let d = 1; d <= 5; d++) {
       for (let p = 1; p <= 7; p++) {

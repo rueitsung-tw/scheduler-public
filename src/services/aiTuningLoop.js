@@ -221,8 +221,8 @@ export async function runAiTuningLoop({
       });
 
       const loopState = {
-        ...latestResult?.loopState,
-        ...finalizeResult.loopState,
+        ...(latestResult?.loopState || {}),
+        ...(finalizeResult.loopState || {}),
         progress: latestResult?.loopState?.progress || finalizeResult.loopState?.progress || null,
         shouldContinue: latestResult?.loopState?.shouldContinue ?? false,
       };
