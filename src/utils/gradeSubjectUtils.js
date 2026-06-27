@@ -212,3 +212,123 @@ export function filterValidRequirements(requirements, grade, schoolInfo = null, 
     return true;
   });
 }
+
+// ─────────────────────────────────────────────
+// Ghost Subject Fix: Catalog-driven metadata tools
+// ─────────────────────────────────────────────
+
+/**
+ * 建構班級課程的完整科目 catalog
+ * @param {object} params
+ * @param {number} params.grade - 年級 (1-6)
+ * @param {Array} [params.standardDomainSettings=[]] - 領域科目清單（含 defaultTeacher）
+ * @param {object} [params.alternativeMatrix={}] - alternativeMatrix（key 為 grade string）
+ * @param {Array} [params.currentRequirements=[]] - 目前班級的 course_requirements（用於補入 legacy）
+ * @returns {Array<{subject, defaultTeacher, source, isLegacy}>}
+ */
+export function buildAvailableSubjectCatalog({
+  grade,
+  standardDomainSettings = [],
+  alternativeMatrix = {},
+  currentRequirements = [],
+}) {
+  const catalog = []
+  const seen = new Set()
+
+  // 1. 從 standardDomainSettings 提取該年級適用的科目，帶 metadata
+  for (const domain of standardDomainSettings) {
+    if (!isSubjectApplicableToGrade(domain.name, grade)) continue
+    const periods = Number(domain.periods?.[grade] ?? 0)
+    if (isNaN(periods) || periods <= 0) continue
+    if (seen.has(domain.name)) continue
+    seen.add(domain.name)
+    catalog.push({
+      subject: domain.name,
+      defaultTeacher: domain.defaultTeacher || 'subject',
+      source: 'standard',
+      isLegacy: false,
+    })
+  }
+
+  // 2. 從 alternativeMatrix 提取該年級彈性課，帶 metadata
+  const altKey = String(grade)
+  const altList = alternativeMatrix[altKey] || []
+  for (const alt of altList) {
+    const name = alt.subject || alt.name || ''
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    catalog.push({
+      subject: name,
+      defaultTeacher: alt.defaultTeacher || 'subject',
+      source: 'alternative',
+      isLegacy: false,
+    })
+  }
+
+  // 3. 掃描 currentRequirements，找出不在 catalog 中的 legacy 科目
+  for (const req of currentRequirements) {
+    const name = req?.subject
+    if (!name || typeof name !== 'string' || name.trim() === '' || seen.has(name)) continue
+    seen.add(name)
+    // 🔧 用戶修正：優先沿用 req.defaultTeacher，沒有才 fallback 'subject'
+    catalog.push({
+      subject: name,
+      defaultTeacher: req?.defaultTeacher || 'subject',
+      source: 'legacy',
+      isLegacy: true,
+    })
+  }
+
+  return catalog
+}
+
+/**
+ * 在 catalog 中查找指定科目名稱的 entry
+ * @param {string} subjectName
+ * @param {Array} catalog - buildAvailableSubjectCatalog() 的回傳值
+ * @returns {{subject, defaultTeacher, source, isLegacy} | null}
+ */
+export function findSubjectCatalogEntry(subjectName, catalog) {
+  if (!subjectName || !Array.isArray(catalog)) return null
+  return catalog.find(e => e.subject === subjectName) || null
+}
+
+/**
+ * 依 catalog 補齊 course_requirements 的 metadata
+ * @param {Array} requirements - 課程需求陣列
+ * @param {Array} catalog - 完整科目 catalog
+ * @returns {Array} 補齊後的 requirements（不修改原陣列）
+ */
+export function enrichRequirementsWithMetadata(requirements, catalog) {
+  if (!Array.isArray(requirements)) return []
+  return requirements.map(req => {
+    const entry = findSubjectCatalogEntry(req?.subject, catalog)
+    if (entry && !req.defaultTeacher) {
+      return { ...req, defaultTeacher: entry.defaultTeacher }
+    }
+    return { ...req }
+  })
+}
+
+/**
+ * 驗證課程需求對照 catalog，回傳問題清單
+ * @param {Array} requirements - 課程需求陣列
+ * @param {Array} catalog - 完整科目 catalog
+ * @returns {{ valid: boolean, issues: Array<{index, subject, issueType, message}> }}
+ */
+export function validateRequirementsAgainstCatalog(requirements, catalog) {
+  const issues = []
+  const catalogSubjects = new Set(catalog.map(e => e.subject))
+
+  requirements.forEach((req, index) => {
+    const subj = req?.subject
+    if (!subj || String(subj).trim() === '') {
+      issues.push({ index, subject: subj, issueType: 'empty', message: `第 ${index + 1} 筆為空白科目` })
+    } else if (!catalogSubjects.has(subj)) {
+      // 不應該發生（因為 catalog 已包含 legacy），但若發生仍記錄
+      issues.push({ index, subject: subj, issueType: 'unknown', message: `第 ${index + 1} 筆科目「${subj}」不在任何來源中` })
+    }
+  })
+
+  return { valid: issues.length === 0, issues }
+}

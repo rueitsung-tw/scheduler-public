@@ -62,6 +62,7 @@ debug_*.json
 input_*.json
 output*.json
 out_s_*.json
+tmp_output_*.json
 fresh_db_dump.json
 
 # Database tools
@@ -78,4 +79,11 @@ debug_lock_audit.txt
 # Dev database
 dev.db
 
+# Python cache
+__pycache__/
+*.pyc
+
+# Python virtual environments
+venv/
+.venv/
 

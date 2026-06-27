@@ -4,6 +4,9 @@ from ortools.sat.python import cp_model
 from typing import Dict, List, Tuple, Any, Optional
 from collections import defaultdict
 
+# [Task 02] Import WEIGHT_REGISTRY to eliminate hard-coded weights
+from scheduler_policy import WEIGHT_REGISTRY, get_active_policy, SolveMode
+
 
 class SchedulePhase2Engine:
     def __init__(
@@ -21,6 +24,12 @@ class SchedulePhase2Engine:
         room_grade_affinity: Optional[Dict] = None,
         room_primary_teacher_map: Optional[Dict] = None,
         classes_data: Optional[List[Dict]] = None,
+        # [Task 3.5] coPlanningSettings 資料契約
+        school_info: Optional[Dict] = None,
+        # [Task 08] Priority teacher placeholders for solver-driven assignment
+        priority_placeholders: Optional[List[Dict]] = None,
+        # [repair_03] Runtime policy adapter for weight resolution
+        policy: Any = None,
     ):
         self.model = model
         self.schedule = schedule
@@ -36,6 +45,16 @@ class SchedulePhase2Engine:
         self.room_grade_affinity = room_grade_affinity or {}
         self.room_primary_teacher_map = room_primary_teacher_map or {}
         self.classes_data = classes_data or []
+
+        # [Task 3.5] Store school_info for co-planning rules
+        self.school_info = school_info or {}
+
+        # [Task 08] Store priority teacher placeholders
+        self.priority_placeholders = priority_placeholders or []
+
+        # [repair_03] Store policy adapter for weight resolution
+        # Falls back to default strict policy if not provided (backward compat)
+        self.policy = policy if policy is not None else get_active_policy(SolveMode.STRICT_TEACHING_SHAPE)
 
         # [NEW] 預先建立 className -> grade 對照表（供軟約束使用）
         self.class_grade_map = {}
@@ -125,7 +144,8 @@ class SchedulePhase2Engine:
         # ==========================================
         # [SOFT] 軟約束 1：科目分散
         # ==========================================
-        dispersion_weight = 50 
+        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
+        dispersion_weight = WEIGHT_REGISTRY.get("subject_dispersion", 50)
         for c_name in self.classes:
             for d in range(self.days):
                 day_start = d * self.periods_per_day
@@ -145,7 +165,8 @@ class SchedulePhase2Engine:
         # [SOFT] 軟約束 2：午休跨堂懲罰
         # [INFO] Phase 3: 游泳連堂豁免 — 若教師處於「游泳連堂（體育+夥伴）」狀態，豁免第3節接第4節的跨午休扣分
         # ==========================================
-        lunch_weight = 100
+        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
+        lunch_weight = WEIGHT_REGISTRY.get("lunch_span", 100)
         # 假設 0-based 中，第 3 節(中午前)與第 4 節(中午後)跨堂
         lunch_break_period = 3
         
@@ -184,9 +205,10 @@ class SchedulePhase2Engine:
         # 求解器會優先用專長老師，只有在專長老師節數用完時才觸發遞補
         # ==========================================
         # [INFO] Phase 3: 調降跨專長懲罰權重，確保系統優先守住泳池/教室等實體資源
-        cross_expertise_penalty = 5000
+        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
+        cross_expertise_penalty = WEIGHT_REGISTRY.get("cross_expertise", 5000)
         cross_expertise_count = 0
-        print("[AI] 啟動 Phase 4 跨專長遞補懲罰機制... (權重已調降至 5000)")
+        print(f"[AI] 啟動 Phase 4 跨專長遞補懲罰機制... (權重: {cross_expertise_penalty})")
 
         for (c_name, p, t_name, subject), var in self.schedule.items():
             # 排除特殊科目（導師區塊、游泳等引擎內部生成的科目）
@@ -293,9 +315,10 @@ class SchedulePhase2Engine:
         # 當老師實際排課數超過 max_periods 時，每超 1 節施加懲罰
         # [NEW] 融合特殊課程時段佔用：特教教師的 actual_load 需加上學習中心/抽離課程的佔用
         # ==========================================
-        quota_overload_weight = 5000
+        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
+        quota_overload_weight = WEIGHT_REGISTRY.get("teacher_quota_overtime", 5000)
         quota_overload_count = 0
-        print("[SOFT] 啟動教師配額 Soft Overload 機制...")
+        print(f"[SOFT] 啟動教師配額 Soft Overload 機制... (權重: {quota_overload_weight})")
 
         # 預先計算特教教師在特殊課程中的時段佔用
         special_teacher_periods = defaultdict(int)
@@ -309,7 +332,10 @@ class SchedulePhase2Engine:
 
         for t_data in self.teachers_data:
             t_name = t_data.get("name", "")
-            safe_max_quota = t_data.get("_safe_max_quota", 28)
+            # [repair_07] Use original max_periods for soft penalty calculation.
+            # _safe_max_quota is inflated to actual demand (prevents INFEASIBLE for hard constraints),
+            # but soft overload penalty must measure against the user-configured quota limit.
+            original_max_quota = t_data.get("max_periods", 28)
 
             # 找出該老師所有的排課變數
             t_vars = [var for (c, p, t, s), var in self.schedule.items() if t == t_name]
@@ -322,19 +348,26 @@ class SchedulePhase2Engine:
 
             # [NEW] 若該教師有特殊課程佔用，則從配額中扣除
             special_periods = special_teacher_periods.get(t_name, 0)
-            effective_quota = safe_max_quota - special_periods if special_periods > 0 else safe_max_quota
+            effective_quota = original_max_quota - special_periods if special_periods > 0 else original_max_quota
             if special_periods > 0:
-                print(f"  [INFO] [特教融合] {t_name} 特殊課程佔用 {special_periods} 節，有效配額 {safe_max_quota} → {effective_quota}")
+                print(f"  [INFO] [特教融合] {t_name} 特殊課程佔用 {special_periods} 節，有效配額 {original_max_quota} → {effective_quota}")
 
             # overload 變數：當 actual_load > effective_quota 時，overload = actual_load - effective_quota
             overload = self.model.NewIntVar(0, total_possible, f"quota_overload_{t_name}")
             self.model.Add(overload >= actual_load - effective_quota)
-            self.penalty_vars.append(quota_overload_weight * overload)
+            # [repair_07] Use dict metadata so solver.py penaltyBreakdown can parse it
+            self.penalty_vars.append({
+                "rule_id": "teacher_quota_overtime",
+                "weight": quota_overload_weight,
+                "var": overload,
+            })
             quota_overload_count += 1
 
             # [SOFT] 軟約束 5B：科目級配額 Soft Overload
             expertise_quotas = t_data.get("_expertise_quotas", {})
             if expertise_quotas:
+                # [repair_07] Use policy weight instead of hard-coded 3000
+                subj_overtime_weight = self.policy.get_weight("teacher_quota_overtime")
                 for subj, max_q in expertise_quotas.items():
                     subj_vars = [var for (c, p, t, s), var in self.schedule.items()
                                  if t == t_name and subj in s]
@@ -346,8 +379,12 @@ class SchedulePhase2Engine:
 
                     subj_overload = self.model.NewIntVar(0, len(subj_vars), f"subj_quota_overload_{t_name}_{subj}")
                     self.model.Add(subj_overload >= subj_load - max_q)
-                    # 科目級懲罰略低於總配額，避免衝突
-                    self.penalty_vars.append(3000 * subj_overload)
+                    # [repair_07] Use dict metadata so solver.py penaltyBreakdown can parse it
+                    self.penalty_vars.append({
+                        "rule_id": "teacher_quota_overtime",
+                        "weight": subj_overtime_weight,
+                        "var": subj_overload,
+                    })
 
         if quota_overload_count > 0:
             print(f"  [SOFT] [Soft Quota Overload] 已為 {quota_overload_count} 位老師建立配額超載懲罰 (權重: {quota_overload_weight})")
@@ -357,7 +394,8 @@ class SchedulePhase2Engine:
         # 確保同師的交替課（單週/雙週）疊合在同一 (day, period)，避免半節空洞
         # 系統中交替課以 "交替" 標記識別，is_music_odd 變量區分單/雙週
         # ====================================
-        alternating_alignment_weight = 10000
+        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
+        alternating_alignment_weight = WEIGHT_REGISTRY.get("alternating_alignment_conflict", 10000)
         alternating_alignment_count = 0
 
         # 先收集所有交替相關的schedule key，找出涉及的老師
@@ -425,9 +463,180 @@ class SchedulePhase2Engine:
             print(f"  - {subj}: 需求點數 {demand}, 負荷率 {ratio:.2%} ({status})")
 
         # ==========================================
+        # [SOFT] Task 3.3~3.7: 導師時段與共備軟規則
+        # ==========================================
+        print("[SOFT] 啟動第 3 階段軟規則 (導師時段 + 共備)...")
+        try:
+            from constraints.class_rules import (
+                build_grade_morning_first_period_homeroom_penalty,
+                build_morning_two_homeroom_periods_penalty,
+                build_co_planning_afternoon_block_penalty,
+                build_co_planning_subject_lesson_penalty,
+            )
+
+            # Task 3.3: 3-6 年級每週一天第一節導師課偏好
+            hr_penalty = build_grade_morning_first_period_homeroom_penalty(
+                self.model, self.schedule, self.classes_data
+            )
+            self.penalty_vars.extend(hr_penalty)
+            print(f"  [Task 3.3] grade_morning_first_period_homeroom_day: {len(hr_penalty)} penalty terms")
+
+            # Task 3.4: 每班每日早上兩節導師型課程偏好
+            morning_hr_penalty = build_morning_two_homeroom_periods_penalty(
+                self.model, self.schedule, self.classes_data
+            )
+            self.penalty_vars.extend(morning_hr_penalty)
+            print(f"  [Task 3.4] morning_two_homeroom_periods_per_day: {len(morning_hr_penalty)} penalty terms")
+
+            # Task 3.6: 共備候選區塊軟目標
+            co_plan_penalty, indicator_map = build_co_planning_afternoon_block_penalty(
+                self.model, self.schedule, self.classes_data,
+                school_info=getattr(self, 'school_info', None)
+            )
+            self.penalty_vars.extend(co_plan_penalty)
+            print(f"  [Task 3.6] grade_co_planning_afternoon_block: {len(co_plan_penalty)} penalty terms")
+
+            # Task 3.7: 共備期間科任課偏好 (依賴 3.6 的 indicator_map)
+            co_plan_subject_penalty = build_co_planning_subject_lesson_penalty(
+                self.model, self.schedule, self.classes_data,
+                indicator_map=indicator_map
+            )
+            self.penalty_vars.extend(co_plan_subject_penalty)
+            print(f"  [Task 3.7] co_planning_subject_teacher_lesson: {len(co_plan_subject_penalty)} penalty terms")
+
+        except Exception as e:
+            print(f"  [WARN] 第 3 階段軟規則建立失敗 (不影響主流程): {e}")
+
+        # ==========================================
+        # [Task 08] Priority Teacher Placeholder Reservation Objective
+        # Builds per-(placeholder, candidate_class, candidate_period) reservation BoolVars
+        # linked to existing schedule vars. Solver decides final assignment.
+        # Rule ID: priority_teacher_placeholder
+        # ==========================================
+        self._build_priority_placeholder_objective()
+
+        # ==========================================
         # ? 目標函數：最小化總扣分 (含負載平衡 + Soft Quota)
         # ==========================================
-        if self.penalty_vars:
-            self.model.Minimize(sum(self.penalty_vars))
+        penalty_exprs = [self._penalty_expr(p) for p in self.penalty_vars]
+        penalty_exprs = [p for p in penalty_exprs if p is not None]
+        if penalty_exprs:
+            self.model.Minimize(sum(penalty_exprs))
         else:
             self.model.Minimize(0)
+
+    def _build_priority_placeholder_objective(self):
+        """[Task 08 / repair_03] Priority teacher placeholder reservation model.
+
+        For each placeholder, create a reservation BoolVar per (candidate_class, candidate_period).
+        Each reservation var is linked to an existing schedule var:
+          - If a matching schedule var exists: reservation_var <= schedule_var
+          - Otherwise: reservation_var == 0
+        Satisfaction = sum of reservation vars for the placeholder.
+        Deficit = max(0, demandPeriods - satisfaction).
+        Penalty = policy_weight * deficit (soft objective, never hard constraint).
+
+        Weight source: policy.get_weight("priority_teacher_placeholder")
+            — resolves from WEIGHT_REGISTRY via SolvePolicy adapter
+            — default 12000 (near_hard per YAML §432-433)
+        """
+        if not self.priority_placeholders:
+            print("  [Task 08] No priority teacher placeholders to process")
+            return
+
+        # Weight from policy adapter (no hard-coded value)
+        priority_weight = self.policy.get_weight("priority_teacher_placeholder")
+
+        total_reservation_vars = 0
+        placeholder_penalty_count = 0
+
+        for idx, placeholder in enumerate(self.priority_placeholders):
+            teacher_name = placeholder.get("teacherName", "")
+            subject = placeholder.get("subject", "")
+            demand_periods = placeholder.get("demandPeriods", 0)
+            candidate_classes = placeholder.get("candidateClasses", [])
+            candidate_periods = placeholder.get("candidatePeriods", None)
+
+            if not teacher_name or not candidate_classes or demand_periods <= 0:
+                continue
+
+            # If no period restriction, use all periods
+            if candidate_periods is None:
+                period_indices = list(range(self.total_periods))
+            else:
+                period_indices = [
+                    cp.get("period", cp.get("index", 0))
+                    for cp in candidate_periods
+                    if isinstance(cp, dict)
+                ]
+
+            if not period_indices:
+                period_indices = list(range(self.total_periods))
+
+            # Safe name tokens for variable naming
+            safe_teacher = teacher_name.replace(' ', '_').replace('/', '_')
+            safe_subject = subject.replace(' ', '_').replace('/', '_')
+
+            # Build a lookup of schedule vars keyed by (class_name, period_index)
+            # Schedule key format: (class_name, period_index, teacher_name, subject)
+            teacher_schedule_vars = {}
+            for (c, p, t, s), var in self.schedule.items():
+                if t == teacher_name and c in candidate_classes:
+                    # Match exact subject first, then substring match
+                    if s == subject or subject in s or s in subject:
+                        teacher_schedule_vars[(c, p)] = var
+
+            reservation_vars_for_p = []
+
+            for c_name in candidate_classes:
+                safe_class = c_name.replace(' ', '_').replace('/', '_')
+                for period in period_indices:
+                    reservation_var = self.model.NewBoolVar(
+                        f"priority_placeholder_{safe_teacher}_{safe_class}_p{period}"
+                    )
+
+                    # Link to existing schedule var — reservation cannot fire without the actual schedule
+                    schedule_key = (c_name, period)
+                    if schedule_key in teacher_schedule_vars:
+                        self.model.Add(reservation_var <= teacher_schedule_vars[schedule_key])
+                    else:
+                        # No matching schedule entry — this reservation can never be satisfied
+                        self.model.Add(reservation_var == 0)
+
+                    reservation_vars_for_p.append(reservation_var)
+                    total_reservation_vars += 1
+
+            if not reservation_vars_for_p:
+                print(f"  [WARN] [Task 08] Placeholder '{teacher_name}' has no reservation vars to create")
+                continue
+
+            # Satisfaction = sum of all reservation vars for this placeholder
+            satisfaction = sum(reservation_vars_for_p)
+
+            # Deficit = max(0, demandPeriods - satisfaction)
+            deficit = self.model.NewIntVar(
+                0, demand_periods,
+                f"priority_placeholder_deficit_{safe_teacher}"
+            )
+            self.model.Add(deficit >= demand_periods - satisfaction)
+
+            self.penalty_vars.append({
+                "rule_id": "priority_teacher_placeholder",
+                "weight": priority_weight,
+                "var": deficit,
+            })
+            placeholder_penalty_count += 1
+
+        print(f"  [Task 08] Priority placeholder reservation model: "
+              f"{placeholder_penalty_count} placeholder(s), {total_reservation_vars} reservation vars, weight={priority_weight}")
+
+    @staticmethod
+    def _penalty_expr(penalty_entry):
+        if isinstance(penalty_entry, dict):
+            var = penalty_entry.get("var")
+            if var is None:
+                var = penalty_entry.get("violation")
+            if var is None:
+                return None
+            return int(penalty_entry.get("weight", 0)) * var
+        return penalty_entry

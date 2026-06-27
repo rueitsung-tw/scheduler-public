@@ -146,6 +146,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     alternativeMatrix: { '1': [], '2': [], '3': [], '4': [], '5': [], '6': [] },
     classExceptions: [],
     classroomLimits: { '自然科學': 3, '語文-英語': 3, '音樂': 3, '美勞': 3, '體育': 6, '資訊': 1 },
+    // 🔧 修復 B (RC-CONF-01 輔因)：接收 solver 輸出的 gradeCapacityMap
+    // 過渡方案：solver → gradeCapacityMap → store cache → frontend consumer
+    gradeMaxPeriods: null,
     subjectClassroomGrades: {
       '語文-英語': [2, 3, 4, 5, 6],
       '音樂': [3, 4, 5, 6],
@@ -1044,20 +1047,111 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           clearActiveJob();
           engineFinishedAt.value = data.finishedAt;
 
-          // 🚨 [INFEASIBLE 檢測] 檢查 solver 內部狀態
-          const solverStatus = data.result?.status;
-          const scheduleEmpty = data.result?.schedule && Array.isArray(data.result.schedule) && data.result.schedule.length === 0;
+          // 🚨 [狀態分類] 區分 INFEASIBLE / INVALID_INPUT / INVALID_VALIDATION / UNKNOWN_TIMEOUT / ERROR
+          // 🛡️ solverStatus > status，因為 status 可能是後端 DB 層級的状态（COMPLETED/FAILED）
+          let resultObj = data.result;
+          if (typeof resultObj === 'string') {
+            try { resultObj = JSON.parse(resultObj); } catch { resultObj = {}; }
+          }
+          const solverStatus = resultObj?.solverStatus || resultObj?.status;
+          const scheduleEmpty = !resultObj?.schedule || (Array.isArray(resultObj.schedule) && resultObj.schedule.length === 0);
 
-          if (solverStatus === 'INFEASIBLE' || scheduleEmpty) {
-            // 🚨 INFEASIBLE：轉為 ERROR 狀態，觸發 AI 診斷按鈕
+          // 🛡️ INVALID_INPUT：輸入超載（如總節數超過年級容量）
+          if (solverStatus === 'INVALID_INPUT') {
             engineStatus.value = 'ERROR';
             enginePhase.value = 'FAILED';
-            engineErrorMessage.value = data.result?.message || '排課引擎無法找到可行解 (INFEASIBLE)';
+            engineErrorMessage.value = resultObj?.error || resultObj?.message || '輸入資料超載，請檢查班級總節數是否超過年級上限';
+
+            // 附帶 classLoadTrace 供前端診斷
+            if (resultObj?.classLoadTrace) {
+              engineDiagnosticWarningDetails.value = resultObj.classLoadTrace
+                .filter(t => t.validationError)
+                .map(t => ({
+                  category: 'CLASS_LOAD',
+                  className: t.className,
+                  grade: t.grade,
+                  totalPeriods: t.totalPeriods,
+                  capacity: t.capacity ?? t.gradeMaxPeriods,
+                  periodExcess: t.periodExcess,
+                  message: `${t.className}: 總節數 ${t.totalPeriods} > 容量 ${t.capacity ?? t.gradeMaxPeriods} (超限 ${t.periodExcess})`,
+                }));
+            }
+
+            // 🔧 修復 B (RC-CONF-01 輔因)：接收 gradeCapacityMap 並轉換為 gradeMaxPeriods
+            // solver 輸出格式: { "grade1": 29, "grade1_arts": 29, "grade2": 29, ... }
+            // 前端格式: { 1: 29, 2: 29, ... }
+            if (resultObj?.gradeCapacityMap && typeof resultObj.gradeCapacityMap === 'object') {
+              const gcm = resultObj.gradeCapacityMap;
+              const gradeMap = {};
+              for (const [key, val] of Object.entries(gcm)) {
+                // 解析 key: "grade1" → grade=1, "grade3_arts" → grade=3
+                const match = key.match(/^grade(\d+)/);
+                if (match) {
+                  const gradeNum = parseInt(match[1], 10);
+                  // 以非 arts 版本為基礎（一般班容量），arts 版本通常相同
+                  if (!key.includes('_arts')) {
+                    gradeMap[gradeNum] = val;
+                  }
+                }
+              }
+              schoolInfo.value.gradeMaxPeriods = gradeMap;
+              console.log(`[schedule.js] 🔧 已從 gradeCapacityMap 更新 gradeMaxPeriods:`, gradeMap);
+            }
+
+            if (data.startedAt && data.finishedAt) {
+              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
+            }
+            reject(new Error(engineErrorMessage.value));
+
+          // 🛡️ INVALID_VALIDATION：求解成功但驗證失敗（如 unassigned_special_rooms）
+          } else if (solverStatus === 'INVALID' || solverStatus === 'INVALID_VALIDATION') {
+            engineStatus.value = 'ERROR';
+            enginePhase.value = 'FAILED';
+            engineErrorMessage.value = resultObj?.message || '求解結果未通過驗證，請檢查 debug_schedule_validation_report.json';
+
+            // 讀取 validation report
+            try {
+              const valResp = await fetch(`${API_BASE}/debug/validation-report`);
+              if (valResp.ok) {
+                const valReport = await valResp.json();
+                engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(valReport);
+              }
+            } catch {
+              // 靜默失敗，不影響主流程
+            }
+
+            if (data.startedAt && data.finishedAt) {
+              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
+            }
+            reject(new Error(engineErrorMessage.value));
+
+          // ⏱️ UNKNOWN_TIMEOUT：求解逾時
+          } else if (solverStatus === 'UNKNOWN_TIMEOUT') {
+            engineStatus.value = 'ERROR';
+            enginePhase.value = 'FAILED';
+            engineErrorMessage.value = resultObj?.message || '排課引擎逾時未完成——建議增加時間上限或放寬部分條件';
+
+            engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(resultObj?.diagnosticWarnings);
+            if (resultObj && Array.isArray(resultObj.aiAnalysis)) {
+              engineAiAnalysis.value = resultObj.aiAnalysis;
+            }
+
+            if (data.startedAt && data.finishedAt) {
+              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
+            }
+            reject(new Error(engineErrorMessage.value));
+
+          // 🚨 INFEASIBLE：求解器證明無解
+          //    只有當 solverStatus 明確是 INFEASIBLE，或狀態完全未知（null/undefined）且 schedule 為空時才走這裡
+          } else if (solverStatus === 'INFEASIBLE' || (!solverStatus && scheduleEmpty)) {
+            engineStatus.value = 'ERROR';
+            enginePhase.value = 'FAILED';
+            engineErrorMessage.value = resultObj?.message || resultObj?.error || '排課引擎無法找到可行解 (INFEASIBLE)';
 
             // 🔍 捕獲診斷資料；優先使用結構化 diagnosticWarnings
-            engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(data.result?.diagnosticWarnings);
-            if (data.result && Array.isArray(data.result.aiAnalysis)) {
-              engineAiAnalysis.value = data.result.aiAnalysis;
+            engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(resultObj?.diagnosticWarnings);
+            if (resultObj && Array.isArray(resultObj.aiAnalysis)) {
+              engineAiAnalysis.value = resultObj.aiAnalysis;
             }
 
             // 🔍 若尚無可辨識警示，讀取 debug_infeasible_report.txt 萃取警示
@@ -1084,12 +1178,17 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           clearActiveJob();
           engineStatus.value = 'ERROR';
           engineFinishedAt.value = data.finishedAt;
-          const errDetail = data.result?.error || data.progressMessage || '排課引擎執行失敗';
+          // 🔍 P1-B: data.result 可能是 JSON 字串（server.js 中 JSON.stringify(failedResult)），需先解析
+          let failedResultObj = data.result;
+          if (typeof failedResultObj === 'string') {
+            try { failedResultObj = JSON.parse(failedResultObj); } catch { failedResultObj = {}; }
+          }
+          const errDetail = failedResultObj?.error || failedResultObj?.message || data.progressMessage || '排課引擎執行失敗';
           engineErrorMessage.value = errDetail;
           // 🔍 捕獲診斷分析資料
-          engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(data.result?.diagnosticWarnings);
-          if (data.result && Array.isArray(data.result.aiAnalysis)) {
-            engineAiAnalysis.value = data.result.aiAnalysis;
+          engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(failedResultObj?.diagnosticWarnings);
+          if (failedResultObj && Array.isArray(failedResultObj.aiAnalysis)) {
+            engineAiAnalysis.value = failedResultObj.aiAnalysis;
           }
           if (engineDiagnosticWarnings.value.length === 0) {
             engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();

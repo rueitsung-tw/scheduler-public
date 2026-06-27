@@ -1,7 +1,8 @@
-export * from './exportUtils.js'
+export { findClassForCell } from './exportUtils.js'
 
 import * as XLSX from 'xlsx'
 import { expandTimetableCellEntries, getOccurrenceWeight, normalizeSubject, splitTeacherNames } from './scheduleAiReport.js'
+import { formatPairedSlot, hasValidPair } from './pairAwareFormatter.js'
 
 function getCell(timetable, day, period) {
   try {
@@ -63,6 +64,8 @@ function buildTeacherSchedule(teacherName, classes) {
             className: cls.name,
             subject: normalizeSubject(entry.subject),
             week: entry.week,
+            pairGroupId: entry.pairGroupId || '',
+            pairDirection: entry.pairDirection || '',
             teacherNames,
           })
         }
@@ -83,7 +86,13 @@ function hasTeacherWeekConflict(entries) {
   return oddClasses.length > 1 || evenClasses.length > 1
 }
 
-function formatTeacherSubjectEntries(entries) {
+export function formatTeacherSubjectEntries(entries) {
+  // Pair-aware: 若符合 slash 條件（同年級、同 pairGroup、互補方向），使用 `410/404` 格式
+  if (hasValidPair(entries)) {
+    return formatPairedSlot(entries, { fallbackToParentheses: true })
+  }
+
+  // Fallback: 傳統的 (單)/(雙) 格式
   const bothNames = [...new Set((entries || []).filter((entry) => entry.week === 'both').map((entry) => entry.className))]
   const oddNames = [...new Set((entries || []).filter((entry) => entry.week === 'odd').map((entry) => entry.className))]
   const evenNames = [...new Set((entries || []).filter((entry) => entry.week === 'even').map((entry) => entry.className))]

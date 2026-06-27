@@ -1,3 +1,4 @@
+
 /**
  * ExportHubView 報表匯出工具函式庫
  * 根據《ExportHubView 報表中心轉型與格式規範V5》實作
@@ -8,6 +9,7 @@ import { Document, Packer, Table, TableRow, TableCell, WidthType, TextRun, Parag
 import { saveAs } from 'file-saver'
 import { expandTimetableCellEntries, getOccurrenceWeight, normalizeWeekTag, splitTeacherNames } from './scheduleAiReport.js'
 import { normalizeSubject } from './subjectCanonical.js'
+import { formatPairedSlot, hasValidPair } from './pairAwareFormatter.js'
 
 /**
  * 取得導師姓名 (反查 ID → name)
@@ -357,74 +359,67 @@ function extractGrade(className) {
 
 /**
  * 找出匹配教室的班級名稱
- * 採用寬鬆多層比對策略，降低對資料格式一致性的依賴：
- *   Layer 1: 優先以 cell.classroomId / cell.classroomName 直接對應（最精確）
- *   Layer 2: 正規化 subject 後比對，不強制要求 teacher 完全一致
- *   Layer 3: 若 room 無 subject，只以 teacher 名稱包含比對（模糊）
+ * 僅接受明確 room assignment，不再用 subject/teacher fallback 猜測房間。
  */
-function findClassForCell(classes, room, day, period, schoolInfo = null) {
+export function findClassForCell(classes, room, day, period, schoolInfo = null) {
   const matches = []
-  const roomSubjectNorm = normalizeSubject(room.subject)
 
   classes.forEach(cls => {
     const cell = getCell(cls.timetable, day, period)
     if (!cell) return
+    const occurrences = expandTimetableCellEntries(cls.name, day, period, cell)
+    for (const occ of occurrences) {
+      const hasRoomIdMatch = occ.classroomId && room.id && String(occ.classroomId) === String(room.id)
+      const hasRoomNameMatch = occ.classroomName && room.name && occ.classroomName === room.name
+      if (!hasRoomIdMatch && !hasRoomNameMatch) continue
 
-    // --- Layer 1: 明確教室 ID 或名稱比對（最可靠，優先使用）---
-    if (cell.classroomId && room.id && String(cell.classroomId) === String(room.id)) {
-      matches.push(cls.name)
-      return
-    }
-    if (cell.classroomName && room.name && cell.classroomName === room.name) {
-      matches.push(cls.name)
-      return
-    }
-
-    // --- Layer 2: 正規化科目比對 + 教師寬鬆比對 ---
-    const cellSubjectNorm = normalizeSubject(cell?.subject)
-    const subjectMatch = roomSubjectNorm
-      ? (cellSubjectNorm === roomSubjectNorm || (cell?.subject && cell.subject.includes(room.subject)))
-      : true // 若教室未設定科目，略過科目條件
-
-    if (!subjectMatch) return
-
-    // 教師比對：精確比對優先，再嘗試「包含」比對（應對名稱含空格等邊際情況）
-    const cellTeacher = String(cell?.teacher || '').trim()
-    const roomTeacher = String(room.primaryTeacher || '').trim()
-
-    if (roomTeacher) {
-      const teacherExact = cellTeacher === roomTeacher
-      const teacherContains = roomTeacher.length > 0 &&
-        (cellTeacher.includes(roomTeacher) || roomTeacher.includes(cellTeacher))
-      if (teacherExact || teacherContains) {
-        matches.push(cls.name)
-      }
-    } else {
-      // 教室無 primaryTeacher，只以科目判斷 + 年級過濾
-      if (!subjectMatch) return;
-
-      // 套用 subjectClassroomGrades 過濾
-      if (schoolInfo?.subjectClassroomGrades && roomSubjectNorm) {
-        const grade = extractGrade(cls.name);
-        if (grade !== null) {
-          const gradesConfig = schoolInfo.subjectClassroomGrades;
-          const matchedKey = Object.keys(gradesConfig).find(key =>
-            normalizeSubject(key) === roomSubjectNorm
-          );
-          if (matchedKey && Array.isArray(gradesConfig[matchedKey])) {
-            if (!gradesConfig[matchedKey].includes(grade)) {
-              return; // 該年級不需使用此專科教室
-            }
-          }
-        }
-      }
-
-      matches.push(cls.name)
+      matches.push({
+        className: cls.name,
+        week: occ.week || 'both',
+        pairGroupId: occ.pairGroupId || '',
+        pairDirection: occ.pairDirection || '',
+        label: `${cls.name}${occ.week === 'odd' ? '(單)' : occ.week === 'even' ? '(雙)' : ''}`,
+      })
     }
   })
 
-  // 去重，避免同班級因多條件重複匹配
-  return [...new Set(matches)].join(', ')
+  if (matches.length === 0) return ''
+
+  // Pair-aware: 若符合 slash 條件（同年級、同 pairGroup、互補方向），使用 `410/404` 格式
+  if (hasValidPair(matches)) {
+    const pairedResult = formatPairedSlot(matches, { fallbackToParentheses: true })
+
+    // 檢查是否還有衝堂（配對外的多餘班級）
+    const pairedClassNames = new Set()
+    for (let i = 0; i < matches.length; i++) {
+      for (let j = i + 1; j < matches.length; j++) {
+        if (hasValidPair([matches[i], matches[j]])) {
+          pairedClassNames.add(matches[i].className)
+          pairedClassNames.add(matches[j].className)
+        }
+      }
+    }
+    const unpaired = matches.filter(m => !pairedClassNames.has(m.className))
+    if (unpaired.length > 0) {
+      return pairedResult + '\n' + unpaired.map(m => m.label).join('\n')
+    }
+    return pairedResult
+  }
+
+  // Fallback: 傳統格式
+  const uniqueLabels = [...new Set(matches.map((item) => item.label))]
+  const bothCount = matches.filter((item) => item.week === 'both').length
+  const oddCount = matches.filter((item) => item.week === 'odd').length
+  const evenCount = matches.filter((item) => item.week === 'even').length
+  const hasCollision =
+    bothCount > 1 ||
+    oddCount > 1 ||
+    evenCount > 1 ||
+    (bothCount > 0 && (oddCount > 0 || evenCount > 0))
+
+  return hasCollision
+    ? ['【衝堂】', ...uniqueLabels].join('\n')
+    : uniqueLabels.join('\n')
 }
 
 /**
@@ -433,6 +428,35 @@ function findClassForCell(classes, room, day, period, schoolInfo = null) {
 function normalizeSwimmingSubject(subject) {
   if (!subject) return ''
   return String(subject).trim()
+}
+
+/**
+ * 游泳匯出 helper：解析班級年級
+ * 優先取 cls.grade，缺失時從 cls.name 推導。
+ * 回傳值固定為 >=0 的整數，無法解析時回傳 0。
+ */
+function _resolveSwimmingGrade(cls) {
+  // 1. 直接取 grade
+  const g = Number(cls.grade)
+  if (g > 0 && isFinite(g)) return g
+
+  const name = String(cls.name || '')
+
+  // 2. 匹配 "4年"、"3 grade" 等
+  const m2 = name.match(/(\d+)\s*(年|grade)/i)
+  if (m2) {
+    const v = parseInt(m2[1], 10)
+    if (v > 0 && isFinite(v)) return v
+  }
+
+  // 3. 取開頭第一個數字
+  const m3 = name.match(/^(\d)/)
+  if (m3) {
+    const v = parseInt(m3[1], 10)
+    if (v > 0 && isFinite(v)) return v
+  }
+
+  return 0
 }
 
 /**
@@ -461,7 +485,12 @@ export async function exportSwimmingSchedule(scheduleStore) {
 
   // 🔍 [防呆診斷] 游泳池匯出前資料快照
   console.group('[游泳匯出] 資料診斷')
-  console.log(`📚 班級總數: ${(classes || []).length}`)
+  const totalCount = (classes || []).length
+  const swimGradeCount = (classes || []).filter(c => {
+    const g = _resolveSwimmingGrade(c)
+    return g >= 4 && g <= 6
+  }).length
+  console.log(`📚 班級總數: ${totalCount}, 4-6 年級（游泳適用）: ${swimGradeCount}`)
   console.groupEnd()
 
   const dayNames = ['', '週一', '週二', '週三', '週四', '週五', '週六', '週日']
@@ -479,8 +508,11 @@ export async function exportSwimmingSchedule(scheduleStore) {
   const entryList = []
 
   // 以 timetable 掃描為主：找出「體育 + 導師區塊」相鄰配對
+  // 僅掃描 4-6 年級，與求解器 apply_swimming_engine_v2 的適用範圍一致
   classes.forEach(cls => {
     if (!cls.timetable) return
+    const grade = _resolveSwimmingGrade(cls)
+    if (grade < 4 || grade > 6) return
 
     const classSwimmingPairs = []
 

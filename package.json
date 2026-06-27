@@ -12,9 +12,7 @@
     "lint:eslint": "eslint . --fix --cache",
     "format": "prettier --write --experimental-cli src/",
     "test": "vitest",
-    "test:run": "vitest run",
-    "public:check": "node scripts/public-repo-sync.mjs check",
-    "public:sync": "node scripts/public-repo-sync.mjs sync"
+    "test:run": "vitest run"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.8.0",

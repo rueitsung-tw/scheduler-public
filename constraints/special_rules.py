@@ -16,7 +16,10 @@ import terminal_sanitizer
 import re
 
 from config import DAYS, PERIODS_PER_DAY, LUNCH_BOUNDARY, TOTAL_PERIODS
-from .utils import grade_needs_special_room, canonical_subject
+from .utils import grade_needs_special_room
+# [Task 02] Import solve mode for strict/fallback distinction in apply_art_consecutive_constraint
+# [Task 02] Import WEIGHT_REGISTRY for policy-weight access
+from scheduler_policy import SolveMode, get_active_policy, WEIGHT_REGISTRY
 
 # --------------------------------------------------------------
 # 有效相鄰節次對：唯一規則來源（single source of truth）
@@ -99,9 +102,10 @@ def apply_english_capacity(model, classes_data, schedule, subject_room_count, sc
         for (c, per, t, s), var in schedule.items():
             if per == p and "英語" in s:
                 grade = class_grade_map.get(c, 1)
-                # Use shared utility instead of regex r'1年'
-                canonical = canonical_subject("語文-英語")
-                if not grade_needs_special_room(canonical, grade, classroom_grades_cfg):
+                # Do NOT wrap with canonical_subject() which returns Simplified Chinese.
+                # grade_needs_special_room internally uses _normalize_room_subject (Traditional Chinese),
+                # which aligns with solver.py::_normalize_special_room_subject and config keys.
+                if not grade_needs_special_room("語文-英語", grade, classroom_grades_cfg):
                     continue  # This grade doesn't need specialty room for English
                 eng_vars.append(var)
                     
@@ -137,9 +141,11 @@ def apply_no_consecutive_pe(model, classes_data, schedule):
                     model.Add(v1[0] + v2[0] <= 1)
 
 
-def apply_art_consecutive_constraint(model, classes_data, schedule, penalty_vars=None):
+def apply_art_consecutive_constraint(
+    model, classes_data, schedule, penalty_vars=None, solve_mode=None
+):
     """
-    [軟約束 13] 美勞固定課必須與音樂美勞交替課連堂
+    [硬/軟約束 13] 美勞固定課必須與音樂美勞交替課連堂
 
     對於經過 1.5+1.5 拆分後的班級（有 美勞_固定 + 音樂美勞_交替）：
     - 美勞_固定 偏好與 音樂美勞_交替 排在同一天
@@ -147,11 +153,17 @@ def apply_art_consecutive_constraint(model, classes_data, schedule, penalty_vars
     - 不可跨午休（pr=3 時 p1=base+3, p2=base+4）
     - 不適用於沒有這兩種課的班級
 
+    [Task 02] strict/fallback 行為：
+    - STRICT mode: art/music shape = hard constraint (至少一組連堂必須成立)
+    - FALLBACK mode: art/music shape = near-hard soft penalty (art_music_shape_fallback: 16000)
+
     Args:
         model: CpModel
         schedule: dict (c, p, t, s) -> BoolVar
         classes_data: list of class dicts
         penalty_vars: list for soft penalty accumulation
+        solve_mode: SolveMode enum — STRICT_TEACHING_SHAPE makes shape hard;
+                    FEASIBILITY_RECOVERY uses policy weight 16000
     """
     for cls in classes_data:
         c_name = cls.get("name", "")
@@ -220,13 +232,34 @@ def apply_art_consecutive_constraint(model, classes_data, schedule, penalty_vars
 
                 consecutive_patterns.append(pair_ok)
 
-         # 4. 軟限制：偏好至少一組連堂（權重 1000）
+        # 4. [Task 02] strict/fallback 區分 art/music shape
         if consecutive_patterns:
             has_art_consec = model.NewBoolVar(f'art_consec_ok_{c_name}')
             model.Add(sum(consecutive_patterns) >= 1).OnlyEnforceIf(has_art_consec)
-            if penalty_vars is not None:
-                penalty_vars.append(1000 * (1 - has_art_consec))
-            print(f"  [SOFT] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對, 權重=1000)")
+
+            if solve_mode == SolveMode.STRICT_TEACHING_SHAPE:
+                # STRICT mode: art/music shape = hard constraint
+                model.Add(has_art_consec == 1)
+                print(f"  [HARD] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對)")
+            else:
+                # FALLBACK or legacy mode: near-hard soft penalty
+                if solve_mode == SolveMode.FEASIBILITY_RECOVERY:
+                    policy = get_active_policy(solve_mode)
+                    weight = policy.get_weight("art_music_shape_fallback", default=16000)
+                else:
+                    # Legacy call without solve_mode — use fallback weight as safe default
+                    weight = 16000
+
+                if penalty_vars is not None:
+                    # [Task 02] Use dict metadata format for penaltyBreakdown compatibility
+                    no_art = model.NewIntVar(0, 1, f"no_art_consec_{c_name.replace(' ','_')}")
+                    model.Add(no_art == 1 - has_art_consec)
+                    penalty_vars.append({
+                        "rule_id": "art_music_shape_fallback",
+                        "weight": weight,
+                        "var": no_art,
+                    })
+                print(f"  [SOFT] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對, 權重={weight})")
 
 
 def apply_alternating_perfect_pairing(
@@ -240,6 +273,7 @@ def apply_alternating_perfect_pairing(
     class_teacher_pair,
     phase2_penalty_vars,
     ai_settings=None,  # [NEW] 傳入 ai_settings 以讀取配置
+    solve_mode=None,   # [Task 02] SolveMode enum for strict/fallback distinction
 ):
     """
     [硬/軟約束 14] 班對班互補配對約束（支援硬性/軟性/奇數班級降級）
@@ -253,6 +287,7 @@ def apply_alternating_perfect_pairing(
     if ai_settings is None:
         ai_settings = {}
 
+    # Note: SolveMode and get_active_policy imported at module level (line 21)
     from config import CLASSROOM_LIMITS_FALLBACK
     music_room_limit = CLASSROOM_LIMITS_FALLBACK.get("音樂", 4)
     art_room_limit   = CLASSROOM_LIMITS_FALLBACK.get("美勞", 3)
@@ -270,6 +305,20 @@ def apply_alternating_perfect_pairing(
 
     # 統計每個群組的總班級數，以便判斷是否為奇數班級群組
     group_classes_count = {gid: len(classes) for gid, classes in alternating_group_map.items()}
+
+    # [SYMMETRY-BREAKING] Canonical ordering for alternating direction variables
+    # For each group with >= 2 members, force the lexicographically first class
+    # to have is_alt_odd == 0. This breaks the 2^k direction symmetry per group
+    # without changing the feasible solution set (flipping all directions in a
+    # group produces an equivalent solution; we fix one canonical representative).
+    for gid, members in alternating_group_map.items():
+        if len(members) < 2:
+            continue
+        canonical_class = sorted(members)[0]
+        canonical_var = class_music_odd_var.get(canonical_class)
+        if canonical_var is not None:
+            model.Add(canonical_var == 0)
+            print(f"  [SYMMETRY-BREAK] {gid}: force {canonical_class} is_alt_odd = 0")
 
     for p in range(TOTAL_PERIODS):
 
@@ -303,7 +352,13 @@ def apply_alternating_perfect_pairing(
                     f'alt_cap_overload_{gid}_p{p}'
                 )
                 model.Add(overload >= sum(active_bvars) - pair_capacity * 2)
-                phase2_penalty_vars.append(10000 * overload)
+                # [Task 02] Use WEIGHT_REGISTRY key for alternating alignment conflict
+                alt_weight = WEIGHT_REGISTRY.get("alternating_alignment_conflict", 10000)
+                phase2_penalty_vars.append({
+                    "rule_id": "alternating_alignment_conflict",
+                    "weight": alt_weight,
+                    "var": overload,
+                })
 
             # -- 決定約束強度：
             # 1. 總班級數不等於 2 的大群組或奇數群組，自動降為軟性約束 (soft)，防範著色矛盾 (完全圖 K_k 當 k >= 3 時為 2-不可著色)
@@ -339,11 +394,17 @@ def apply_alternating_perfect_pairing(
                     model.Add(both_active <= var_i)
                     model.Add(both_active <= var_j)
 
-                    if strictness == "hard":
-                        # [OK] 硬約束模式
+                    # [Task 02] STRICT mode: exact-two pairing = hard constraint
+                    # FALLBACK mode: exact-two pairing downgrades to near-hard soft (18000)
+                    effective_strictness = strictness
+                    if solve_mode == SolveMode.FEASIBILITY_RECOVERY and is_perfect_pair:
+                        # Downgrade exact-two pairing from hard to near-hard soft in fallback
+                        effective_strictness = "soft"
+
+                    if effective_strictness == "hard":
+                        # [OK] 硬約束模式 (STRICT mode only for exact-two)
                         model.Add(bool_i + bool_j >= 1).OnlyEnforceIf(both_active)
                         model.Add(bool_i + bool_j <= 1).OnlyEnforceIf(both_active)
-                        # print(f"  [LOCK] [Pair 硬約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已硬鎖定")
                     else:
                         # -- 軟性約束模式（奇數班群或特定設定下使用）
                         # 我們希望：both_active 成立時，bool_i != bool_j
@@ -359,9 +420,78 @@ def apply_alternating_perfect_pairing(
                         model.Add(mismatch <= both_active)
                         model.Add(mismatch <= same)
                         
-                        penalty_weight = ai_settings.get("pairingPenaltyWeight", 5000)
-                        phase2_penalty_vars.append(penalty_weight * mismatch)
+                        # [Task 02] Use policy weight in fallback mode for exact-two pairing
+                        if solve_mode == SolveMode.FEASIBILITY_RECOVERY and is_perfect_pair:
+                            policy = get_active_policy(solve_mode)
+                            penalty_weight = policy.get_weight("exact_two_alternating_pairing_fallback", default=18000)
+                            rule_id_key = "exact_two_alternating_pairing_fallback"
+                        else:
+                            penalty_weight = ai_settings.get("pairingPenaltyWeight", 5000)
+                            rule_id_key = "odd_or_large_alternating_pairing"
+                        phase2_penalty_vars.append({
+                            "rule_id": rule_id_key,
+                            "weight": penalty_weight,
+                            "var": mismatch,
+                        })
                         # print(f"  [CONSTRAINT] [Pair 軟約束] p={p} | {c_i} ↔ {c_j} (group={gid}) 互補方向已建立為軟約束 (權重: {penalty_weight})")
+
+    # [Task 02] In FALLBACK mode, skip same-period penalty for exact-two (already degraded)
+    if solve_mode == SolveMode.FEASIBILITY_RECOVERY:
+        return
+
+    # ============================================================
+    # Step 2: exact-two 群組的「同時段傾向」軟性促成
+    # 目的：同年級 2 班配對，盡量讓兩班的交替課落在同一 period
+    # 權重：SAME_PERIOD_PENALTY = 3000（低於互補方向 5000，高於美勞連堂 1000）
+    # ============================================================
+    SAME_PERIOD_PENALTY = 3000
+
+    # Step 2-0: 預建 alt_var_at[(gid, class_name, period)] = schedule BoolVar
+    # 注意：此 same-period penalty 只作用於「音樂美勞_交替」，不影響泛型交替（健/s、s/社 等）
+    alt_var_at = {}
+    for (c, per, t, s), var in schedule.items():
+        if "音樂美勞_交替" not in s:
+            continue
+        gid = class_pair_group.get(c)
+        if not gid:
+            continue
+        alt_var_at[(gid, c, per)] = var
+
+    # Step 2-1: 只處理 exact-two（剛好 2 班）的群組
+    for gid, members in alternating_group_map.items():
+        if len(members) != 2:
+            continue
+
+        c_a, c_b = members[0], members[1]
+        same_period_vars = []
+
+        for p in range(TOTAL_PERIODS):
+            a_at_p = alt_var_at.get((gid, c_a, p))
+            b_at_p = alt_var_at.get((gid, c_b, p))
+            if a_at_p is None or b_at_p is None:
+                continue
+
+            # both_here = 1 當且僅當兩班都在 period p 排了交替課
+            both_here = model.NewBoolVar(f"same_period_{gid}_p{p}")
+            model.Add(both_here >= a_at_p + b_at_p - 1)
+            model.Add(both_here <= a_at_p)
+            model.Add(both_here <= b_at_p)
+            same_period_vars.append(both_here)
+
+        # 任一 period 同時排到交替課就算 overlap 成功
+        if same_period_vars:
+            has_overlap = model.NewBoolVar(f"has_same_period_{gid}")
+            model.AddMaxEquality(has_overlap, same_period_vars)
+            # [Task 02] Use WEIGHT_REGISTRY key; same_period is a soft pairing preference
+            # Map to odd_or_large_alternating_pairing since it's a pairing-related soft objective
+            same_period_weight = WEIGHT_REGISTRY.get("odd_or_large_alternating_pairing", SAME_PERIOD_PENALTY)
+            no_overlap = model.NewIntVar(0, 1, f"no_same_period_{gid}")
+            model.Add(no_overlap == 1 - has_overlap)
+            phase2_penalty_vars.append({
+                "rule_id": "odd_or_large_alternating_pairing",
+                "weight": same_period_weight,
+                "var": no_overlap,
+            })
 
 
 def apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_penalty_vars):
@@ -491,14 +621,28 @@ def apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_
             if class_swim_vars:
                 has_swim_consec = model.NewBoolVar(f'swim_consec_ok_{c_name}')
                 model.Add(sum(class_swim_vars) >= 1).OnlyEnforceIf(has_swim_consec)
-                phase2_penalty_vars.append(1200 * (1 - has_swim_consec))
+                # [Task 02] Use WEIGHT_REGISTRY key for swimming consecutive preference
+                swim_weight = WEIGHT_REGISTRY.get("swimming_consecutive", 1200)
+                no_swim = model.NewIntVar(0, 1, f"no_swim_consec_{c_name.replace(' ','_')}")
+                model.Add(no_swim == 1 - has_swim_consec)
+                phase2_penalty_vars.append({
+                    "rule_id": "swimming_consecutive",
+                    "weight": swim_weight,
+                    "var": no_swim,
+                })
 
     # Step 5: 泳池容量限制（軟懲罰）
     for p, usage_vars in pool_usage_at_p.items():
         if usage_vars:
             pool_overload_p = model.NewIntVar(0, len(usage_vars), f"pool_overload_p{p}")
             model.Add(pool_overload_p >= sum(usage_vars) - 3)
-            phase2_penalty_vars.append(10000 * pool_overload_p)
+            # [Task 02] Use WEIGHT_REGISTRY key for swimming pool overload
+            pool_weight = WEIGHT_REGISTRY.get("swimming_pool_overload", 10000)
+            phase2_penalty_vars.append({
+                "rule_id": "swimming_pool_overload",
+                "weight": pool_weight,
+                "var": pool_overload_p,
+            })
 
 
 def add_consecutive_constraint(model, schedule, class_name, subject, consecutive_groups, days, periods_per_day):

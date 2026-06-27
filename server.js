@@ -1,4 +1,4 @@
-﻿
+
 // eslint-disable-next-line no-undef
 import 'dotenv/config';
 import express from 'express';
@@ -3422,6 +3422,10 @@ function findLatestArtifactPath(prefix, suffix = '.json') {
     }
 }
 
+/**
+ * 持久化求解失敗分析工件
+ * 適用於: INFEASIBLE, INVALID_INPUT, INVALID_VALIDATION, ERROR, UNKNOWN_TIMEOUT
+ */
 function persistInfeasibleAnalysisArtifacts({
     jobId,
     errorMsg,
@@ -3562,64 +3566,112 @@ async function runSchedulingWorker(jobId, payload) {
                         console.error(`[Diagnostic] preRepair 統計失敗:`, e);
                     }
 
-                    // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
-                    await prisma.scheduleJob.update({
-                        where: { id: jobId },
-                        data: {
-                          progressPhase: 'REPAIRING',
-                          progressMessage: '模擬退火優化中... (Repair Agent)'
-                        }
-                    });
+                    // ==========================================================================
+                    // [Task 05] Sub-task 05.5: REPAIR_ENABLED Switch
+                    // ==========================================================================
+                    const REPAIR_ENABLED = process.env.REPAIR_ENABLED !== 'false'; // default: true
 
-                    const repairOutputPath = path.join(__dirname, `output_repaired_${jobId}.json`);
-                    const repairResult = new Promise((resolve, _reject) => {
-                        const repair = spawnPython('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
-                        let repairLog = '';
-                        repair.stdout.on('data', (d) => {
-                            const msg = d;
-                            console.log(`[Repair Agent]: ${msg}`);
-                            repairLog += msg;
-                        });
-                        repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d}`));
-                        repair.on('close', (rc) => {
-                            if (rc === 0 && fs.existsSync(repairOutputPath)) {
-                                resolve('repaired');
-                            } else {
-                                resolve('original');
-                            }
-                        });
-                    });
-
-                    const repairStatus = await repairResult;
-
+                    let repairStatus = 'skipped';
                     let postRepairStats = null;
                     let resultData;
-                    if (repairStatus === 'repaired') {
-                        const repairedContent = fs.readFileSync(repairOutputPath, 'utf-8');
-                        const repairedObj = JSON.parse(repairedContent);
-                        const scheduleEntries = repairedObj.schedule || [];
 
-                        // [Phase 0 止血] 驗證 repair 結果
-                        const validationErrors = validateRepairHardConstraints(scheduleEntries, payload);
-                        if (validationErrors.length > 0) {
-                            console.warn(`[Repair] Hard constraint violation detected: ${validationErrors.join('; ')}. Falling back to solver output.`);
-                            resultData = fs.readFileSync(outputPath, 'utf-8');
-                            console.log(`[WARN] [Repair Agent] 驗證失敗，回退使用原始 solver 結果`);
-                        } else {
-                            resultData = repairedContent;
-                            console.log(`[OK] [Repair Agent] 優化成功且通過硬約束驗證，使用修復後結果`);
-                        }
-                        try {
-                            postRepairStats = await runDiagnosticStats(inputPath, repairOutputPath);
-                            console.log(`[Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
-                        } catch (e) {
-                            console.error(`[Diagnostic] postRepair 統計失敗:`, e);
-                        }
-                        if (fs.existsSync(repairOutputPath)) fs.unlinkSync(repairOutputPath);
+                    if (!REPAIR_ENABLED) {
+                        repairStatus = 'disabled';
+                        let rawResultData = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+                        // [Task 05] Sub-task 05.3: When repair disabled, inject null markers per output contract
+                        rawResultData.repairAccepted = null;
+                        rawResultData.repairRejectedReasons = [];
+                        rawResultData.postRepairValidation = null;
+                        rawResultData.preRepairValidation = null;
+                        resultData = JSON.stringify(rawResultData, null, 2);
+                        console.log(`[INFO] [Repair Agent] REPAIR_ENABLED=false, skipping repair. Using solver output.`);
                     } else {
-                        resultData = fs.readFileSync(outputPath, 'utf-8');
-                        console.log(`[WARN] [Repair Agent] 優化失敗或跳過，使用原始結果`);
-                        postRepairStats = preRepairStats;
+                        // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
+                        await prisma.scheduleJob.update({
+                            where: { id: jobId },
+                            data: {
+                              progressPhase: 'REPAIRING',
+                              progressMessage: '模擬退火優化中... (Repair Agent)'
+                            }
+                        });
+
+                        const repairOutputPath = path.join(__dirname, `output_repaired_${jobId}.json`);
+                        const repairResultPromise = new Promise((resolve, _reject) => {
+                            const repair = spawnPython('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
+                            let repairLog = '';
+                            repair.stdout.on('data', (d) => {
+                                const msg = d;
+                                console.log(`[Repair Agent]: ${msg}`);
+                                repairLog += msg;
+                            });
+                            repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d}`));
+                            repair.on('close', (rc) => {
+                                if (rc === 0 && fs.existsSync(repairOutputPath)) {
+                                    resolve('repaired');
+                                } else {
+                                    resolve('original');
+                                }
+                            });
+                        });
+
+                        repairStatus = await repairResultPromise;
+
+                        if (repairStatus === 'repaired') {
+                            const repairedContent = fs.readFileSync(repairOutputPath, 'utf-8');
+                            const repairedObj = JSON.parse(repairedContent);
+                            const scheduleEntries = repairedObj.schedule || [];
+                            const buildSolverResultWithRepairMetadata = (accepted, reasons = []) => {
+                                const solverObj = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+                                solverObj.repaired = false;
+                                solverObj.repairAccepted = accepted;
+                                solverObj.repairRejectedReasons = reasons;
+                                solverObj.preRepairValidation = repairedObj.preRepairValidation ?? null;
+                                solverObj.postRepairValidation = repairedObj.postRepairValidation ?? null;
+                                solverObj.repairAttemptValidation = repairedObj.repairAttemptValidation ?? repairedObj.postRepairValidation ?? null;
+                                solverObj.repairAttemptPenalty = repairedObj.repair_penalty ?? null;
+                                return JSON.stringify(solverObj, null, 2);
+                            };
+
+                            // ==========================================================================
+                            // [Task 05] Sub-task 05.3: Python Gate 優先，JS gate 為 fallback
+                            // ==========================================================================
+                            const pythonRepairAccepted = repairedObj.repairAccepted;
+                            const pythonRejectedReasons = repairedObj.repairRejectedReasons || [];
+
+                            if (pythonRepairAccepted === false) {
+                                // Python gate 已拒絕 — 使用原始 solver output
+                                resultData = buildSolverResultWithRepairMetadata(false, pythonRejectedReasons);
+                                postRepairStats = preRepairStats;
+                                console.warn(`[Repair] Python gate rejected repair: ${pythonRejectedReasons.join('; ')}. Using solver output.`);
+                            } else {
+                                // [Phase 0 止血] JS 層額外驗證 repair 結果（雙重防線）
+                                const validationErrors = validateRepairHardConstraints(scheduleEntries, payload);
+                                if (validationErrors.length > 0) {
+                                    console.warn(`[Repair] JS gate violation: ${validationErrors.join('; ')}. Falling back to solver output.`);
+                                    resultData = buildSolverResultWithRepairMetadata(
+                                        false,
+                                        validationErrors.map((error) => `js_gate: ${error}`)
+                                    );
+                                    postRepairStats = preRepairStats;
+                                    console.log(`[WARN] [Repair Agent] JS 驗證失敗，回退使用原始 solver 結果`);
+                                } else {
+                                    resultData = repairedContent;
+                                    // Post-repair diagnostic stats for the accepted repaired schedule
+                                    try {
+                                        postRepairStats = await runDiagnosticStats(inputPath, repairOutputPath);
+                                        console.log(`[Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
+                                    } catch (e) {
+                                        console.error(`[Diagnostic] postRepair 統計失敗:`, e);
+                                    }
+                                    console.log(`[OK] [Repair Agent] 優化成功且通過硬約束驗證，使用修復後結果`);
+                                }
+                            }
+                            if (fs.existsSync(repairOutputPath)) fs.unlinkSync(repairOutputPath);
+                        } else {
+                            resultData = fs.readFileSync(outputPath, 'utf-8');
+                            console.log(`[WARN] [Repair Agent] 優化失敗或跳過，使用原始結果`);
+                            postRepairStats = preRepairStats;
+                        }
                     }
 
                     // [Diagnostic] Step 3: 組合報表並儲存
@@ -3663,10 +3715,32 @@ async function runSchedulingWorker(jobId, payload) {
                 } else {
                     const errorMsg = code === null ? 'Python 進程被強制終止' : `Exit code ${code}`;
 
+                    // 🚨 [狀態分類] 先嘗試從 Python output JSON 讀取真實 solverStatus
+                    // 🛡️ 優先讀 solverStatus（solver.py C5 確保所有路徑都有此欄位）
+                    //    其次讀 status，最後才 fallback 到 null（表示完全沒有輸出）
+                    let actualSolverStatus = null;
+                    let classLoadTrace = null;
+                    let gradeCapacityMap = null;
+                    if (fs.existsSync(outputPath)) {
+                        try {
+                            const outputJson = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+                            // solverStatus > status > null
+                            actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
+                            classLoadTrace = outputJson?.classLoadTrace || null;
+                            // 🔧 修復 B (RC-CONF-01 輔因)：讀取 gradeCapacityMap 過渡方案
+                            gradeCapacityMap = outputJson?.gradeCapacityMap || null;
+                            console.log(`[Solver Status] 從 output JSON 讀取到 solverStatus=${actualSolverStatus}, status=${outputJson?.status}`);
+                        } catch (parseErr) {
+                            console.warn(`[Solver Status] 無法解析 output JSON: ${parseErr.message}，actualSolverStatus 保持 null`);
+                        }
+                    }
+
                     // 規則式診斷分析：讀取 debug_infeasible_report.txt 並萃取警示摘要
                     let aiAnalysis = buildGenericInfeasibleAnalysis();
                     let diagnosticWarnings = buildGenericInfeasibleWarnings();
                     let analysisBundlePath = '';
+                    // 🛡️ P2-A: effectiveSolverStatus — 確保傳入 persistInfeasibleAnalysisArtifacts 的狀態不為 null
+                    const effectiveSolverStatus = actualSolverStatus ?? 'ERROR';
                     try {
                         const reportPath = path.join(__dirname, 'debug_infeasible_report.txt');
                         let reportContent = '';
@@ -3679,7 +3753,7 @@ async function runSchedulingWorker(jobId, payload) {
                         const artifactResult = persistInfeasibleAnalysisArtifacts({
                             jobId,
                             errorMsg,
-                            solverStatus: 'INFEASIBLE',
+                            solverStatus: effectiveSolverStatus,
                             reportContent,
                             reportPath,
                             payloadPath: inputPath,
@@ -3691,11 +3765,46 @@ async function runSchedulingWorker(jobId, payload) {
                         console.error('診斷報告解析失敗:', parseError);
                     }
 
+                    // 🛡️ P2-B: 根據 effectiveSolverStatus 精確分支——不再 fallback 到 INFEASIBLE
+                    const failedResult = {
+                        error: errorMsg,
+                        aiAnalysis,
+                        diagnosticWarnings,
+                        analysisBundlePath,
+                    };
+
+                    if (effectiveSolverStatus === 'INVALID_INPUT') {
+                        failedResult.status = 'INVALID_INPUT';
+                        failedResult.solverStatus = 'INVALID_INPUT';
+                        if (classLoadTrace) {
+                            failedResult.classLoadTrace = classLoadTrace;
+                        }
+                    } else if (effectiveSolverStatus === 'INVALID_VALIDATION') {
+                        failedResult.status = 'INVALID_VALIDATION';
+                        failedResult.solverStatus = 'INVALID_VALIDATION';
+                    } else if (effectiveSolverStatus === 'INFEASIBLE') {
+                        failedResult.status = 'INFEASIBLE';
+                        failedResult.solverStatus = 'INFEASIBLE';
+                    } else if (effectiveSolverStatus === 'UNKNOWN_TIMEOUT') {
+                        failedResult.status = 'UNKNOWN_TIMEOUT';
+                        failedResult.solverStatus = 'UNKNOWN_TIMEOUT';
+                    } else {
+                        // effectiveSolverStatus 已保證不為 null（預設 'ERROR'），故只剩 ERROR
+                        failedResult.status = 'ERROR';
+                        failedResult.solverStatus = 'ERROR';
+                    }
+
+                    // 🔧 修復 B (RC-CONF-01 輔因)：透傳 gradeCapacityMap 過渡方案
+                    // 移到所有狀態分支之外，確保所有 solver 狀態都能拿到容量資訊
+                    if (gradeCapacityMap) {
+                        failedResult.gradeCapacityMap = gradeCapacityMap;
+                    }
+
                     await prisma.scheduleJob.update({
                         where: { id: jobId },
                         data: {
                           status: 'FAILED',
-                          result: JSON.stringify({ error: errorMsg, aiAnalysis, diagnosticWarnings, analysisBundlePath }),
+                          result: JSON.stringify(failedResult),
                           progressPhase: 'FAILED',
                           progressMessage: `排課失敗：${errorMsg}`,
                           finishedAt: new Date()

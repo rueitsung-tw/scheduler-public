@@ -77,6 +77,26 @@ def create_schedule_vars_and_course_demands(model, classes_data, schedule):
         raw_grade = cls.get("grade")
         print(f"[INFO] [檢查] 班級 {c_name} (前端傳入年級: {raw_grade}) | 本週總需求: {total_needed_for_class} 節")
 
+    # ==========================================
+    # 🛡️ 排他性約束：同一班級同一時段最多一個科目
+    # 這是防止 class_slot_conflicts 的核心硬約束
+    # sum over all subjects for (class, period) <= 1
+    # ==========================================
+    classes_list = list(set(cls.get("name") for cls in classes_data if cls.get("name")))
+    exclusive_count = 0
+    for c in classes_list:
+        for p in range(TOTAL_PERIODS):
+            vars_for_slot = [
+                var for (k_c, k_p, k_t, k_s), var in schedule.items()
+                if k_c == c and k_p == p
+            ]
+            if len(vars_for_slot) > 1:
+                model.add(sum(vars_for_slot) <= 1)
+                exclusive_count += 1
+
+    print(f"[INFO] [建模] 創建了 {len(schedule)} 個 schedule 變數")
+    print(f"[INFO] [排他約束] 加入了 {exclusive_count} 個 at-most-one 約束 (班級/時段排他)")
+
 
 def create_alternating_vars(model, classes_data):
     """
@@ -122,8 +142,8 @@ def create_alternating_vars(model, classes_data):
             art_t    = req.get("teacher_art", "") or req.get("teacher_partner", "") or t_name
             raw_grade = cls.get("grade")
 
-            # [20260610-3 Task 1] pair_group_id 格式修正：
-            # - 音美交替（含"音樂"/"美勞"/"藝術"）：不含年級，跨年級共用同一組
+            # [20260612] pair_group_id 格式修正：
+            # - 音美交替（含"音樂"/"美勞"/"藝術"）：包含年級，同年級配對
             # - 泛型交替（如健/s、s/社）：保留年級作用域
             is_music_art = any(kw in subj for kw in ("音樂", "美勞", "美術", "藝術")) or \
                            (req.get("teacher_music") and req.get("teacher_art"))
@@ -131,8 +151,10 @@ def create_alternating_vars(model, classes_data):
             if req.get("pair_group_id"):
                 group_id = req.get("pair_group_id")
             elif is_music_art:
-                # 音美交替：不含 grade，跨年級同組老師共用同一 pair_group_id
-                group_id = f"g_{music_t}_{art_t}"
+                # 音美交替 fallback：與 preprocessor 使用相同的 md5+grade 規則
+                import hashlib as _hashlib
+                raw_key = f"{music_t}|{art_t}|{raw_grade}"
+                group_id = "g_" + _hashlib.md5(raw_key.encode("utf-8")).hexdigest()[:8]
             else:
                 # 泛型交替：保留 grade 作用域
                 group_id = f"g_{music_t}_{art_t}_{raw_grade}"

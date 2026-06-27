@@ -16,7 +16,10 @@ from collections import defaultdict
 import re
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS, LUNCH_BOUNDARY
 from utils import is_virtual_teacher
-from .utils import grade_needs_special_room, canonical_subject
+from .utils import grade_needs_special_room, _normalize_room_subject
+
+# [Task 02] Import WEIGHT_REGISTRY to eliminate hard-coded weights
+from scheduler_policy import SolveMode, WEIGHT_REGISTRY
 
 
 def _science_valid_consec_pairs() -> list:
@@ -42,8 +45,16 @@ def _science_valid_consec_pairs() -> list:
 
 
 def _is_arts_class_exempt(is_arts_class, ai_settings=None):
-    settings = ai_settings or {}
-    return bool(is_arts_class and settings.get("artsClassEnabled"))
+    """
+    藝才班不享有班級作息/空堂豁免。
+
+    產品規則：藝才班與普通班的每週上課總節數、下午禁排時段完全一致；
+    藝才班僅在課程種類（如舞蹈）與虛擬/外聘教師警示判定上有特規。
+
+    因此班級容量與下午禁排一律按年級規則計算，不因 isArtsClass 改變。
+    保留此函式作為相容層，固定回傳 False，避免其他呼叫點分叉出第二套規則。
+    """
+    return False
 
 
 def resolve_class_grade(cls):
@@ -141,7 +152,7 @@ def apply_daily_subject_limit(model, classes_data, schedule, locked_vars=None):
                     teachers_in_vars = [t for t, s, var in schedule_by_class_period.get((c_name, p), []) if var in subject_vars]
                     if all(is_virtual_teacher(t) for t in teachers_in_vars if t):
                         continue
-                        
+
                 model.Add(sum(subject_vars) <= daily_limit)
 
 
@@ -311,18 +322,88 @@ def _configured_special_room_subjects(classrooms, classroom_limits, school_info,
         if subj:
             subjects.add(subj)
 
-    for subj_raw in (fallback_limits or {}).keys():
-        subj = _normalize_special_room_subject(subj_raw)
-        if subj:
-            subjects.add(subj)
+    # fallback_limits provides capacity defaults only and must not activate
+    # special-room validation for subjects the fixture did not explicitly configure.
+    # If a subject appears only in fallback_limits (no classrooms, no classroomLimits,
+    # no subjectClassroomGrades), the solver skips room assignment for that subject;
+    # downstream validators should not then require a room that was never modelled.
 
     return subjects
+
+
+def _build_actual_rooms_by_subject(classrooms):
+    rooms_by_subject = defaultdict(list)
+    for room in classrooms or []:
+        room_id = room.get("id")
+        room_name = str(room.get("name", "") or "").strip()
+        normalized_subject = _normalize_special_room_subject(room.get("subject", ""))
+        if not normalized_subject:
+            continue
+        if not room_id and not room_name:
+            continue
+        rooms_by_subject[normalized_subject].append({
+            "id": str(room_id or room_name),
+            "name": room_name or str(room_id),
+            "subject": normalized_subject,
+            "gradePreferences": room.get("gradePreferences", []) or [],
+            "primaryTeacher": str(room.get("primaryTeacher", "") or "").strip(),
+            "allowSharing": room.get("allowSharing", True),  # [Task 08] default true per YAML §340
+        })
+    return rooms_by_subject
+
+
+def _select_candidate_rooms_for_occurrence(
+    canonical_subject,
+    class_name,
+    grade,
+    teacher_name,
+    rooms_by_subject,
+):
+    rooms = list(rooms_by_subject.get(canonical_subject, []) or [])
+    if not rooms:
+        return []
+
+    def _room_sort_key(room):
+        grade_prefs = room.get("gradePreferences", []) or []
+        has_grade_pref = grade in grade_prefs if isinstance(grade_prefs, list) else False
+        has_teacher_pref = teacher_name and teacher_name == room.get("primaryTeacher", "")
+        return (
+            0 if has_grade_pref else 1,
+            0 if has_teacher_pref else 1,
+            room.get("name", ""),
+        )
+
+    rooms.sort(key=_room_sort_key)
+    return rooms
+
+
+def _new_and_with_bool(model, left_var, right_var, name):
+    var = model.NewBoolVar(name)
+    model.Add(var <= left_var)
+    model.Add(var <= right_var)
+    model.Add(var >= left_var + right_var - 1)
+    return var
+
+
+def _new_and_with_negated_bool(model, left_var, right_var, name):
+    var = model.NewBoolVar(name)
+    model.Add(var <= left_var)
+    model.Add(var <= right_var.Not())
+    model.Add(var >= left_var - right_var)
+    return var
 
 
 def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                                      science_consec_map=None, penalty_vars=None,
                                      classroom_limits=None, school_info=None,
-                                     relax_to_soft=False):
+                                     relax_to_soft=False,
+                                     alternating_class_is_music_odd=None,
+                                     class_teacher_pair=None,
+                                     # [Task 04] Classroom preference soft objective weights
+                                     weight_grade_affinity=None,
+                                     weight_teacher_affinity=None,
+                                     # [Task 08] Specialty room non-preferred grade penalty weight
+                                     weight_specialty_non_preferred_grade=None):
     """
     [硬約束 9] 專科教室容量限制
 
@@ -393,6 +474,20 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                 print(f"  [NOTE] [容量模型] 【{subj}】未建實體教室，採用容量上限 {count}")
         capacity_count_by_subject[subj] = count
 
+    rooms_by_subject = _build_actual_rooms_by_subject(classrooms)
+    classroom_grades_cfg = (school_info or {}).get("subjectClassroomGrades", {}) or {}
+
+    # [Task 04] Resolve preference weights from policy adapter with fallback defaults
+    if weight_grade_affinity is None:
+        weight_grade_affinity = WEIGHT_REGISTRY.get("classroom_grade_affinity", 3000)
+    if weight_teacher_affinity is None:
+        weight_teacher_affinity = WEIGHT_REGISTRY.get("classroom_primary_teacher_affinity", 2500)
+    # [Task 08] Specialty room non-preferred grade penalty (YAML §432-433, weight=3000)
+    if weight_specialty_non_preferred_grade is None:
+        weight_specialty_non_preferred_grade = WEIGHT_REGISTRY.get("specialty_room_non_preferred_grade", 3000)
+
+    room_slot_groups = defaultdict(list)
+
     schedule_by_period = defaultdict(list)
     for (sch_c, sch_per, sch_t, sch_s), var in schedule.items():
         schedule_by_period[sch_per].append((sch_c, sch_t, sch_s, var))
@@ -424,9 +519,10 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                     continue
 
                 grade = class_grade_map.get(c_name, 1)
-                canonical = canonical_subject(subj)
+                # subj is already room-canonical (Traditional Chinese) from _canonical_schedule_subject_for_room
+                # Do NOT wrap with canonical_subject() which returns Simplified Chinese and breaks config lookup
                 classroom_grades_cfg = (school_info or {}).get("subjectClassroomGrades", {}) or {}
-                if not grade_needs_special_room(canonical, grade, classroom_grades_cfg):
+                if not grade_needs_special_room(subj, grade, classroom_grades_cfg):
                     continue
 
                 usage_terms.append(active_var * _subject_capacity_weight(raw_subject, subj))
@@ -439,17 +535,260 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                     overload_upper_bound = max(0, len(usage_terms) * 2)
                     overload_var = model.NewIntVar(0, overload_upper_bound, f"room_overload_{subj}_{p}")
                     model.Add(usage_sum <= capacity_units + overload_var)
-                    penalty_vars.append(overload_var * 5000)
+                    # [Task 02] Use WEIGHT_REGISTRY key for classroom capacity overload
+                    room_cap_weight = WEIGHT_REGISTRY.get("classroom_capacity_overload", 5000)
+                    penalty_vars.append({
+                        "rule_id": "classroom_capacity_overload",
+                        "weight": room_cap_weight,
+                        "var": overload_var,
+                    })
+
+    for (class_name, period_idx, teacher_name, raw_subject), active_var in schedule.items():
+        canonical_room_subject = _canonical_schedule_subject_for_room(raw_subject)
+        if not canonical_room_subject or canonical_room_subject not in constrained_subjects:
+            continue
+
+        grade = class_grade_map.get(class_name, 1)
+        if not grade_needs_special_room(canonical_room_subject, grade, classroom_grades_cfg):
+            continue
+
+        actual_rooms = rooms_by_subject.get(canonical_room_subject, [])
+        if not actual_rooms:
+            continue
+
+        is_alt = "交替" in str(raw_subject or "") or "/" in str(raw_subject or "")
+        if not is_alt:
+            candidate_rooms = _select_candidate_rooms_for_occurrence(
+                canonical_room_subject,
+                class_name,
+                grade,
+                teacher_name,
+                rooms_by_subject,
+            )
+            if not candidate_rooms:
+                model.Add(active_var == 0)
+                continue
+
+            room_vars = []
+            for room in candidate_rooms:
+                room_var = model.NewBoolVar(
+                    f"room_assign_{class_name}_{period_idx}_{canonical_room_subject}_{room['id']}".replace(" ", "_")
+                )
+                model.Add(room_var <= active_var)
+
+                # [Task 04] Grade affinity miss soft penalty
+                grade_prefs = room.get("gradePreferences", []) or []
+                cls_grade = class_grade_map.get(class_name, 1)
+                if grade_prefs and cls_grade not in grade_prefs:
+                    miss_var = model.NewBoolVar(
+                        f"grade_aff_miss_{class_name}_{period_idx}_{room['id']}".replace(" ", "_")
+                    )
+                    model.Add(miss_var >= room_var)
+                    penalty_vars.append({
+                        "rule_id": "classroom_grade_affinity",
+                        "weight": weight_grade_affinity,
+                        "var": miss_var,
+                    })
+
+                # [Task 04] Primary-teacher affinity miss soft penalty
+                pt = room.get("primaryTeacher", "") or ""
+                if pt and teacher_name != pt:
+                    t_miss_var = model.NewBoolVar(
+                        f"teacher_aff_miss_{class_name}_{period_idx}_{room['id']}".replace(" ", "_")
+                    )
+                    model.Add(t_miss_var >= room_var)
+                    penalty_vars.append({
+                        "rule_id": "classroom_primary_teacher_affinity",
+                        "weight": weight_teacher_affinity,
+                        "var": t_miss_var,
+                    })
+
+                # [Task 08] Specialty room non-preferred grade penalty with allowSharing semantics (non-alternating)
+                allow_sharing = room.get("allowSharing", True)  # default true per YAML §340
+                if grade_prefs and cls_grade not in grade_prefs:
+                    ns_miss_var_na = model.NewBoolVar(
+                        f"specialty_ns_miss_{class_name}_{period_idx}_{room['id']}".replace(" ", "_")
+                    )
+                    model.Add(ns_miss_var_na >= room_var)
+                    # allowSharing=false → higher penalty (still soft, not hard constraint)
+                    # TODO: confirm allowSharing=false semantics with Codex before converting to hard constraint
+                    ns_weight_na = weight_specialty_non_preferred_grade * 2 if not allow_sharing else weight_specialty_non_preferred_grade
+                    penalty_vars.append({
+                        "rule_id": "specialty_room_non_preferred_grade",
+                        "weight": ns_weight_na,
+                        "var": ns_miss_var_na,
+                    })
+
+                room_vars.append(room_var)
+                room_slot_groups[(room["id"], period_idx, "odd")].append(room_var)
+                room_slot_groups[(room["id"], period_idx, "even")].append(room_var)
+                model.classroom_assignments.append({
+                    "className": class_name,
+                    "period": period_idx,
+                    "week": "odd",
+                    "roomId": room["id"],
+                    "roomName": room["name"],
+                    "subject": canonical_room_subject,
+                    "var": room_var,
+                })
+                model.classroom_assignments.append({
+                    "className": class_name,
+                    "period": period_idx,
+                    "week": "even",
+                    "roomId": room["id"],
+                    "roomName": room["name"],
+                    "subject": canonical_room_subject,
+                    "var": room_var,
+                })
+            model.Add(sum(room_vars) == active_var)
+            continue
+
+        if not alternating_class_is_music_odd or not class_teacher_pair:
+            continue
+
+        music_teacher, art_teacher = class_teacher_pair.get(class_name, (teacher_name, teacher_name))
+        direction_var = alternating_class_is_music_odd.get((class_name, teacher_name))
+        if direction_var is None:
+            direction_var = alternating_class_is_music_odd.get((class_name, music_teacher))
+        if direction_var is None:
+            direction_var = alternating_class_is_music_odd.get((class_name, art_teacher))
+        if direction_var is None:
+            continue
+
+        parts = [part.strip() for part in str(raw_subject or "").split("/") if str(part or "").strip()]
+        if len(parts) == 2:
+            subject_a = _canonical_schedule_subject_for_room(parts[0]) or "音樂"
+            subject_b = _canonical_schedule_subject_for_room(parts[1]) or "美勞"
+        else:
+            subject_a, subject_b = "音樂", "美勞"
+
+        odd_a_occ = _new_and_with_bool(
+            model,
+            active_var,
+            direction_var,
+            f"room_occ_{class_name}_{period_idx}_odd_{subject_a}".replace(" ", "_"),
+        )
+        even_b_occ = _new_and_with_bool(
+            model,
+            active_var,
+            direction_var,
+            f"room_occ_{class_name}_{period_idx}_even_{subject_b}".replace(" ", "_"),
+        )
+        odd_b_occ = _new_and_with_negated_bool(
+            model,
+            active_var,
+            direction_var,
+            f"room_occ_{class_name}_{period_idx}_odd_{subject_b}".replace(" ", "_"),
+        )
+        even_a_occ = _new_and_with_negated_bool(
+            model,
+            active_var,
+            direction_var,
+            f"room_occ_{class_name}_{period_idx}_even_{subject_a}".replace(" ", "_"),
+        )
+
+        occurrence_specs = [
+            ("odd", subject_a, music_teacher, odd_a_occ),
+            ("even", subject_b, art_teacher, even_b_occ),
+            ("odd", subject_b, art_teacher, odd_b_occ),
+            ("even", subject_a, music_teacher, even_a_occ),
+        ]
+
+        for week_tag, actual_subject, actual_teacher, occ_var in occurrence_specs:
+            if not actual_subject:
+                model.Add(occ_var == 0)
+                continue
+            if not grade_needs_special_room(actual_subject, grade, classroom_grades_cfg):
+                model.Add(occ_var == 0)
+                continue
+
+            candidate_rooms = _select_candidate_rooms_for_occurrence(
+                actual_subject,
+                class_name,
+                grade,
+                actual_teacher,
+                rooms_by_subject,
+            )
+            if not candidate_rooms:
+                model.Add(occ_var == 0)
+                continue
+
+            room_vars = []
+            for room in candidate_rooms:
+                room_var = model.NewBoolVar(
+                    f"room_assign_{class_name}_{period_idx}_{week_tag}_{actual_subject}_{room['id']}".replace(" ", "_")
+                )
+                model.Add(room_var <= occ_var)
+
+                # [Task 04] Grade affinity miss soft penalty (alternating)
+                grade_prefs = room.get("gradePreferences", []) or []
+                cls_grade = class_grade_map.get(class_name, 1)
+                if grade_prefs and cls_grade not in grade_prefs:
+                    miss_var = model.NewBoolVar(
+                        f"grade_aff_miss_{class_name}_{period_idx}_{week_tag}_{room['id']}".replace(" ", "_")
+                    )
+                    model.Add(miss_var >= room_var)
+                    penalty_vars.append({
+                        "rule_id": "classroom_grade_affinity",
+                        "weight": weight_grade_affinity,
+                        "var": miss_var,
+                    })
+
+                # [Task 08] Specialty room non-preferred grade penalty with allowSharing semantics
+                allow_sharing = room.get("allowSharing", True)  # default true per YAML §340
+                if grade_prefs and cls_grade not in grade_prefs:
+                    ns_miss_var = model.NewBoolVar(
+                        f"specialty_ns_miss_{class_name}_{period_idx}_{week_tag}_{room['id']}".replace(" ", "_")
+                    )
+                    model.Add(ns_miss_var >= room_var)
+                    # allowSharing=false → higher penalty (still soft, not hard constraint)
+                    # TODO: confirm allowSharing=false semantics with Codex before converting to hard constraint
+                    ns_weight = weight_specialty_non_preferred_grade * 2 if not allow_sharing else weight_specialty_non_preferred_grade
+                    penalty_vars.append({
+                        "rule_id": "specialty_room_non_preferred_grade",
+                        "weight": ns_weight,
+                        "var": ns_miss_var,
+                    })
+
+                # [Task 04] Primary-teacher affinity miss soft penalty (alternating)
+                pt = room.get("primaryTeacher", "") or ""
+                if pt and actual_teacher != pt:
+                    t_miss_var = model.NewBoolVar(
+                        f"teacher_aff_miss_{class_name}_{period_idx}_{week_tag}_{room['id']}".replace(" ", "_")
+                    )
+                    model.Add(t_miss_var >= room_var)
+                    penalty_vars.append({
+                        "rule_id": "classroom_primary_teacher_affinity",
+                        "weight": weight_teacher_affinity,
+                        "var": t_miss_var,
+                    })
+
+                room_vars.append(room_var)
+                room_slot_groups[(room["id"], period_idx, week_tag)].append(room_var)
+                model.classroom_assignments.append({
+                    "className": class_name,
+                    "period": period_idx,
+                    "week": week_tag,
+                    "roomId": room["id"],
+                    "roomName": room["name"],
+                    "subject": actual_subject,
+                    "var": room_var,
+                })
+            model.Add(sum(room_vars) == occ_var)
+
+    for vars_in_slot in room_slot_groups.values():
+        if vars_in_slot:
+            model.Add(sum(vars_in_slot) <= 1)
 
 
-def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalty_vars=None):
+def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalty_vars=None, solve_mode=None):
     """
     [軟約束 10] 自然課排課習慣（重構版）
 
     核心設計：
     1. 以「合法連堂配對」為基礎，不再用硬猜的 forbidden_p 邏輯
-    2. 3-4 年級：偏好 1 組連堂（軟限制，權重 800）
-    3. 5-6 年級：偏好 2 組連堂（軟限制，權重 1200）
+    2. STRICT mode: natural shape = hard constraint (violation must be 0)
+    3. FALLBACK mode: natural shape = near-hard soft penalty (natural_shape_fallback: 16000)
     4. 午休邊界統一使用 LUNCH_BOUNDARY，不再硬編碼
     5. 教師不跨半天規則保留（總節數 <= 2 時）
     6. 「每日結構上限」與「不可跨午休」仍為硬限制
@@ -460,6 +799,8 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
         classes_data: list of class dicts
         ai_settings: dict with naturalConsecutive flag
         penalty_vars: list for soft penalty accumulation
+        solve_mode: SolveMode enum — STRICT_TEACHING_SHAPE makes shape hard;
+                    FEASIBILITY_RECOVERY uses policy weight 16000
 
     Returns:
         science_consec_at_period: dict {p: [BoolVar, ...]} 用於教室容量計算
@@ -552,7 +893,11 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
                 science_consec_map[(c_name, p1)] = cv
                 science_consec_map[(c_name, p2)] = cv
 
-        # ---- 3-4 年級：軟偏好至少 1 組連堂（權重 800）----
+        # ---- [Task 02] solve_mode aware natural shape constraint ----
+        # STRICT mode: natural shape = hard constraint
+        # FALLBACK mode: natural shape = near-hard soft penalty (from policy adapter)
+        from scheduler_policy import SolveMode, get_active_policy
+
         if grade in [3, 4]:
             all_consec = list(consec_vars.values())
             if all_consec:
@@ -562,26 +907,52 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
                                if (d, pi) in consec_vars]
                     if d_consec:
                         model.Add(sum(d_consec) <= 1)
-                # 全週軟偏好至少 1 組連堂
-                has_sci_consec = model.NewBoolVar(f'sci_consec_ok_{c_name}')
-                model.Add(sum(all_consec) >= 1).OnlyEnforceIf(has_sci_consec)
-                if penalty_vars is not None:
-                    penalty_vars.append(800 * (1 - has_sci_consec))
 
-        # ---- 5-6 年級：軟偏好至少 2 組連堂（權重 1200）----
+                if solve_mode == SolveMode.STRICT_TEACHING_SHAPE:
+                    # STRICT: hard constraint — must have at least 1 consecutive pair
+                    model.Add(sum(all_consec) >= 1)
+                else:
+                    # FALLBACK or legacy: soft penalty from policy adapter
+                    policy = get_active_policy(solve_mode)
+                    weight = policy.get_weight("natural_shape_fallback", default=800)
+                    has_sci_consec = model.NewBoolVar(f'sci_consec_ok_{c_name}')
+                    model.Add(sum(all_consec) >= 1).OnlyEnforceIf(has_sci_consec)
+                    if penalty_vars is not None:
+                        no_sci = model.NewIntVar(0, 1, f"no_natural_shape_{c_name.replace(' ','_')}")
+                        model.Add(no_sci == 1 - has_sci_consec)
+                        penalty_vars.append({
+                            "rule_id": "natural_shape_fallback",
+                            "weight": weight,
+                            "var": no_sci,
+                        })
+
         elif grade in [5, 6]:
             all_consec = list(consec_vars.values())
             if all_consec:
-                has_sci_consec = model.NewBoolVar(f'sci_consec_ok_{c_name}')
-                model.Add(sum(all_consec) >= 2).OnlyEnforceIf(has_sci_consec)
-                if penalty_vars is not None:
-                    penalty_vars.append(1200 * (1 - has_sci_consec))
                 # 每天上限 2 組（硬限制：結構上限）
                 for d in range(DAYS):
                     d_consec = [consec_vars[(d, pi)] for pi in range(len(valid_pairs))
                                if (d, pi) in consec_vars]
                     if d_consec:
                         model.Add(sum(d_consec) <= 2)
+
+                if solve_mode == SolveMode.STRICT_TEACHING_SHAPE:
+                    # STRICT: hard constraint — must have at least 2 consecutive pairs
+                    model.Add(sum(all_consec) >= 2)
+                else:
+                    # FALLBACK or legacy: soft penalty from policy adapter
+                    policy = get_active_policy(solve_mode)
+                    weight = policy.get_weight("natural_shape_fallback", default=1200)
+                    has_sci_consec = model.NewBoolVar(f'sci_consec_ok_{c_name}')
+                    model.Add(sum(all_consec) >= 2).OnlyEnforceIf(has_sci_consec)
+                    if penalty_vars is not None:
+                        no_sci = model.NewIntVar(0, 1, f"no_natural_shape_{c_name.replace(' ','_')}")
+                        model.Add(no_sci == 1 - has_sci_consec)
+                        penalty_vars.append({
+                            "rule_id": "natural_shape_fallback",
+                            "weight": weight,
+                            "var": no_sci,
+                        })
 
         # ---- 教師不跨半天規則（保留原邏輯，改用 LUNCH_BOUNDARY） ----
         sci_teachers = set()
@@ -752,12 +1123,13 @@ def apply_week_specific_art_capacity_model(
             if per != p or "美勞_固定" not in s:
                 continue
             grade = class_grade_map.get(c, 1)
-            canon_subj = canonical_subject("美勞")
-            if grade_needs_special_room(canon_subj, grade, classroom_grades_cfg):
+            # "美勞" is already room-canonical (Traditional Chinese), pass directly to grade_needs_special_room
+            if grade_needs_special_room("美勞", grade, classroom_grades_cfg):
                 art_odd_total_vars.append(var)
                 art_even_total_vars.append(var)
 
-        # 容量約束（preferred，10000 懲罰）
+        # [Task 02] 容量約束（preferred，使用 WEIGHT_REGISTRY）
+        room_weight = WEIGHT_REGISTRY.get("art_music_week_specific_room_overload", 10000)
         for label, demand_vars, capacity in [
             ("music_odd", music_odd_vars, music_cap),
             ("music_even", music_even_vars, music_cap),
@@ -768,7 +1140,12 @@ def apply_week_specific_art_capacity_model(
                 continue
             ov = model.NewIntVar(0, len(demand_vars), f"ws_overload_{label}_p{p}")
             model.Add(ov >= sum(demand_vars) - capacity)
-            penalty_vars.append(10000 * ov)
+            # [Task 02] Use dict metadata format for penaltyBreakdown compatibility
+            penalty_vars.append({
+                "rule_id": "art_music_week_specific_room_overload",
+                "weight": room_weight,
+                "var": ov,
+            })
             ws_overload_vars[(label, p)] = ov
 
     return ws_overload_vars
@@ -845,8 +1222,8 @@ def apply_week_specific_art_capacity(
                 continue
 
             grade = class_grade_map.get(c, 1)
-            canon_subj = canonical_subject(canonical)
-            if not grade_needs_special_room(canon_subj, grade, classroom_grades_cfg):
+            # canonical is already room-canonical (Traditional Chinese), pass directly to grade_needs_special_room
+            if not grade_needs_special_room(canonical, grade, classroom_grades_cfg):
                 continue
 
             # 判斷交替課在該週實際是什麼科目
@@ -964,8 +1341,8 @@ def apply_week_specific_art_capacity_entries(
 
             class_name = str(entry.get("className", "")).strip()
             grade = class_grade_map.get(class_name, 1)
-            canon_subj = canonical_subject(canonical)
-            if not grade_needs_special_room(canon_subj, grade, classroom_grades_cfg):
+            # canonical is already room-canonical (Traditional Chinese), pass directly to grade_needs_special_room
+            if not grade_needs_special_room(canonical, grade, classroom_grades_cfg):
                 continue
 
             entry_week = _normalize_week_tag(entry.get("week"))
@@ -1036,4 +1413,689 @@ __all__ = [
     "apply_week_specific_art_capacity_model",
     "apply_week_specific_art_capacity",
     "apply_week_specific_art_capacity_entries",
+    # Task 3.2~3.7: soft rule helpers
+    "is_homeroom_lesson",
+    "is_subject_teacher_lesson",
+    "build_grade_morning_first_period_homeroom_penalty",
+    "build_morning_two_homeroom_periods_penalty",
+    "build_co_planning_afternoon_block_penalty",
+    "build_co_planning_subject_lesson_penalty",
+    # Task 07: grade1-2 Tuesday life-course & daily subject-teacher minimum
+    "apply_grade12_tuesday_life_course",
+    "build_daily_subject_teacher_minimum_penalty",
 ]
+
+
+# ============================================================
+# Task 3.2: Homeroom / Subject-Teacher Lesson Type Helpers
+# ============================================================
+
+def is_homeroom_lesson(lesson: dict) -> bool:
+    """
+    判斷一筆課程需求是否為導師型課程。
+
+    識別方式（任一滿足即為 True）：
+    - subject == "導師區塊"
+    - defaultTeacher == "homeroom"
+
+    保守預設：未知類型回傳 False。
+    """
+    if not lesson or not isinstance(lesson, dict):
+        return False
+    subj = (lesson.get("subject") or "").strip()
+    default_t = (lesson.get("defaultTeacher") or "").strip()
+    return subj == "導師區塊" or default_t == "homeroom"
+
+
+def is_subject_teacher_lesson(lesson: dict) -> bool:
+    """
+    判斷一筆課程需求是否為科任教師課程。
+
+    識別方式：
+    - defaultTeacher == "subject"
+    - 且 NOT is_homeroom_lesson(lesson)
+
+    保守預設：未知類型回傳 False。
+    """
+    if not lesson or not isinstance(lesson, dict):
+        return False
+    if is_homeroom_lesson(lesson):
+        return False
+    default_t = (lesson.get("defaultTeacher") or "").strip()
+    return default_t == "subject"
+
+
+# ============================================================
+# Task 3.3: 3-6 年級每週一天第一節導師課偏好 (soft)
+# ============================================================
+
+def build_grade_morning_first_period_homeroom_penalty(
+    model,
+    schedule,
+    classes_data,
+    configurable_grades=None,
+):
+    """
+    為每個配置年級建立 soft objective：
+    偏好某一年級的所有班級在某一天的 period 1（index 0）排入導師課。
+
+    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    """
+    if configurable_grades is None:
+        configurable_grades = [3, 4, 5, 6]
+
+    weight = WEIGHT_REGISTRY.get("grade_morning_first_period_homeroom_day", 3500)
+    penalty_vars = []
+
+    # Build grade -> classes mapping
+    grade_classes = defaultdict(list)
+    for cls in classes_data:
+        g = resolve_class_grade(cls)
+        if g in configurable_grades:
+            grade_classes[g].append(cls.get("name", ""))
+
+    # Collect homeroom subjects from payload
+    homeroom_subjects = set()
+    for cls in classes_data:
+        for req in cls.get("course_requirements", []):
+            if is_homeroom_lesson(req):
+                homeroom_subjects.add(req.get("subject", ""))
+
+    if not homeroom_subjects:
+        # Fallback: use common name
+        homeroom_subjects = {"導師區塊"}
+
+    for grade, class_names in grade_classes.items():
+        if not class_names:
+            continue
+
+        day_satisfied_vars = []
+        for day in range(DAYS):
+            class_has_hr_list = []
+            for c_name in class_names:
+                # Period 1 of this day = index day * PERIODS_PER_DAY + 0
+                p_index = day * PERIODS_PER_DAY
+                # Find if any homeroom lesson is scheduled here
+                is_hr_vars = []
+                for (c, p, t, s), var in schedule.items():
+                    if c == c_name and p == p_index and s in homeroom_subjects:
+                        is_hr_vars.append(var)
+
+                has_hr = model.NewBoolVar(f"grade{grade}_day{day+1}_{c_name}_has_hr_p1")
+                if is_hr_vars:
+                    slot_sum = model.NewIntVar(0, len(is_hr_vars), f"grade{grade}_day{day+1}_{c_name}_hr_sum")
+                    model.Add(slot_sum == sum(is_hr_vars))
+                    model.Add(slot_sum >= 1).OnlyEnforceIf(has_hr)
+                    model.Add(slot_sum == 0).OnlyEnforceIf(has_hr.Not())
+                else:
+                    model.Add(has_hr == 0)
+                class_has_hr_list.append(has_hr)
+
+            day_satisfied = model.NewBoolVar(f"grade{grade}_day{day+1}_all_homeroom_p1")
+            for has_hr in class_has_hr_list:
+                model.AddImplication(day_satisfied, has_hr)
+            model.AddBoolOr([has_hr.Not() for has_hr in class_has_hr_list] + [day_satisfied])
+            day_satisfied_vars.append(day_satisfied)
+
+        if day_satisfied_vars:
+            any_day_satisfied = model.NewBoolVar(f"grade{grade}_any_day_homeroom_p1")
+            model.AddMaxEquality(any_day_satisfied, day_satisfied_vars)
+            violation = model.NewIntVar(0, 1, f"grade{grade}_no_homeroom_p1_day_violation")
+            model.Add(violation == 1 - any_day_satisfied)
+            penalty_vars.append({
+                "rule_id": "grade_morning_first_period_homeroom_day",
+                "weight": max(weight // max(len(configurable_grades), 1), 1),
+                "var": violation,
+            })
+
+    return penalty_vars
+
+
+# ============================================================
+# Task 3.4: 每班每日早上兩節導師型課程偏好 (soft)
+# ============================================================
+
+def build_morning_two_homeroom_periods_penalty(
+    model,
+    schedule,
+    classes_data,
+    configurable_grades=None,
+):
+    """
+    每個 regular class 在每天的 morning periods（index 0-3）中，
+    偏好恰好有 2 節為 homeroom-type 課程。
+
+    penalty += abs(count - 2) * weight
+
+    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    """
+    if configurable_grades is None:
+        configurable_grades = [1, 2, 3, 4, 5, 6]
+
+    weight = WEIGHT_REGISTRY.get("morning_two_homeroom_periods_per_day", 3000)
+    penalty_vars = []
+
+    # Collect homeroom subjects
+    homeroom_subjects = set()
+    for cls in classes_data:
+        for req in cls.get("course_requirements", []):
+            if is_homeroom_lesson(req):
+                homeroom_subjects.add(req.get("subject", ""))
+
+    if not homeroom_subjects:
+        homeroom_subjects = {"導師區塊"}
+
+    # Morning period indices within a day (0-based within day)
+    morning_period_indices = list(range(min(4, PERIODS_PER_DAY)))
+
+    for cls in classes_data:
+        c_name = cls.get("name", "")
+        g = resolve_class_grade(cls)
+        if g not in configurable_grades:
+            continue
+
+        for day in range(DAYS):
+            # Count homeroom lessons in morning periods
+            count_var = model.NewIntVar(0, len(morning_period_indices), f"morning_hr_count_{c_name}_day{day+1}")
+            count_terms = []
+            for mp in morning_period_indices:
+                p_index = day * PERIODS_PER_DAY + mp
+                hr_vars_at_slot = []
+                for (c, p, t, s), var in schedule.items():
+                    if c == c_name and p == p_index and s in homeroom_subjects:
+                        hr_vars_at_slot.append(var)
+                if hr_vars_at_slot:
+                    # Max of homeroom vars at this slot (at most 1 can be 1)
+                    count_terms.extend(hr_vars_at_slot)
+
+            model.Add(count_var == sum(count_terms))
+
+            # Absolute deviation from target 2
+            slack_pos = model.NewIntVar(0, len(morning_period_indices), f"morning_hr_slack_pos_{c_name}_day{day+1}")
+            slack_neg = model.NewIntVar(0, len(morning_period_indices), f"morning_hr_slack_neg_{c_name}_day{day+1}")
+            model.Add(slack_pos - slack_neg == count_var - 2)
+            abs_dev = model.NewIntVar(0, len(morning_period_indices), f"morning_hr_absdev_{c_name}_day{day+1}")
+            model.Add(abs_dev == slack_pos + slack_neg)
+
+            penalty_vars.append({
+                "rule_id": "morning_two_homeroom_periods_per_day",
+                "weight": weight // (len(configurable_grades) * DAYS),
+                "var": abs_dev,
+            })
+
+    return penalty_vars
+
+
+# ============================================================
+# Task 07: Grade 1-2 Tuesday Afternoon Life-Course Rule
+# Strict pass: hard constraint — life course MUST be placed in Tuesday afternoon
+# Fallback pass: near-hard soft penalty (weight=14000)
+# ============================================================
+
+def apply_grade12_tuesday_life_course(
+    model,
+    classes_data,
+    schedule,
+    solve_mode=None,
+):
+    """
+    Grade 1-2 Tuesday afternoon life-course placement rule.
+
+    Strict mode: Hard constraint — at least one `生活` period for Grade 1-2
+        must be scheduled on Tuesday afternoon (periods >= LUNCH_BOUNDARY).
+
+    Fallback mode: Near-hard soft penalty with weight=14000.
+
+    P2 semantic correction: This rule requires Tuesday afternoon slots to be
+    occupied by `生活`, but does NOT forbid `生活` from appearing in other periods.
+    If `生活` demand exceeds Tuesday afternoon capacity, excess goes elsewhere.
+
+    Args:
+        solve_mode: SolveMode.STRICT_TEACHING_SHAPE or SolveMode.FEASIBILITY_RECOVERY
+
+    Returns: list of penalty entries (empty for strict mode, soft entries for fallback)
+    """
+    # Fix #1: support both SolveMode enum and string fallback
+    if solve_mode is None:
+        solve_mode = SolveMode.STRICT_TEACHING_SHAPE
+
+    is_strict = (
+        solve_mode == SolveMode.STRICT_TEACHING_SHAPE
+        or solve_mode == "strict_teaching_shape"
+    )
+
+    target_grades = {1, 2}
+    target_subject = "生活"
+    tuesday_day_idx = 1  # 0-based: Mon=0, Tue=1 (consistent with get_forbidden_afternoon_days)
+
+    penalty_output = []
+
+    for cls in classes_data:
+        g = resolve_class_grade(cls)
+        if g not in target_grades:
+            continue
+
+        c_name = cls.get("name", "")
+        if not c_name:
+            continue
+
+        # Check if this class has `生活` course requirement
+        has_life_course = False
+        for req in cls.get("course_requirements", []):
+            if req.get("subject", "") == target_subject:
+                has_life_course = True
+                break
+
+        if not has_life_course:
+            continue
+
+        # Find all schedule vars for (class, subject=生活) on Tuesday afternoon
+        tuesday_afternoon_vars = []
+        for (c, p, t, s), var in schedule.items():
+            if c != c_name:
+                continue
+            if s != target_subject:
+                continue
+            # Check if period is on Tuesday (day=1, 0-based) and afternoon
+            day_idx = p // PERIODS_PER_DAY
+            period_in_day = p % PERIODS_PER_DAY
+            if day_idx == 1 and period_in_day >= LUNCH_BOUNDARY:
+                tuesday_afternoon_vars.append(var)
+
+        if not tuesday_afternoon_vars:
+            continue
+
+        if is_strict:
+            # Hard constraint: at least one life course on Tuesday afternoon
+            model.Add(sum(tuesday_afternoon_vars) >= 1)
+        else:
+            # Fix #2: Fallback near-hard soft penalty using proper BoolVar
+            weight = WEIGHT_REGISTRY.get("grade12_tuesday_afternoon_life_course_fallback", 14000)
+
+            has_life_pm = model.NewBoolVar(
+                f"has_life_pm_{c_name}_tuesday"
+            )
+            model.Add(sum(tuesday_afternoon_vars) >= 1).OnlyEnforceIf(has_life_pm)
+            model.Add(sum(tuesday_afternoon_vars) == 0).OnlyEnforceIf(has_life_pm.Not())
+
+            violation = model.NewIntVar(0, 1, f"life_course_violation_{c_name}_tuesday_pm")
+            model.Add(violation == 1 - has_life_pm)
+
+            penalty_output.append({
+                "rule_id": "grade12_tuesday_afternoon_life_course_fallback",
+                "weight": weight,
+                "var": violation,
+            })
+
+    return penalty_output
+
+
+# ============================================================
+# Task 07: Daily Subject-Teacher Minimum (soft objective)
+# Each class each day should have at least 1 subject_teacher_lesson
+# Excludes homeroom and 導師區塊
+# ============================================================
+
+def build_daily_subject_teacher_minimum_penalty(
+    model,
+    schedule,
+    classes_data,
+):
+    """
+    Day-level count soft objective: each class each day should have
+    at least one subject-teacher lesson (excluding homeroom / 導師區塊).
+
+    Penalty when count < 1. Weight = 3000 from WEIGHT_REGISTRY.
+
+    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    """
+    # Fix #4: build class+subject -> requirement metadata map from course_requirements
+    req_map = {}  # (class_name, subject) -> requirement dict
+    for cls in classes_data:
+        c_name = cls.get("name", "")
+        if not c_name:
+            continue
+        for req in cls.get("course_requirements", []):
+            subj = req.get("subject", "")
+            if subj:
+                req_map[(c_name, subj)] = req
+
+    weight = WEIGHT_REGISTRY.get("daily_subject_teacher_minimum", 3000)
+    penalty_vars = []
+
+    for cls in classes_data:
+        c_name = cls.get("name", "")
+        if not c_name:
+            continue
+
+        # Skip arts classes (they have different scheduling rules)
+        is_arts = cls.get("isArtsClass") or cls.get("is_arts_class", False)
+        if is_arts:
+            continue
+
+        for day in range(DAYS):
+            day_start = day * PERIODS_PER_DAY
+            day_end = day_start + PERIODS_PER_DAY
+
+            # Fix #4: Count only true subject-teacher lessons using req_map
+            subject_vars = []
+            for (c, p, t, s), var in schedule.items():
+                if c != c_name:
+                    continue
+                if p < day_start or p >= day_end:
+                    continue
+                # Only count if req_map has metadata AND is_subject_teacher_lesson returns True.
+                # Do NOT guess from subject name when req is None — this avoids counting
+                # "班會" or other non-subject-teacher lessons as subject_teacher_lesson.
+                req = req_map.get((c_name, s))
+                if req is not None and is_subject_teacher_lesson(req):
+                    subject_vars.append(var)
+
+            # If no identifiable subject_teacher_lesson candidates for this class-day,
+            # the minimum can never be satisfied — create a permanent violation (weight applied).
+            if not subject_vars:
+                always_violate = model.NewBoolVar(
+                    f"subj_tchr_always_violation_{c_name}_day{day+1}"
+                )
+                model.Add(always_violate == 1)
+                penalty_vars.append({
+                    "rule_id": "daily_subject_teacher_minimum",
+                    "weight": weight // (len(classes_data) * DAYS),
+                    "var": always_violate,
+                })
+                continue
+
+            count_var = model.NewIntVar(0, len(subject_vars), f"subj_tchr_count_{c_name}_day{day+1}")
+            model.Add(count_var == sum(subject_vars))
+
+            # Fix #3: proper soft deficit using BoolVar — avoids INFEASIBLE when count >= 2
+            has_subject = model.NewBoolVar(
+                f"has_subj_tchr_{c_name}_day{day+1}"
+            )
+            model.Add(count_var >= 1).OnlyEnforceIf(has_subject)
+            model.Add(count_var == 0).OnlyEnforceIf(has_subject.Not())
+
+            violation = model.NewIntVar(0, 1, f"subj_tchr_violation_{c_name}_day{day+1}")
+            model.Add(violation == 1 - has_subject)
+
+            penalty_vars.append({
+                "rule_id": "daily_subject_teacher_minimum",
+                "weight": weight // (len(classes_data) * DAYS),
+                "var": violation,
+            })
+
+    return penalty_vars
+
+
+# ============================================================
+# Task 3.6: 共備候選區塊軟目標 (soft)
+# ============================================================
+
+def _parse_co_planning_settings(school_info):
+    """
+    Parse coPlanningSettings from schoolInfo with backward compatibility.
+
+    Returns dict with keys: enabled, grades, candidateBlocks
+    Missing/None/disabled -> returns safe defaults that skip all rules.
+    """
+    if not school_info or not isinstance(school_info, dict):
+        return {"enabled": False, "grades": [], "candidateBlocks": []}
+
+    co_planning = school_info.get("coPlanningSettings", {})
+    if not co_planning or not isinstance(co_planning, dict):
+        return {"enabled": False, "grades": [], "candidateBlocks": []}
+
+    if not co_planning.get("enabled"):
+        return {"enabled": False, "grades": [], "candidateBlocks": []}
+
+    grades = co_planning.get("grades", []) or []
+    candidate_blocks = co_planning.get("candidateBlocks", []) or []
+
+    # Filter: keep only valid afternoon blocks with length == 2
+    valid_blocks = []
+    for block in candidate_blocks:
+        if not isinstance(block, dict):
+            continue
+        day = block.get("day")
+        start_period = block.get("startPeriod")
+        length = block.get("length", 0)
+
+        # Must have length == 2
+        if length != 2:
+            continue
+
+        # Must be afternoon (1-based period > LUNCH_BOUNDARY)
+        # startPeriod is 1-based, so afternoon means startPeriod > LUNCH_BOUNDARY
+        if start_period is None or start_period <= LUNCH_BOUNDARY:
+            continue
+
+        valid_blocks.append({
+            "day": day,
+            "startPeriod": start_period,
+            "length": length,
+        })
+
+    return {
+        "enabled": True,
+        "grades": grades if isinstance(grades, list) else [],
+        "candidateBlocks": valid_blocks,
+    }
+
+
+def build_co_planning_afternoon_block_penalty(
+    model,
+    schedule,
+    classes_data,
+    school_info=None,
+):
+    """
+    對每個配置的 grade，在 candidateBlocks 中偏好選擇一個合法的 afternoon 2-period 區塊。
+
+    Returns: (penalty_vars, indicator_map)
+      penalty_vars: list of {"rule_id": str, "weight": int, "var": IntVar}
+      indicator_map: dict[(grade, day, startPeriod)] -> BoolVar (indicator for block selected)
+    """
+    co_settings = _parse_co_planning_settings(school_info)
+
+    # Guard clause: skip if not enabled or no blocks/grades
+    if not co_settings["enabled"] or not co_settings["grades"] or not co_settings["candidateBlocks"]:
+        return [], {}
+
+    weight = WEIGHT_REGISTRY.get("grade_co_planning_afternoon_block", 2500)
+    penalty_vars = []
+    indicator_map = {}
+
+    grades = set(co_settings["grades"])
+    candidate_blocks = co_settings["candidateBlocks"]
+
+    # Build grade -> classes mapping
+    grade_classes = defaultdict(list)
+    for cls in classes_data:
+        g = resolve_class_grade(cls)
+        if g in grades:
+            grade_classes[g].append(cls.get("name", ""))
+
+    subject_teacher_subjects = set()
+    for cls in classes_data:
+        for req in cls.get("course_requirements", []):
+            if is_subject_teacher_lesson(req):
+                subject_teacher_subjects.add(req.get("subject", ""))
+
+    for grade, class_names in grade_classes.items():
+        if not class_names:
+            continue
+
+        # Create indicator variables for each candidate block
+        block_indicators = []
+        block_satisfied_vars = []
+        for block in candidate_blocks:
+            day_1based = block["day"]  # 1-based day
+            start_p_1based = block["startPeriod"]  # 1-based period
+
+            # Convert to 0-based indices
+            day_idx = day_1based - 1 if 1 <= day_1based <= DAYS else None
+            if day_idx is None:
+                continue
+            p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
+
+            indicator = model.NewBoolVar(
+                f"co_plan_grade{grade}_day{day_1based}_p{start_p_1based}"
+            )
+            block_indicators.append(indicator)
+            indicator_map[(grade, day_1based, start_p_1based)] = indicator
+
+            slot_subject_flags = []
+            for c_name in class_names:
+                for offset in range(2):
+                    p_index = p_start_idx + offset
+                    if p_index >= TOTAL_PERIODS:
+                        continue
+                    subject_vars = [
+                        var
+                        for (c, p, t, s), var in schedule.items()
+                        if c == c_name and p == p_index and s in subject_teacher_subjects
+                    ]
+                    has_subject = model.NewBoolVar(
+                        f"co_plan_blockSubject_{grade}_{day_1based}_{start_p_1based}_{c_name}_{offset}"
+                    )
+                    if subject_vars:
+                        subject_sum = model.NewIntVar(
+                            0,
+                            len(subject_vars),
+                            f"co_plan_blockSubjectSum_{grade}_{day_1based}_{start_p_1based}_{c_name}_{offset}",
+                        )
+                        model.Add(subject_sum == sum(subject_vars))
+                        model.Add(subject_sum >= 1).OnlyEnforceIf(has_subject)
+                        model.Add(subject_sum == 0).OnlyEnforceIf(has_subject.Not())
+                    else:
+                        model.Add(has_subject == 0)
+                    slot_subject_flags.append(has_subject)
+
+            block_satisfied = model.NewBoolVar(
+                f"co_plan_grade{grade}_day{day_1based}_p{start_p_1based}_fully_subject"
+            )
+            if slot_subject_flags:
+                for has_subject in slot_subject_flags:
+                    model.AddImplication(block_satisfied, has_subject)
+                model.AddBoolOr([has_subject.Not() for has_subject in slot_subject_flags] + [block_satisfied])
+            else:
+                model.Add(block_satisfied == 0)
+            block_satisfied_vars.append(block_satisfied)
+
+        # Soft preference: exactly one block selected per grade
+        if block_indicators:
+            sum_indicators = model.NewIntVar(0, len(block_indicators), f"co_plan_sumInd_{grade}")
+            model.Add(sum_indicators == sum(block_indicators))
+
+            # Penalty for deviation from 1
+            slack_pos = model.NewIntVar(0, 1, f"co_plan_slackPos_{grade}")
+            slack_neg = model.NewIntVar(0, len(block_indicators), f"co_plan_slackNeg_{grade}")
+            model.Add(slack_pos - slack_neg == sum_indicators - 1)
+            abs_dev = model.NewIntVar(0, max(len(block_indicators), 1), f"co_plan_absdev_{grade}")
+            model.Add(abs_dev == slack_pos + slack_neg)
+
+            penalty_vars.append({
+                "rule_id": "grade_co_planning_afternoon_block",
+                "weight": weight // max(len(grades), 1),
+                "var": abs_dev,
+            })
+
+        if block_satisfied_vars:
+            any_block_satisfied = model.NewBoolVar(f"co_plan_grade{grade}_any_fully_subject_block")
+            model.AddMaxEquality(any_block_satisfied, block_satisfied_vars)
+            no_satisfied_block = model.NewIntVar(0, 1, f"co_plan_grade{grade}_no_fully_subject_block")
+            model.Add(no_satisfied_block == 1 - any_block_satisfied)
+            penalty_vars.append({
+                "rule_id": "grade_co_planning_afternoon_block",
+                "weight": max(weight // max(len(grades), 1), 1),
+                "var": no_satisfied_block,
+            })
+
+    return penalty_vars, indicator_map
+
+
+# ============================================================
+# Task 3.7: 共備期間科任課偏好 (soft)
+# ============================================================
+
+def build_co_planning_subject_lesson_penalty(
+    model,
+    schedule,
+    classes_data,
+    indicator_map,
+):
+    """
+    當某年級的共備區塊被選中後，該年級所有班級在該時段內
+    偏好排入 subject-teacher lesson（而非 homeroom lesson）。
+
+    Args:
+        indicator_map: dict[(grade, day, startPeriod)] -> BoolVar from Task 3.6
+
+    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    """
+    if not indicator_map:
+        return []
+
+    weight = WEIGHT_REGISTRY.get("co_planning_subject_teacher_lesson", 2000)
+    penalty_vars = []
+
+    # Build grade -> classes mapping
+    grade_classes = defaultdict(list)
+    for cls in classes_data:
+        g = resolve_class_grade(cls)
+        grade_classes[g].append(cls.get("name", ""))
+
+    # Collect subject-teacher subjects
+    subject_teacher_subjects = set()
+    for cls in classes_data:
+        for req in cls.get("course_requirements", []):
+            if is_subject_teacher_lesson(req):
+                subject_teacher_subjects.add(req.get("subject", ""))
+
+    # For each selected (grade, block), penalize slots that are not subject-teacher lessons.
+    for (grade, day_1based, start_p_1based), indicator in indicator_map.items():
+        class_names = grade_classes.get(grade, [])
+        if not class_names:
+            continue
+
+        day_idx = day_1based - 1
+        p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
+        # Block covers 2 periods
+        block_periods = [p_start_idx, p_start_idx + 1]
+
+        for c_name in class_names:
+            for p_index in block_periods:
+                if p_index >= TOTAL_PERIODS:
+                    continue
+
+                # Find subject-teacher vars at this (class, period)
+                subject_vars = []
+                for (c, p, t, s), var in schedule.items():
+                    if c == c_name and p == p_index and s in subject_teacher_subjects:
+                        subject_vars.append(var)
+
+                has_subject = model.NewBoolVar(f"co_plan_subject_{grade}_{c_name}_p{p_index}")
+                if subject_vars:
+                    subject_sum = model.NewIntVar(0, len(subject_vars), f"co_plan_subjectSum_{grade}_{c_name}_p{p_index}")
+                    model.Add(subject_sum == sum(subject_vars))
+                    model.Add(subject_sum >= 1).OnlyEnforceIf(has_subject)
+                    model.Add(subject_sum == 0).OnlyEnforceIf(has_subject.Not())
+                else:
+                    model.Add(has_subject == 0)
+
+                penalty_var = model.NewBoolVar(
+                    f"co_plan_penalty_{grade}_{c_name}_p{p_index}"
+                )
+                # penalty_var == indicator AND NOT has_subject
+                model.Add(penalty_var >= indicator - has_subject)
+                model.Add(penalty_var <= indicator)
+                model.Add(penalty_var <= 1 - has_subject)
+
+                num_grades = max(len(set(k[0] for k in indicator_map.keys())), 1)
+                penalty_vars.append({
+                    "rule_id": "co_planning_subject_teacher_lesson",
+                    "weight": max(weight // num_grades, 1),
+                    "var": penalty_var,
+                })
+
+    return penalty_vars

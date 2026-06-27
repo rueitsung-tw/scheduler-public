@@ -10,6 +10,7 @@ solver.py — 排課系統主入口
   6. 執行求解 / 序列化結果 / 寫入輸出
 
 不改 CLI 介面、不改輸入 JSON schema、不改輸出 JSON schema、不改排課結果邏輯。
+
 """
 
 import terminal_sanitizer
@@ -24,13 +25,20 @@ from ortools.sat.python import cp_model
 
 from phase2_engine import SchedulePhase2Engine
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS, LUNCH_BOUNDARY, CLASSROOM_LIMITS_FALLBACK
+from scheduler_policy import SolveMode, get_active_policy
 from utils import (
     parse_grade,
     is_virtual_teacher,
     normalize_room_name,
     get_subject_capacity,
 )
-from preprocessor import preprocess_classes, build_effective_grade_rules, allowed_grades_for_subject
+from preprocessor import (
+    preprocess_classes,
+    build_effective_grade_rules,
+    allowed_grades_for_subject,
+    normalize_classroom_metadata,
+    build_priority_teacher_placeholders,
+)
 from constraints.base_rules import (
     create_schedule_vars_and_course_demands,
     create_alternating_vars,
@@ -54,6 +62,8 @@ from constraints.class_rules import (
     resolve_class_grade,
     apply_week_specific_art_capacity_model,
     apply_week_specific_art_capacity_entries,
+    apply_grade12_tuesday_life_course,
+    build_daily_subject_teacher_minimum_penalty,
 )
 from constraints.utils import grade_needs_special_room
 from constraints.special_rules import (
@@ -80,6 +90,23 @@ def _expand_validation_weeks(week):
     if normalized == "both":
         return ("odd", "even")
     return (normalized,)
+
+
+def _is_homeroom_location_name(name):
+    value = str(name or "").strip()
+    if not value:
+        return True
+    return value in ("原班教室", "班級教室", "homeroom", "classroom") or "原班" in value
+
+
+def _get_explicit_room_info(entry):
+    classroom_id = str(entry.get("classroomId", "") or entry.get("roomId", "") or "").strip()
+    classroom_name = str(entry.get("classroomName", "") or entry.get("roomName", "") or "").strip()
+    if classroom_id:
+        return classroom_id, classroom_name or classroom_id
+    if classroom_name and not _is_homeroom_location_name(classroom_name):
+        return classroom_name, classroom_name
+    return "", ""
 
 def _normalize_special_room_subject(subj_raw):
     subj = str(subj_raw or "").strip()
@@ -225,10 +252,11 @@ def _configured_special_room_subjects(classrooms, classroom_limits, school_info,
         if subj:
             subjects.add(subj)
 
-    for subj_raw in (fallback_limits or {}).keys():
-        subj = _normalize_special_room_subject(subj_raw)
-        if subj:
-            subjects.add(subj)
+    # fallback_limits provides capacity defaults only and must not activate
+    # special-room validation for subjects the fixture did not explicitly configure.
+    # If a subject appears only in fallback_limits (no classrooms, no classroomLimits,
+    # no subjectClassroomGrades), the solver skips room assignment for that subject;
+    # the validator should not then require a room that was never modelled.
 
     return subjects
 
@@ -247,8 +275,11 @@ def _validate_schedule_result(
         if cls.get("name")
     }
     teacher_slots = defaultdict(list)
+    room_slots = defaultdict(list)
     room_usage = defaultdict(float)
     room_issues = []
+    room_conflicts = []
+    unassigned_room_issues = []
     teacher_issues = []
     grade_issues = []
     class_slot_issues = []
@@ -333,8 +364,21 @@ def _validate_schedule_result(
             (school_info or {}).get("subjectClassroomGrades", {}) or {},
         ):
             continue
+        room_key, room_label = _get_explicit_room_info(entry)
         for week in validation_weeks:
-            room_usage[(canonical_subject, day, period, week)] += _entry_room_weight(entry)
+            if room_key:
+                room_slots[(room_key, day, period, week)].append(entry)
+            else:
+                # 體育是容量型活動空間，不需要逐筆實體教室指派
+                if canonical_subject != "體育":
+                    unassigned_room_issues.append({
+                        "className": class_name,
+                        "day": day,
+                        "period": period,
+                        "week": week,
+                        "subject": subject,
+                    })
+                room_usage[(canonical_subject, day, period, week)] += _entry_room_weight(entry)
 
     for (teacher_name, day, period, week), entries in teacher_slots.items():
         if len(entries) <= 1:
@@ -364,6 +408,24 @@ def _validate_schedule_result(
             }),
         })
 
+    for (room_key, day, period, week), entries in room_slots.items():
+        unique_classes = sorted({e.get("className", "") for e in entries if e.get("className")})
+        if len(unique_classes) <= 1:
+            continue
+        sample = entries[0] if entries else {}
+        room_conflicts.append({
+            "classroomId": str(sample.get("classroomId", "") or "").strip(),
+            "classroomName": str(sample.get("classroomName", "") or "").strip() or room_key,
+            "day": day,
+            "period": period,
+            "week": week,
+            "classes": unique_classes,
+            "subjects": sorted({
+                f"{e.get('className', '')} / {e.get('subject', '')} / {e.get('teacherName', '')}"
+                for e in entries
+            }),
+        })
+
     for (subject, day, period, week), used in room_usage.items():
         capacity = capacity_count_by_subject.get(subject, 0)
         if used > capacity:
@@ -376,15 +438,45 @@ def _validate_schedule_result(
                 "capacity": capacity,
             })
 
+    # 🏀 診斷分組：按科目統計未指派教室的數量與班級分佈
+    subject_counter = {}
+    subject_classes = defaultdict(set)
+    for item in unassigned_room_issues:
+        subj = item.get("subject", "")
+        cls_name = item.get("className", "")
+        subject_counter[subj] = subject_counter.get(subj, 0) + 1
+        if cls_name:
+            subject_classes[subj].add(cls_name)
+
+    unassigned_special_rooms_summary = [
+        {
+            "subject": subj,
+            "count": cnt,
+            "classes": sorted(subject_classes.get(subj, set())),
+        }
+        for subj, cnt in sorted(subject_counter.items(), key=lambda x: -x[1])
+    ]
+
     return {
         "class_slot_conflicts": class_slot_issues,
         "teacher_conflicts": teacher_issues,
+        "room_conflicts": room_conflicts,
         "room_overloads": room_issues,
+        "unassigned_special_rooms": unassigned_room_issues,
+        "unassigned_special_rooms_summary": unassigned_special_rooms_summary,
         "grade_subject_issues": grade_issues,
     }
 
 
 def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
+    """Return True when hard errors exist.
+
+    unassigned_special_rooms is always a hard error because:
+    - PE (體育) is already excluded in _validate_schedule_result (capacity-type space)
+    - Other subjects with physical classrooms MUST have classroomId assigned
+    - If a subject has no physical classrooms but only classroomLimits, it should not
+      appear in unassigned_special_rooms (handled by _validate_schedule_result filtering)
+    """
     if not isinstance(validation_report, dict):
         return False
 
@@ -392,6 +484,15 @@ def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
         return True
     if validation_report.get("class_slot_conflicts"):
         return True
+    if validation_report.get("room_conflicts"):
+        return True
+
+    # unassigned_special_rooms is always a hard error.
+    # PE is excluded upstream in _validate_schedule_result.
+    # Other subjects with physical classrooms must have classroomId.
+    if validation_report.get("unassigned_special_rooms"):
+        return True
+
     if validation_report.get("grade_subject_issues"):
         return True
     if not allow_room_overloads and validation_report.get("room_overloads"):
@@ -591,6 +692,9 @@ def _optimize_music_art_alternating_locally(schedule_entries, classes_data, clas
 
     base_teacher_usage = defaultdict(int)
     base_room_usage = defaultdict(int)
+    # [FIX] Track which (class, day, period) slots are already occupied by non-excluded subjects
+    # to prevent the local optimizer from moving music/art into occupied slots.
+    class_slot_occupied = set()
     classroom_grades_cfg = (school_info or {}).get("subjectClassroomGrades", {}) or {}
 
     for entry in working_entries:
@@ -607,6 +711,9 @@ def _optimize_music_art_alternating_locally(schedule_entries, classes_data, clas
             weeks = ("odd", "even") if week == "both" else (week,)
             for current_week in weeks:
                 base_teacher_usage[(teacher_name, day, period, current_week)] += 1
+
+        # Track class-slot occupancy for conflict prevention
+        class_slot_occupied.add((class_name, day, period))
 
         canonical_subject = _canonical_schedule_subject_for_room(entry.get("subject", ""))
         if canonical_subject not in ("音樂", "美勞"):
@@ -728,6 +835,24 @@ def _optimize_music_art_alternating_locally(schedule_entries, classes_data, clas
         ctx["class_changed"] = class_changed
         change_penalties.extend([slot_changed, direction_changed])
 
+        # [FIX] Class-slot exclusivity: if the (class, day, period) slot is already occupied
+        # by a non-excluded subject, forbid placing alternating courses there.
+        day = ctx["day"]
+        low_period = ctx["low_period"]
+        high_period = ctx["high_period"]
+
+        low_occupied = (class_name, day, low_period) in class_slot_occupied
+        high_occupied = (class_name, day, high_period) in class_slot_occupied
+
+        # alt_at_low means alternating course is at low_period
+        # alt_at_high means alternating course is at high_period
+        if low_occupied:
+            model.Add(ctx["alt_at_low"] == 0)
+            print(f"  [EXCLUDE] {class_name}: low_period={low_period} occupied, forbidding alt_at_low")
+        if high_occupied:
+            model.Add(ctx["alt_at_high"] == 0)
+            print(f"  [EXCLUDE] {class_name}: high_period={high_period} occupied, forbidding alt_at_high")
+
     for key, vars_at_slot in teacher_buckets.items():
         teacher_name, day, period, week = key
         base_count = base_teacher_usage.get((teacher_name, day, period, week), 0)
@@ -823,11 +948,214 @@ def _optimize_music_art_alternating_locally(schedule_entries, classes_data, clas
             ctx["even_entry"]["teacherName"] = ctx["music_teacher"]
 
     print(f"  [OK] [音美局部優化] 已調整 {len(class_contexts)} 個音美交替班的局部連堂/方向")
+
+    # [P0-06] 優化後重新 backfill classroomId/classroomName
+    # 因為上述循環修改了 day/period/subject，原 classroomId 可能不再有效
+    _backfill_music_art_classrooms_after_optimization(working_entries, classrooms, school_info)
+
     optimized_entries = _refresh_music_art_pair_metadata(working_entries, optimizer_configs)
     return optimized_entries, False
 
 
+def _normalize_special_room_subject(subj_raw):
+    """對應 class_rules._normalize_special_room_subject"""
+    subj = str(subj_raw or "").strip()
+    if subj in ("語文-本土語", "本土語言", "閩南語", "客語"):
+        return "本土語"
+    if subj == "英語":
+        return "語文-英語"
+    if subj == "自然":
+        return "自然科學"
+    if subj in ("科技-資訊", "資訊", "電腦"):
+        return "資訊"
+    if subj in ("健康與體育",):
+        return "體育"
+    return subj
+
+
+def _backfill_music_art_classrooms_after_optimization(schedule_entries, classrooms, school_info):
+    """
+    [P0-06] 音美局部優化後重新指派實體教室。
+
+    當 _optimize_music_art_alternating_locally 修改了 entry 的 day/period/subject/week，
+    原 classroomId/classroomName 可能不再對應正確的科目或時段。
+    此函數針對音樂/美勞 entry 重新查找可用教室並回填。
+    """
+    if not classrooms or not schedule_entries:
+        return
+
+    # 建立 subject -> rooms 映射
+    rooms_by_subject = defaultdict(list)
+    for room in classrooms:
+        subj = _normalize_special_room_subject(room.get("subject", ""))
+        if subj in ("音樂", "美勞"):
+            rooms_by_subject[subj].append({
+                "id": str(room.get("id") or room.get("name", "")),
+                "name": str(room.get("name", "")),
+                "subject": subj,
+                "gradePreferences": room.get("gradePreferences", []) or [],
+            })
+
+    classroom_grades_cfg = (school_info or {}).get("subjectClassroomGrades", {}) or {}
+
+    # 收集所有需要 backfill 的音樂/美勞 entry
+    # [FIX] 支援 '音樂_固定'/'美勞_固定'/'音樂美勞_交替' 等 suffix 變體
+    arts_entries = []
+    for entry in schedule_entries:
+        subj = str(entry.get("subject", "")).strip()
+        _check_subj = subj.replace("_固定", "").replace("_交替", "")
+        if _check_subj not in ("音樂", "美勞"):
+            continue
+        className = str(entry.get("className", "")).strip()
+        day = int(entry.get("day", 0) or 0)
+        period = int(entry.get("period", 0) or 0)
+        week = _normalize_week_tag(entry.get("week"))
+        if not className or not day or not period:
+            continue
+
+        # 判斷該年級是否需要專科教室
+        grade = _get_class_grade_from_name(className, school_info)
+        canonical_subj = subj  # 音樂/美勞已經是 canonical
+        from constraints.utils import grade_needs_special_room
+        if not grade_needs_special_room(canonical_subj, grade, classroom_grades_cfg):
+            continue
+
+        arts_entries.append({
+            "entry": entry,
+            "subject": subj,
+            "className": className,
+            "grade": grade,
+            "day": day,
+            "period": period,
+            "week": week,
+        })
+
+    if not arts_entries:
+        return
+
+    # 按 (day, period, week) 分組，逐組指派教室避免衝堂
+    slot_groups = defaultdict(list)
+    for item in arts_entries:
+        slot_key = (item["day"], item["period"], item["week"])
+        slot_groups[slot_key].append(item)
+
+    # 記錄已佔用: (room_id, day, period, week) -> set
+    occupied = set()
+
+    # [Candidate B FIX v2] 預先載入所有既有 schedule_entries 的有效 classroomId 佔用狀態。
+    # 目的：讓 backfill 階段知道哪些教室時段已被其他 entry（含非音樂/美勞的專科課）佔用，
+    # 避免將教室重複指派給不同班級。
+    #
+    # 自我封鎖防護（精確版）：
+    # backfill 會重新指派 arts_entries 中的 entry。若 entry 的舊 classroomId 被載入 occupied，
+    # 該 entry 在搜尋新教室時會被自己的舊佔用擋住（self-blocking）。
+    #
+    # v1 錯誤：無條件移除所有 arts_entries 的舊佔用，導致不同 slot_group 的 entry
+    # 互相看不到彼此的佔用，產生交叉衝堂。
+    #
+    # v2 修正：先載入所有佔用（含 arts_entries），然後在處理每個 entry 時，
+    # 才暫時移除該 entry 自己的舊佔用（避免 self-blocking），搜尋完成後再恢復。
+    # 這樣不同 entry 之間仍能互相看到彼此的佔用。
+
+    # 建立 entry -> old occupied slots 的對照表，用於 self-blocking 防護
+    arts_entry_old_slots = {}
+    for item in arts_entries:
+        entry = item["entry"]
+        old_room_id = str(entry.get("classroomId", "") or "").strip()
+        if not old_room_id:
+            arts_entry_old_slots[id(entry)] = []
+            continue
+        e_day = int(entry.get("day", 0) or 0)
+        e_period = int(entry.get("period", 0) or 0)
+        if not e_day or not e_period:
+            arts_entry_old_slots[id(entry)] = []
+            continue
+        e_week = _normalize_week_tag(entry.get("week"))
+        arts_entry_old_slots[id(entry)] = [
+            (old_room_id, e_day, e_period, w)
+            for w in _expand_validation_weeks(e_week)
+        ]
+
+    for entry in schedule_entries:
+        existing_room_id = str(entry.get("classroomId", "") or "").strip()
+        if not existing_room_id:
+            continue
+        e_day = int(entry.get("day", 0) or 0)
+        e_period = int(entry.get("period", 0) or 0)
+        if not e_day or not e_period:
+            continue
+        e_week = _normalize_week_tag(entry.get("week"))
+        for w in _expand_validation_weeks(e_week):
+            occupied.add((existing_room_id, e_day, e_period, w))
+
+    for slot_key, items in slot_groups.items():
+        day, period, week = slot_key
+
+        for item in items:
+            subj = item["subject"]
+            grade = item["grade"]
+            entry = item["entry"]
+
+            # [Candidate B v2] Self-blocking protection:
+            # Temporarily remove this entry's OLD occupied slots so it doesn't block itself.
+            old_slots = arts_entry_old_slots.get(id(entry), [])
+            for slot in old_slots:
+                occupied.discard(slot)
+
+            canonical_room_subj = _normalize_special_room_subject(subj)
+            candidate_rooms = list(rooms_by_subject.get(canonical_room_subj, []))
+            if not candidate_rooms:
+                # Restore old slots since no assignment will happen
+                for slot in old_slots:
+                    occupied.add(slot)
+                continue
+
+            # 優先偏好年級，其次非偏好
+            def room_sort_key(room):
+                gp = room.get("gradePreferences", []) or []
+                has_pref = grade in gp if isinstance(gp, list) else False
+                return (0 if has_pref else 1, room.get("name", ""))
+
+            candidate_rooms.sort(key=room_sort_key)
+
+            weeks_to_occupy = ("odd", "even") if week == "both" else (week,)
+            assigned = False
+            for room in candidate_rooms:
+                room_id = room["id"]
+
+                is_free = True
+                for w in weeks_to_occupy:
+                    if (room_id, day, period, w) in occupied:
+                        is_free = False
+                        break
+
+                if is_free:
+                    entry["classroomId"] = room_id
+                    entry["classroomName"] = room["name"]
+                    for w in weeks_to_occupy:
+                        occupied.add((room_id, day, period, w))
+                    assigned = True
+                    break
+
+            if not assigned:
+                # 所有教室都衝堂，清空以避免錯誤指派
+                entry["classroomId"] = ""
+                entry["classroomName"] = ""
+
+
+def _get_class_grade_from_name(class_name, school_info):
+    """從班級名稱提取年級"""
+    import re as _re
+    match = _re.search(r'(\d+)年', class_name)
+    if match:
+        return int(match.group(1))
+    # Fallback: 從 classes_data 查找 (school_info 可能沒有)
+    return 1
+
+
 def main():
+    import faulthandler; faulthandler.enable()
+    print("[PHASE] main 開始執行, 已掛載 faulthandler", flush=True)
     if len(sys.argv) != 3:
         print("[ERROR] 參數錯誤：需提供 input_path 與 output_path")
         sys.exit(1)
@@ -841,6 +1169,8 @@ def main():
     except Exception as e:
         print(f"[ERROR] 讀取 JSON 失敗: {e}")
         sys.exit(1)
+
+    print("[PHASE] 載入 payload 完成", flush=True)
 
     job_id = data.get("jobId", "UNKNOWN")
     schoolInfo = data.get("schoolInfo", {})
@@ -861,7 +1191,7 @@ def main():
     # 前處理（grade修正 / ghost art清理 / homeroom合併 / arts拆分）
     # ==========================================
     subject_grade_rules = schoolInfo.get("subjectGradeRules", {}) or {}
-    
+
     classes_data, _metadata = preprocess_classes(
         classes_data,
         ai_settings,
@@ -870,6 +1200,116 @@ def main():
     )
     data["preprocessMetadata"] = copy.deepcopy(_metadata)
     data["preprocessedClasses"] = copy.deepcopy(classes_data)
+    print("[PHASE] preprocessing 完成", flush=True)
+
+    # ==========================================
+    # 🛡️ Preflight：求解前檢查輸入是否超載
+    # 區分「輸入超載 INVALID_INPUT」與「求解後驗證失敗 INVALID_VALIDATION」
+    # ==========================================
+    class_load_trace = []
+    invalid_classes = []
+    for cls in classes_data:
+        grade_num = resolve_class_grade(cls)
+        is_arts_class = cls.get("isArtsClass") or cls.get("is_arts_class", False)
+
+        # 🛡️ 容量一律來自 get_effective_class_period_capacity()，不讀 gradeMaxPeriods
+        capacity = get_effective_class_period_capacity(
+            grade_num,
+            is_arts_class=is_arts_class,
+            ai_settings=ai_settings,
+        )
+
+        total_periods = _count_required_periods(cls.get("course_requirements", []))
+
+        reqs = cls.get("course_requirements", [])
+        # [PREFLIGHT] 計算每科的 manual locks 數量
+        lock_counts_by_subj = {}
+        tt = cls.get("timetable")
+        if isinstance(tt, dict):
+            for day_key, day_data in tt.items():
+                if isinstance(day_data, dict):
+                    for period_key, cell in day_data.items():
+                        if isinstance(cell, dict) and cell.get("isLocked") is True:
+                            s = cell.get("subject")
+                            if s:
+                                lock_counts_by_subj[s] = lock_counts_by_subj.get(s, 0) + 1
+        elif isinstance(tt, list):
+            for day_idx, day_data in enumerate(tt):
+                if isinstance(day_data, list):
+                    for period_idx, cell in enumerate(day_data):
+                        if isinstance(cell, dict) and cell.get("isLocked") is True:
+                            s = cell.get("subject")
+                            if s:
+                                lock_counts_by_subj[s] = lock_counts_by_subj.get(s, 0) + 1
+
+        reqs_dict = {r.get("subject", ""): int(r.get("periods", 0)) for r in reqs}
+        trace_item = {
+            "className": cls.get("name", ""),
+            "grade": grade_num,
+            "isArtsClass": is_arts_class,
+            "totalPeriods": total_periods,
+            "capacity": capacity,
+            "requirementBreakdown": [
+                {
+                    "subject": r.get("subject", ""),
+                    "periods": float(r.get("periods", 0)),
+                    "defaultTeacher": r.get("defaultTeacher", ""),
+                }
+                for r in reqs
+            ],
+        }
+        class_load_trace.append(trace_item)
+
+        if total_periods > capacity:
+            trace_item["validationError"] = "INVALID_INPUT_CLASS_LOAD"
+            trace_item["periodExcess"] = round(total_periods - capacity, 2)
+            invalid_classes.append(trace_item)
+            print(f"  [ERROR] [Preflight] {cls.get('name', '')}: 總節數 {total_periods} > 容量 {capacity}！")
+            continue
+
+        # 🛡️ 檢查鎖定節數是否大於需求節數
+        for subj, lock_count in lock_counts_by_subj.items():
+            req_periods = reqs_dict.get(subj, 0)
+            if lock_count > req_periods:
+                trace_item["validationError"] = "INVALID_INPUT_LOCK_CONSERVATION"
+                trace_item["conservationError"] = f"科目 '{subj}' 鎖定了 {lock_count} 節，但需求只有 {req_periods} 節"
+                invalid_classes.append(trace_item)
+                print(f"  [ERROR] [Preflight] {cls.get('name', '')}: {trace_item['conservationError']}")
+                break
+
+    # 將 classLoadTrace 寫入 metadata，供後端分析使用
+    _metadata["classLoadTrace"] = class_load_trace
+
+    if invalid_classes:
+        # 輸入超載：不進 solver，直接回傳 INVALID_INPUT
+        # 🔧 修復 B (RC-CONF-01 輔因)：附加 gradeCapacityMap 過渡方案
+        # 讓前端能取得與 Python 同源的容量資訊
+        # 【過渡方案】：solver preflight → gradeCapacityMap → store cache
+        # 長期應改為由正式設定 API 直接提供
+        grade_capacity_map = {}
+        for grade_num in range(1, 7):
+            for is_arts in [False, True]:
+                key = f"grade{grade_num}{'_arts' if is_arts else ''}"
+                grade_capacity_map[key] = get_effective_class_period_capacity(grade_num, is_arts)
+
+        result = {
+            "status": "INVALID_INPUT",
+            "solverStatus": "INVALID_INPUT",
+            "error": f"輸入資料驗證失敗：有 {len(invalid_classes)} 個班級發生總節數超載或鎖定節數大於需求節數",
+            "classLoadTrace": class_load_trace,
+            "invalidClasses": invalid_classes,
+            "gradeCapacityMap": grade_capacity_map,
+        }
+        print(f"\n[ERROR] [Preflight] {len(invalid_classes)} 個班級輸入驗證失敗，不進 solver")
+        for ic in invalid_classes:
+            if ic.get("validationError") == "INVALID_INPUT_CLASS_LOAD":
+                print(f"  - {ic['className']}: 總節數 {ic['totalPeriods']} > 容量 {ic['capacity']} (超限 {ic['periodExcess']})")
+            elif ic.get("validationError") == "INVALID_INPUT_LOCK_CONSERVATION":
+                print(f"  - {ic['className']}: {ic['conservationError']}")
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        sys.exit(0)
 
     # 收集班级名稱與老師名稱
     class_names = list(set([c.get("name") for c in classes_data if c.get("name")]))
@@ -956,203 +1396,326 @@ def main():
                 )
                 subject_room_count[subj] = cap
 
+    # [Task 02] Two-pass solver: strict teaching-shape first, then feasibility recovery fallback
+    from scheduler_policy import SolveMode, get_active_policy
+
+    def _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE):
+        print("[PHASE] model build 開始", flush=True)
+        policy = get_active_policy(solve_mode)
+        model = cp_model.CpModel()
+        schedule = {}
+        phase2_penalty_vars = []
+
+        # ============================================================
+        # Phase 1: 基礎建模
+        # ============================================================
+        print("[INFO] [建模] 創建 schedule 變數與課程需求約束...")
+        create_schedule_vars_and_course_demands(model, classes_data, schedule)
+
+        print("[WARN] [建模] 創建 alternating BoolVar...")
+        (
+            alternating_class_is_music_odd,
+            alternating_group_map,
+            class_pair_group,
+            class_teacher_pair,
+        ) = create_alternating_vars(model, classes_data)
+
+        print("[LOCK] [建模] 掃描手動預排鎖定...")
+        locked_count, locked_vars, lock_audit_log = apply_preallocation_locks(model, classes_data, schedule)
+
+        # ============================================================
+        # Phase 2: 教師維度約束
+        # ============================================================
+        print("[CONSTRAINT] [核心約束] 加入教師衝堂防護...")
+        apply_anti_collision(model, schedule, class_names, teacher_names, classes_data, ai_settings)
+
+        print("[CONSTRAINT] [核心約束] 加入交替課單雙週教師衝堂防護...")
+        apply_alternating_teacher_anti_collision(
+            model,
+            schedule,
+            class_teacher_pair,
+            alternating_class_is_music_odd,
+            classes_data=classes_data,
+            ai_settings=ai_settings,
+        )
+
+        print("[CONSTRAINT] [核心約束] 加入教師配額限制...")
+        apply_teacher_quota(model, classes_data, teachers_data, schoolInfo)
+
+        print("[CONSTRAINT] [核心約束] 加入不排課時段限制...")
+        apply_teacher_unavailable_slots(model, schedule, teachers_data)
+
+        print("[CONSTRAINT] [核心約束] 加入特殊課程鎖定...")
+        apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings)
+
+        # ============================================================
+        # Phase 3: 班級維度約束
+        # ============================================================
+        print("[CONSTRAINT] [核心約束] 加入每日科任課上限...")
+        apply_daily_subject_limit(model, classes_data, schedule, locked_vars)
+
+        print("[CONSTRAINT] [核心約束] 加入低年級下午禁排...")
+        apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=ai_settings)
+
+        # [Task 07] Grade 1-2 Tuesday afternoon life-course placement (hard in strict, soft fallback)
+        print("[CONSTRAINT] [核心約束] 加入 1-2 年級週二下午生活課...")
+        grade12_tuesday_life_penalties = apply_grade12_tuesday_life_course(
+            model, classes_data, schedule, solve_mode=solve_mode,
+        )
+        phase2_penalty_vars.extend(grade12_tuesday_life_penalties)
+
+        print("[CONSTRAINT] [核心約束] 加入科任課不連堂...")
+        apply_no_consecutive_subject(model, classes_data, schedule, locked_vars)
+
+        print("[CONSTRAINT] [核心約束] 加入自然課排課習慣...")
+        science_consec_map = apply_science_habits(model, classes_data, schedule, ai_settings, penalty_vars=phase2_penalty_vars, solve_mode=solve_mode)
+
+        print("[CONSTRAINT] [核心約束] 加入專科教室容量限制...")
+
+        # [Task 08] Normalize classroom metadata before room assignment
+        # Note: normalize_classroom_metadata mutates in-place and returns the same list.
+        # Do NOT reassign `classrooms` here to avoid UnboundLocalError (closure variable).
+        normalize_classroom_metadata(classrooms)
+
+        # [Task 08] Build priority teacher placeholders (not pre-bound to specific classes)
+        # Signature: build_priority_teacher_placeholders(classrooms, classes_data=None)
+        priority_placeholders = build_priority_teacher_placeholders(
+            classrooms, classes_data
+        )
+        if priority_placeholders:
+            print(f"[INFO] [Task 08] Built {len(priority_placeholders)} priority teacher placeholder(s)")
+
+        # [Task 04/08] Classroom preference weights from policy adapter with YAML fallback defaults
+        weight_grade_affinity = policy.get_weight("classroom_grade_affinity", default=3000)
+        weight_teacher_affinity = policy.get_weight("classroom_primary_teacher_affinity", default=2500)
+        apply_special_classroom_capacity(
+            model,
+            classes_data,
+            schedule,
+            classrooms,
+            science_consec_map=science_consec_map,
+            penalty_vars=phase2_penalty_vars,
+            classroom_limits=classroom_limits_config,
+            school_info=schoolInfo,
+            relax_to_soft=relax_room_capacity,
+            alternating_class_is_music_odd=alternating_class_is_music_odd,
+            class_teacher_pair=class_teacher_pair,
+            weight_grade_affinity=weight_grade_affinity,
+            weight_teacher_affinity=weight_teacher_affinity,
+        )
+
+        # ============================================================
+        # Phase 4: 特殊規則
+        # ============================================================
+        print("[CONSTRAINT] [核心約束] 加入體育不連堂...")
+        apply_no_consecutive_pe(model, classes_data, schedule)
+
+        print("[CONSTRAINT] [核心約束] 加入音樂美勞至少一組連堂...")
+        apply_art_consecutive_constraint(
+            model, classes_data, schedule,
+            penalty_vars=phase2_penalty_vars,
+            solve_mode=solve_mode,
+        )
+
+        print("[CONSTRAINT] [核心約束] 加入完美互補配對約束...")
+        apply_alternating_perfect_pairing(
+            model,
+            classes_data,
+            schedule,
+            teacher_names,
+            alternating_class_is_music_odd,
+            alternating_group_map,
+            class_pair_group,
+            class_teacher_pair,
+            phase2_penalty_vars,
+            ai_settings,
+            solve_mode=solve_mode,
+        )
+
+        # [Task 2] Week-specific 音美教室容量建模（preferred penalty 10000）
+        print("[CONSTRAINT] [核心約束] 加入 week-specific 音美容量模型...")
+        class_grade_map_solver = {}
+        for cls in classes_data:
+            c_name = cls.get("name", "")
+            raw_grade = cls.get("grade")
+            if raw_grade is None:
+                grade_match = re.search(r'(\d+)年', c_name)
+                if grade_match:
+                    raw_grade = int(grade_match.group(1))
+            try:
+                class_grade_map_solver[c_name] = (
+                    int(raw_grade) if raw_grade is not None else 1
+                )
+            except Exception:
+                class_grade_map_solver[c_name] = 1
+
+        apply_week_specific_art_capacity_model(
+            model,
+            classes_data,
+            schedule,
+            classrooms,
+            alternating_class_is_music_odd,
+            class_grade_map_solver,
+            phase2_penalty_vars,
+            classroom_limits=classroom_limits_config,
+        )
+
+        print("[CONSTRAINT] [核心約束] 加入游泳引擎 v2...")
+        apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_penalty_vars)
+
+        print("[CONSTRAINT] [連堂約束] 掃描通用連堂需求...")
+        consecutive_subjects = ai_settings.get("consecutiveSubjects", [])
+        consecutive_count = 0
+
+        for cls in classes_data:
+            c_name = cls.get("name", "")
+            reqs = cls.get("course_requirements", [])
+
+            for req in reqs:
+                subj = req.get("subject", "")
+                periods = int(req.get("periods", 0))
+                allow_consec = req.get("allow_consecutive", False)
+
+                if subj in consecutive_subjects:
+                    allow_consec = True
+
+                if not allow_consec:
+                    continue
+
+                if "自然" in subj or "美勞" in subj or "音樂" in subj or "導師區塊" in subj:
+                    continue
+
+                num_groups = periods // 2
+                if num_groups < 1:
+                    continue
+
+                add_consecutive_constraint(
+                    model, schedule, c_name, subj,
+                    consecutive_groups=num_groups,
+                    days=DAYS, periods_per_day=PERIODS_PER_DAY
+                )
+                consecutive_count += 1
+
+        print(f"  [OK] [連堂約束] 共處理 {consecutive_count} 個科目的連堂需求\n")
+
+        # [Task 07] Daily subject-teacher minimum soft objective (day-level count)
+        print("[OBJECTIVE] [軟性目標] 加入每班每日至少一節科任課...")
+        daily_min_penalties = build_daily_subject_teacher_minimum_penalty(
+            model, schedule, classes_data,
+        )
+        phase2_penalty_vars.extend(daily_min_penalties)
+
+        phase2_external_count = len(phase2_penalty_vars)
+        engine = SchedulePhase2Engine(
+            model, schedule, class_names, teacher_names,
+            TOTAL_PERIODS, DAYS, PERIODS_PER_DAY,
+            teachers_data=teachers_data,
+            external_penalty_vars=phase2_penalty_vars,
+            room_grade_affinity=room_grade_affinity,
+            room_primary_teacher_map=room_primary_teacher_map,
+            classes_data=classes_data,
+            school_info=schoolInfo,
+            # [Task 08] Priority teacher placeholders for solver-driven assignment
+            priority_placeholders=priority_placeholders,
+            # [repair_03] Pass runtime policy adapter for weight resolution
+            policy=policy,
+        )
+        engine.build_soft_constraints()
+
+        # [Task 3.8] Merge only penalties created inside the phase2 engine.
+        # The engine starts by copying external_penalty_vars into self.penalty_vars,
+        # so appending the whole list here would double-count those external entries.
+        phase2_penalty_vars.extend(engine.penalty_vars[phase2_external_count:])
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 1740.0
+        solver.parameters.num_search_workers = 8
+
+        print(f"[PHASE] model build 完成, solve 開始 (workers={solver.parameters.num_search_workers}, timeout={solver.parameters.max_time_in_seconds})", flush=True)
+        status = solver.Solve(model)
+        _status_map = {cp_model.OPTIMAL: "OPTIMAL", cp_model.FEASIBLE: "FEASIBLE", cp_model.INFEASIBLE: "INFEASIBLE", cp_model.MODEL_INVALID: "MODEL_INVALID"}
+        print(f"[PHASE] solve 返回 status={status} ({_status_map.get(status, 'UNKNOWN/' + str(status))})", flush=True)
+        print(f"[DEBUG] [求解] solver.Solve() returned status={status} ({_status_map.get(status, 'UNKNOWN/' + str(status))})")
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            print(f"[WARN] [求解] Status is NOT OPTIMAL/FEASIBLE — schedule extraction will be blocked to prevent partial solution artifacts")
+        return {
+            "model": model,
+            "schedule": schedule,
+            "solver": solver,
+            "status": status,
+            "phase2_penalty_vars": phase2_penalty_vars,
+            "alternating_class_is_music_odd": alternating_class_is_music_odd,
+            "alternating_group_map": alternating_group_map,
+            "class_pair_group": class_pair_group,
+            "class_teacher_pair": class_teacher_pair,
+            "relax_room_capacity": relax_room_capacity,
+        }
+
+    # [Task 02] Two-pass solver flow:
+    # 1. Strict pass with STRICT_TEACHING_SHAPE mode
+    # 2. If strict infeasible/model-invalid, fallback to FEASIBILITY_RECOVERY mode
+    # 3. Fallback output must be hard-valid (R2)
+
     try:
-        def _solve_attempt(relax_room_capacity=False):
-            model = cp_model.CpModel()
-            schedule = {}
-            phase2_penalty_vars = []
+        solve_pass = "strict_teaching_shape"
+        degraded = False
+        degradation_reasons = []
+        fallback_attempted = False  # [Task 02] Guard: fallback only once
 
-            # ============================================================
-            # Phase 1: 基礎建模
-            # ============================================================
-            print("[INFO] [建模] 創建 schedule 變數與課程需求約束. ..")
-            create_schedule_vars_and_course_demands(model, classes_data, schedule)
+        strict_policy = get_active_policy(SolveMode.STRICT_TEACHING_SHAPE)
+        attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE)
 
-            print("[WARN] [建模] 創建 alternating BoolVar. ..")
-            (
-                alternating_class_is_music_odd,
-                alternating_group_map,
-                class_pair_group,
-                class_teacher_pair,
-            ) = create_alternating_vars(model, classes_data)
+        if attempt["status"] in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID):
+            strict_status = attempt["status"]
+            strict_status_name = solver.StatusName(strict_status) if "solver" in locals() else "UNKNOWN"
 
-            print("[LOCK] [建模] 掃描手動預排鎖定. ..")
-            locked_count, locked_vars, lock_audit_log = apply_preallocation_locks(model, classes_data, schedule)
+            # [Blocker 2] Only trigger fallback if fallback_enabled is True AND not already attempted
+            if strict_policy.fallback_enabled and not fallback_attempted:
+                print("[WARN] [求解] Strict pass 無解或模型無效，啟動 Feasibility Recovery Fallback...")
+                fallback_attempted = True
+                # Run fallback pass with FEASIBILITY_RECOVERY mode
+                attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.FEASIBILITY_RECOVERY)
 
-            # ============================================================
-            # Phase 2: 教師維度約束
-            # ============================================================
-            print("[CONSTRAINT] [核心約束] 加入教師衝堂防護. ..")
-            apply_anti_collision(model, schedule, class_names, teacher_names, classes_data, ai_settings)
-
-            print("[CONSTRAINT] [核心約束] 加入交替課單雙週教師衝堂防護. ..")
-            apply_alternating_teacher_anti_collision(
-                model,
-                schedule,
-                class_teacher_pair,
-                alternating_class_is_music_odd,
-            )
-
-            print("[CONSTRAINT] [核心約束] 加入教師配額限制. ..")
-            apply_teacher_quota(model, classes_data, teachers_data, schoolInfo)
-
-            print("[CONSTRAINT] [核心約束] 加入不排課時段限制. ..")
-            apply_teacher_unavailable_slots(model, schedule, teachers_data)
-
-            print("[CONSTRAINT] [核心約束] 加入特殊課程鎖定. ..")
-            apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings)
-
-            # ============================================================
-            # Phase 3: 班級維度約束
-            # ============================================================
-            print("[CONSTRAINT] [核心約束] 加入每日科任課上限. ..")
-            apply_daily_subject_limit(model, classes_data, schedule, locked_vars)
-
-            print("[CONSTRAINT] [核心約束] 加入低年級下午禁排. ..")
-            apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=ai_settings)
-
-            print("[CONSTRAINT] [核心約束] 加入科任課不連堂. ..")
-            apply_no_consecutive_subject(model, classes_data, schedule, locked_vars)
-
-            print("[CONSTRAINT] [核心約束] 加入自然課排課習慣...")
-            science_consec_map = apply_science_habits(model, classes_data, schedule, ai_settings, penalty_vars=phase2_penalty_vars)
-
-            print("[CONSTRAINT] [核心約束] 加入專科教室容量限制...")
-            classrooms = data.get("classrooms", [])
-            apply_special_classroom_capacity(
-                model,
-                classes_data,
-                schedule,
-                classrooms,
-                science_consec_map=science_consec_map,
-                penalty_vars=phase2_penalty_vars,
-                classroom_limits=classroom_limits_config,
-                school_info=schoolInfo,
-                relax_to_soft=relax_room_capacity,
-            )
-
-            # ============================================================
-            # Phase 4: 特殊規則
-            # ============================================================
-            print("[CONSTRAINT] [核心約束] 加入體育不連堂. ..")
-            apply_no_consecutive_pe(model, classes_data, schedule)
-
-            print("[CONSTRAINT] [核心約束] 加入音樂美勞至少一組連堂. ..")
-            apply_art_consecutive_constraint(model, classes_data, schedule, penalty_vars=phase2_penalty_vars)
-
-            print("[CONSTRAINT] [核心約束] 加入完美互補配對約束...")
-            apply_alternating_perfect_pairing(
-                model,
-                classes_data,
-                schedule,
-                teacher_names,
-                alternating_class_is_music_odd,
-                alternating_group_map,
-                class_pair_group,
-                class_teacher_pair,
-                phase2_penalty_vars,
-                ai_settings,
-            )
-
-            # [Task 2] Week-specific 音美教室容量建模（preferred penalty 10000）
-            print("[CONSTRAINT] [核心約束] 加入 week-specific 音美容量模型...")
-            class_grade_map_solver = {}
-            for cls in classes_data:
-                c_name = cls.get("name", "")
-                raw_grade = cls.get("grade")
-                if raw_grade is None:
-                    grade_match = re.search(r'(\d+)年', c_name)
-                    if grade_match:
-                        raw_grade = int(grade_match.group(1))
-                try:
-                    class_grade_map_solver[c_name] = (
-                        int(raw_grade) if raw_grade is not None else 1
-                    )
-                except Exception:
-                    class_grade_map_solver[c_name] = 1
-
-            apply_week_specific_art_capacity_model(
-                model,
-                classes_data,
-                schedule,
-                classrooms,
-                alternating_class_is_music_odd,
-                class_grade_map_solver,
-                phase2_penalty_vars,
-                classroom_limits=classroom_limits_config,
-            )
-
-            print("[CONSTRAINT] [核心約束] 加入游泳引擎 v2. ..")
-            apply_swimming_engine_v2(model, classes_data, schedule, ai_settings, phase2_penalty_vars)
-
-            print("[CONSTRAINT] [連堂約束] 掃描通用連堂需求. ..")
-            consecutive_subjects = ai_settings.get("consecutiveSubjects", [])
-            consecutive_count = 0
-
-            for cls in classes_data:
-                c_name = cls.get("name", "")
-                reqs = cls.get("course_requirements", [])
-
-                for req in reqs:
-                    subj = req.get("subject", "")
-                    periods = int(req.get("periods", 0))
-                    allow_consec = req.get("allow_consecutive", False)
-
-                    if subj in consecutive_subjects:
-                        allow_consec = True
-
-                    if not allow_consec:
-                        continue
-
-                    if "自然" in subj or "美勞" in subj or "音樂" in subj or "導師區塊" in subj:
-                        continue
-
-                    num_groups = periods // 2
-                    if num_groups < 1:
-                        continue
-
-                    add_consecutive_constraint(
-                        model, schedule, c_name, subj,
-                        consecutive_groups=num_groups,
-                        days=DAYS, periods_per_day=PERIODS_PER_DAY
-                    )
-                    consecutive_count += 1
-
-            print(f"  [OK] [連堂約束] 共處理 {consecutive_count} 個科目的連堂需求\n")
-
-            engine = SchedulePhase2Engine(
-                model, schedule, class_names, teacher_names,
-                TOTAL_PERIODS, DAYS, PERIODS_PER_DAY,
-                teachers_data=teachers_data,
-                external_penalty_vars=phase2_penalty_vars,
-                room_grade_affinity=room_grade_affinity,
-                room_primary_teacher_map=room_primary_teacher_map,
-                classes_data=classes_data,
-            )
-            engine.build_soft_constraints()
-
-            solver = cp_model.CpSolver()
-            solver.parameters.max_time_in_seconds = 1740.0
-            solver.parameters.num_search_workers = 8
-
-            status = solver.Solve(model)
-            return {
-                "model": model,
-                "schedule": schedule,
-                "solver": solver,
-                "status": status,
-                "phase2_penalty_vars": phase2_penalty_vars,
-                "alternating_class_is_music_odd": alternating_class_is_music_odd,
-                "alternating_group_map": alternating_group_map,
-                "class_pair_group": class_pair_group,
-                "class_teacher_pair": class_teacher_pair,
-                "relax_room_capacity": relax_room_capacity,
-            }
-
-        attempt = _solve_attempt(relax_room_capacity=False)
-        if attempt["status"] == cp_model.INFEASIBLE:
-            print("[WARN] [求解] 第一階段硬限制無解，啟動專科容量軟性降級備援...")
-            attempt = _solve_attempt(relax_room_capacity=True)
+                if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    # Fallback succeeded - mark as degraded
+                    solve_pass = "feasibility_recovery"
+                    degraded = True
+                    # [Task 02] Compute penaltyBreakdown early to build specific degradationReasons
+                    _fb_breakdown = {}
+                    for pv_entry in attempt["phase2_penalty_vars"] or []:
+                        if not isinstance(pv_entry, dict):
+                            continue
+                        rule_id = pv_entry.get("rule_id")
+                        weight = pv_entry.get("weight", 0)
+                        var = pv_entry.get("var")
+                        if not rule_id or var is None:
+                            continue
+                        try:
+                            val = attempt["solver"].Value(var)
+                        except Exception:
+                            continue
+                        if val > 0:
+                            _fb_breakdown[rule_id] = _fb_breakdown.get(rule_id, 0) + (weight * val)
+                    # Build specific degradation reasons from penalty keys
+                    if "natural_shape_fallback" in _fb_breakdown:
+                        degradation_reasons.append("teaching-shape (natural science consecutive) relaxed in fallback mode")
+                    if "art_music_shape_fallback" in _fb_breakdown:
+                        degradation_reasons.append("teaching-shape (art/music consecutive) relaxed in fallback mode")
+                    if "exact_two_alternating_pairing_fallback" in _fb_breakdown:
+                        degradation_reasons.append("exact-two alternating pairing downgraded to near-hard soft")
+                    if "grade12_tuesday_afternoon_life_course_fallback" in _fb_breakdown:
+                        degradation_reasons.append("grade1-2 Tuesday afternoon life-course placement relaxed in fallback mode")
+                    # Fallback safety net: if no specific reason identified, use generic
+                    if not degradation_reasons:
+                        degradation_reasons.append("teaching-shape constraints relaxed in fallback mode")
+                    print("[INFO] [求解] Fallback pass 成功產出可行解（已降級）")
+                # else: Fallback also infeasible — do NOT relax room capacity (R2: room safety must remain hard)
+            else:
+                if not strict_policy.fallback_enabled:
+                    print("[INFO] [求解] Strict pass 無解但 fallback_enabled=false，不執行 fallback")
+                elif fallback_attempted:
+                    print("[INFO] [求解] Fallback 已嘗試過，不再重複執行")
+            # Per YAML §105, §208: physical room safety is a hard constraint that never degrades
 
         model = attempt["model"]
         schedule = attempt["schedule"]
@@ -1165,22 +1728,74 @@ def main():
         class_teacher_pair = attempt["class_teacher_pair"]
         used_soft_capacity_fallback = attempt["relax_room_capacity"]
 
+        # [Task 02] Compute penaltyBreakdown from phase2_penalty_vars
+        # [Blocker 1] Defensive: skip raw CP-SAT expressions, only parse dict metadata
+        # [Task 3.8] Initialize all Stage 3 rule IDs to 0 so they appear even when fully satisfied
+        # [Task 04] Include classroom preference penalty keys per YAML weight_registry
+        penalty_breakdown = {
+            "classroom_grade_affinity": 0,
+            "classroom_primary_teacher_affinity": 0,
+            "grade_morning_first_period_homeroom_day": 0,
+            "morning_two_homeroom_periods_per_day": 0,
+            "grade_co_planning_afternoon_block": 0,
+            "co_planning_subject_teacher_lesson": 0,
+            # [Task 07] New penalty keys for grade1-2 Tuesday life-course and daily subject-teacher minimum
+            "grade12_tuesday_afternoon_life_course_fallback": 0,
+            "daily_subject_teacher_minimum": 0,
+            # [Task 08] Priority scheduling penalty keys per YAML weight_registry
+            "specialty_room_non_preferred_grade": 0,
+            "priority_teacher_placeholder": 0,
+            # [repair_07] Teacher quota overtime — always soft, aggregated from dict metadata
+            "teacher_quota_overtime": 0,
+        }
+        # CRITICAL: solver.Value() crashes with C-level access violation on INFEASIBLE/UNKNOWN
+        # Must guard ALL solver.Value() calls with status check
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            for pv_entry in phase2_penalty_vars or []:
+                if not isinstance(pv_entry, dict):
+                    continue
+
+                rule_id = pv_entry.get("rule_id")
+                weight = pv_entry.get("weight", 0)
+                var = pv_entry.get("var")
+
+                if not rule_id or var is None:
+                    continue
+
+                try:
+                    val = solver.Value(var)
+                except Exception:
+                    continue
+
+                if val > 0:
+                    penalty_breakdown[rule_id] = penalty_breakdown.get(rule_id, 0) + (weight * val)
+
         result = {
             "jobId": job_id,
             "status": solver.StatusName(status),
             "time_seconds": round(solver.WallTime(), 3),
-            "total_penalty": 0,
+            "total_penalty": sum(penalty_breakdown.values()),
             "schedule": [],
-            "message": ""
+            "message": "",
+            # [Task 02] Two-pass metadata
+            "solvePass": solve_pass,
+            "degraded": degraded,
+            "degradationReasons": degradation_reasons,
+            "penaltyBreakdown": penalty_breakdown,
         }
 
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             result["message"] = "成功產出課表"
+            result["solverStatus"] = result["status"]  # OPTIMAL 或 FEASIBLE
             if used_soft_capacity_fallback:
                 result["message"] = "成功產出課表（已啟用專科教室容量軟性降級）"
 
             # ========== [NEW] 輸出 AI 排定與湊班後的特殊專案/抽離課程 ==========
             result["specialCourses"] = []
+
+            # CRITICAL: All solver.Value() calls below must be inside this status guard.
+            # Calling solver.Value() on INFEASIBLE/UNKNOWN causes C-level access violation.
+
             if hasattr(model, "sc_decision_vars"):
                 for sc_entry in model.sc_decision_vars:
                     sc = sc_entry["sc"]
@@ -1235,17 +1850,21 @@ def main():
                         if c not in active_alt_at[key]:
                             active_alt_at[key].append(c)
 
-            # [NEW] 建立 (className, period_index) -> roomName 的對照表
+            # [NEW] 建立 (className, period_index, week) -> (roomId, roomName) 對照表
             assigned_rooms = {}
             if hasattr(model, "classroom_assignments"):
                 for item in model.classroom_assignments:
                     try:
                         if solver.Value(item["var"]) == 1:
-                            assigned_rooms[(item["className"], item["period"])] = item["roomName"]
+                            assigned_rooms[(item["className"], item["period"], item.get("week", "both"))] = {
+                                "classroomId": item.get("roomId", ""),
+                                "classroomName": item.get("roomName", ""),
+                            }
                     except Exception:
                         pass
 
             # -- 主輸出迴圈
+            print("[PHASE] schedule extraction 開始", flush=True)
             for (c, p, t, s), var in schedule.items():
                 if solver.Value(var) != 1:
                     continue
@@ -1262,14 +1881,12 @@ def main():
                 week_entries = []  # 交替課時儲存 (week, subject, teacher_name) 列表
 
                 if is_alt:
-                    # 決定單雙週科目名稱的動態拆分
                     subj_parts = s.split('/')
                     if len(subj_parts) == 2:
                         subj_a, subj_b = subj_parts[0], subj_parts[1]
                     else:
-                        subj_a, subj_b = "音樂", "美勞"  # fallback
+                        subj_a, subj_b = "音樂", "美勞"
 
-                    # 查 is_music_odd 方向
                     bool_val = None
                     if (c, t) in alternating_class_is_music_odd:
                         bool_val = solver.Value(alternating_class_is_music_odd[(c, t)])
@@ -1291,50 +1908,48 @@ def main():
                     }
 
                     if bool_val == 1:
-                        # music-first: 單週音樂、雙週美勞
                         week_entries.append(("odd", subj_a, t))
-                        # 找出另一科目對應的教師
                         art_teacher = class_teacher_pair.get(c, ("", ""))[1] or t
                         week_entries.append(("even", subj_b, art_teacher))
                         pair_fields["pairRole"] = "A"
                         pair_fields["pairDirection"] = "music-first"
                     else:
-                        # art-first: 單週美勞、雙週音樂
                         art_teacher = class_teacher_pair.get(c, ("", ""))[1] or t
                         week_entries.append(("odd", subj_b, art_teacher))
                         week_entries.append(("even", subj_a, t))
                         pair_fields["pairRole"] = "B"
                         pair_fields["pairDirection"] = "art-first"
 
-                classroom_name = assigned_rooms.get((c, p), "")
-
                 if week_entries:
-                    # 交替課：輸出兩筆 week-specific entries
                     for week, wk_subject, wk_teacher in week_entries:
+                        room_info = assigned_rooms.get((c, p, week), {})
                         entry = {
                             "day":         day,
                             "period":      period,
                             "className":   c,
                             "teacherName": wk_teacher,
                             "subject":     wk_subject,
-                            "classroomName": classroom_name,
+                            "classroomId": room_info.get("classroomId", ""),
+                            "classroomName": room_info.get("classroomName", ""),
                             "week":        week,
                         }
                         entry.update(pair_fields)
                         result["schedule"].append(entry)
                 else:
-                    # 一般課程：單筆輸出
+                    room_info = assigned_rooms.get((c, p, "odd")) or assigned_rooms.get((c, p, "even")) or {}
                     entry = {
                         "day":         day,
                         "period":      period,
                         "className":   c,
                         "teacherName": t,
                         "subject":     final_subject if not is_alt else s,
-                        "classroomName": classroom_name,
+                        "classroomId": room_info.get("classroomId", ""),
+                        "classroomName": room_info.get("classroomName", ""),
                     }
                     entry.update(pair_fields)
                     result["schedule"].append(entry)
 
+            print("[PHASE] post-processing 開始", flush=True)
             optimized_schedule, music_art_optimization_skipped = _optimize_music_art_alternating_locally(
                 result["schedule"],
                 classes_data,
@@ -1344,7 +1959,6 @@ def main():
             result["schedule"] = optimized_schedule
 
             # [Task 2/5] Week-specific 音美教室容量後驗檢查
-            # 使用 local optimizer 調整後的最終 week-specific entries，避免檢查口徑落回 main solver 原解。
             ws_check = apply_week_specific_art_capacity_entries(
                 result["schedule"],
                 classes_data,
@@ -1368,9 +1982,12 @@ def main():
             )
             result["weekSpecificConflict"] = result_flags["weekSpecificConflict"]
             result["musicArtOptimizationSkipped"] = music_art_optimization_skipped
-            result["degraded"] = result_flags["degraded"]
-            result["degradeLevel"] = result_flags["degradeLevel"]
+            # [Task 02] Do NOT overwrite result["degraded"] — it was set by two-pass flow
+            # Only merge additional flags that don't conflict:
+            if "degradeLevel" not in result:
+                result["degradeLevel"] = result_flags.get("degradeLevel", "")
 
+            print("[PHASE] validation 開始", flush=True)
             validation_report = _validate_schedule_result(
                 result["schedule"],
                 classes_data,
@@ -1387,17 +2004,24 @@ def main():
                 json.dump(validation_report, vf, ensure_ascii=False, indent=2)
 
             if has_validation_errors:
-                result["status"] = "INVALID"
+                result["status"] = "INVALID_VALIDATION"
+                result["solverStatus"] = "INVALID_VALIDATION"
                 result["message"] = "求解結果未通過硬限制驗證，請檢查 debug_schedule_validation_report.json"
                 result["schedule"] = []
+                result["validationReport"] = validation_report
             elif used_soft_capacity_fallback and validation_report.get("room_overloads"):
                 overload_count = len(validation_report.get("room_overloads") or [])
                 result["message"] = f"成功產出課表（已啟用專科教室容量軟性降級；剩餘 {overload_count} 筆容量警告）"
-
-        elif status == cp_model.INFEASIBLE:
+        # When status is NOT OPTIMAL/FEASIBLE, skip extraction/post-processing/validation
+        # and handle INFEASIBLE/UNKNOWN directly
+        if status == cp_model.INFEASIBLE:
+            result["status"] = "INFEASIBLE"
+            result["solverStatus"] = "INFEASIBLE"
             result["message"] = "無法產出符合條件的課表 (條件矛盾)"
             _write_infeasible_report(data, classes_data, teachers_data, schedule, subject_room_count, subject_demand_count)
         elif status == cp_model.UNKNOWN:
+            result["status"] = "UNKNOWN_TIMEOUT"
+            result["solverStatus"] = "UNKNOWN_TIMEOUT"
             result["message"] = "求解逾時，未找到可接受的可行解"
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -1411,6 +2035,7 @@ def main():
         error_result = {
             "jobId": job_id,
             "status": "ERROR",
+            "solverStatus": "ERROR",
             "time_seconds": 0,
             "total_penalty": 0,
             "schedule": [],

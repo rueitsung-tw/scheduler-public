@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="editor-container">
     <div class="editor-header">
       <h2>🎯 全域預排畫布</h2>
@@ -304,6 +304,17 @@ const isSlotRevertable = (d, p) => {
 // 🔒 直接讀取 timetable 物件的 isLocked 欄位
 const isSlotLocked = (d, p) => getCourse(d, p)?.isLocked === true;
 
+// 工具函式：對齊 SubjectAssignmentForm 的科目比對口徑
+const isSubjectMatch = (reqSub, cellSub) => {
+  if (!reqSub || !cellSub) return false;
+  const cleanReq = String(reqSub).replace(/["']/g, '').trim();
+  const cleanCell = String(cellSub).replace(/["']/g, '').trim();
+  if (cleanReq === cleanCell) return true;
+  const reqParts = cleanReq.split(/[、,,/]/).map(s => s.trim()).filter(Boolean);
+  let cellParts = cleanCell.split(/[、,,/]/).map(s => s.trim()).filter(Boolean);
+  return reqParts.some(r => cellParts.some(t => r.includes(t) || t.includes(r)));
+};
+
 // 🔒 切換單格鎖定，並將結果寫入 timetable 物件持久化至資料庫
 const toggleCellLock = async (day, period) => {
   if (isHomeroomLocked.value) {
@@ -315,6 +326,45 @@ const toggleCellLock = async (day, period) => {
     alert('⚠️ 請先填入具體科目，才能進行鎖定！');
     return;
   }
+
+  // 🛡️ 防呆：檢查鎖定數量是否大於需求節數
+  if (!course.isLocked) {
+    const currentClass = scheduleStore.classes.find(c => c.name === targetClass.value);
+    if (currentClass) {
+      const req = currentClass.course_requirements?.find(r => isSubjectMatch(r.subject, course.subject));
+      const maxPeriods = req ? Number(req.periods) : 0;
+
+      let currentLockedCount = 0;
+      if (currentClass.timetable) {
+        if (Array.isArray(currentClass.timetable)) {
+          for (const day of currentClass.timetable) {
+            if (Array.isArray(day)) {
+              for (const cell of day) {
+                if (cell && isSubjectMatch(cell.subject, course.subject) && cell.isLocked) {
+                  currentLockedCount++;
+                }
+              }
+            }
+          }
+        } else if (typeof currentClass.timetable === 'object') {
+          for (const d of Object.keys(currentClass.timetable)) {
+            for (const p of Object.keys(currentClass.timetable[d] || {})) {
+              const cell = currentClass.timetable[d][p];
+              if (cell && isSubjectMatch(cell.subject, course.subject) && cell.isLocked) {
+                currentLockedCount++;
+              }
+            }
+          }
+        }
+      }
+
+      if (currentLockedCount + 1 > maxPeriods) {
+        alert(`⚠️ 鎖定失敗！【${targetClass.value}】的科目「${course.subject}」需求總節數只有 ${maxPeriods} 節，目前已鎖定 ${currentLockedCount} 節，無法再鎖定更多節數。請先解鎖其他時段，或至排課設定調高需求節數。`);
+        return;
+      }
+    }
+  }
+
   course.isLocked = !course.isLocked;
   scheduleStore.markScheduleDirty();
   await scheduleStore.syncToCloud();

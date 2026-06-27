@@ -96,18 +96,30 @@ def apply_alternating_teacher_anti_collision(
     schedule,
     class_teacher_pair,
     alternating_class_is_music_odd,
+    classes_data=None,
+    ai_settings=None,
 ):
     """
     交替課實際授課教師的單雙週互斥。
 
     schedule 變數只以主教師建模；輸出時會依 is_music_odd 切成主教師/副教師。
     因此副教師必須另外用 week-specific occupancy 防衝堂。
+    同時也要把固定課（week=both）展開進 odd/even bucket，
+    才能攔下「固定課 both + 交替課 odd/even」的真實衝堂。
     """
     teacher_week_slots = defaultdict(list)
 
     for (c_name, period, schedule_teacher, subject), active_var in schedule.items():
         is_alt = "交替" in subject or "/" in subject
         if not is_alt:
+            if schedule_teacher and not _teacher_is_collision_exempt(
+                schedule_teacher,
+                classes_data,
+                ai_settings,
+                schedule,
+            ):
+                teacher_week_slots[(schedule_teacher, period, "odd")].append(active_var)
+                teacher_week_slots[(schedule_teacher, period, "even")].append(active_var)
             continue
 
         music_teacher, art_teacher = class_teacher_pair.get(
@@ -150,10 +162,20 @@ def apply_alternating_teacher_anti_collision(
         model.Add(even_music <= direction_var.Not())
         model.Add(even_music >= active_var - direction_var)
 
-        if music_teacher:
+        if music_teacher and not _teacher_is_collision_exempt(
+            music_teacher,
+            classes_data,
+            ai_settings,
+            schedule,
+        ):
             teacher_week_slots[(music_teacher, period, "odd")].append(odd_music)
             teacher_week_slots[(music_teacher, period, "even")].append(even_music)
-        if art_teacher:
+        if art_teacher and not _teacher_is_collision_exempt(
+            art_teacher,
+            classes_data,
+            ai_settings,
+            schedule,
+        ):
             teacher_week_slots[(art_teacher, period, "odd")].append(odd_art)
             teacher_week_slots[(art_teacher, period, "even")].append(even_art)
 

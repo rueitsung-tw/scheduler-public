@@ -176,6 +176,8 @@ export function expandTimetableCellEntries(className, day, period, cell = {}) {
         week: 'odd',
         subject: cell.oddWeek.subject || cell.subject,
         teacher: cell.oddWeek.teacher || cell.teacher,
+        classroomId: cell.oddWeek.classroomId || cell.classroomId,
+        classroomName: cell.oddWeek.classroomName || cell.classroomName,
       }))
     }
     if (cell.evenWeek) {
@@ -184,6 +186,8 @@ export function expandTimetableCellEntries(className, day, period, cell = {}) {
         week: 'even',
         subject: cell.evenWeek.subject || cell.subject,
         teacher: cell.evenWeek.teacher || cell.teacher,
+        classroomId: cell.evenWeek.classroomId || cell.classroomId,
+        classroomName: cell.evenWeek.classroomName || cell.classroomName,
       }))
     }
     return occurrences
@@ -427,14 +431,18 @@ function buildScheduledEntriesIndex(scheduleEntries) {
   const byTeacherSlotWeek = new Map()
 
   for (const entry of normalizeScheduleEntries(scheduleEntries)) {
-    const slotWeekKey = buildSlotWeekKey(entry.day, entry.period, entry.week)
-    if (!bySlotWeek.has(slotWeekKey)) bySlotWeek.set(slotWeekKey, [])
-    bySlotWeek.get(slotWeekKey).push(entry)
+    const weeks = entry.week === 'both' ? ['odd', 'even'] : [entry.week]
+    for (const week of weeks) {
+      const weekEntry = week === entry.week ? entry : { ...entry, week }
+      const slotWeekKey = buildSlotWeekKey(entry.day, entry.period, week)
+      if (!bySlotWeek.has(slotWeekKey)) bySlotWeek.set(slotWeekKey, [])
+      bySlotWeek.get(slotWeekKey).push(weekEntry)
 
-    for (const teacher of entry.teacherNames || splitTeacherNames(entry.teacherName)) {
-      const teacherKey = `${teacher}|${slotWeekKey}`
-      if (!byTeacherSlotWeek.has(teacherKey)) byTeacherSlotWeek.set(teacherKey, [])
-      byTeacherSlotWeek.get(teacherKey).push(entry)
+      for (const teacher of weekEntry.teacherNames || splitTeacherNames(weekEntry.teacherName)) {
+        const teacherKey = `${teacher}|${slotWeekKey}`
+        if (!byTeacherSlotWeek.has(teacherKey)) byTeacherSlotWeek.set(teacherKey, [])
+        byTeacherSlotWeek.get(teacherKey).push(weekEntry)
+      }
     }
   }
 
@@ -465,11 +473,14 @@ function analyzeClassTimetable(classData, context) {
       const weekBuckets = new Map()
       for (const entry of entries) {
         const weekKey = normalizeWeekTag(entry.week)
-        if (!weekBuckets.has(weekKey)) weekBuckets.set(weekKey, [])
-        weekBuckets.get(weekKey).push(entry)
         const subject = normalizeSubject(entry.subject)
         if (subject) {
           scheduledCountMap.set(subject, (scheduledCountMap.get(subject) || 0) + getOccurrenceWeight(entry.week))
+        }
+        const conflictWeeks = weekKey === 'both' ? ['odd', 'even'] : [weekKey]
+        for (const conflictWeek of conflictWeeks) {
+          if (!weekBuckets.has(conflictWeek)) weekBuckets.set(conflictWeek, [])
+          weekBuckets.get(conflictWeek).push(conflictWeek === weekKey ? entry : { ...entry, week: conflictWeek })
         }
       }
 

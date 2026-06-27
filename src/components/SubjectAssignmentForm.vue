@@ -598,6 +598,8 @@ const submitBatch = async () => {
   const sName = assignment.value.subject.trim();
   const newPeriods = Number(assignment.value.periods);
   let updatedCount = 0;
+  let skippedCount = 0;
+  let diagnosticLogContent = '';
 
   const targetClassNames = selectedTargets.value.map(code => {
     const grade = code.charAt(0);
@@ -626,6 +628,37 @@ const submitBatch = async () => {
       let reqIndex = c.course_requirements?.findIndex(r => r.subject && isSubjectMatch(r.subject, sName));
 
       if (isTarget) {
+        // 🛡️ 防呆：檢查 timetable 中已鎖定的節數是否大於 newPeriods
+        let lockedCount = 0;
+        if (c.timetable) {
+          if (Array.isArray(c.timetable)) {
+            for (const day of c.timetable) {
+              if (Array.isArray(day)) {
+                for (const cell of day) {
+                  if (cell && cell.isLocked && isSubjectMatch(cell.subject, sName)) {
+                    lockedCount++;
+                  }
+                }
+              }
+            }
+          } else if (typeof c.timetable === 'object') {
+            for (const d of Object.keys(c.timetable)) {
+              for (const p of Object.keys(c.timetable[d] || {})) {
+                const cell = c.timetable[d][p];
+                if (cell && cell.isLocked && isSubjectMatch(cell.subject, sName)) {
+                  lockedCount++;
+                }
+              }
+            }
+          }
+        }
+
+        if (lockedCount > newPeriods) {
+          skippedCount++;
+          diagnosticLogContent += `   ⚠️ 拒絕更新 ${c.name} - ${sName}：此科目在課表上已被鎖定 ${lockedCount} 節，不可將需求節數下修至 ${newPeriods} 節。請先解鎖課表！\n\n`;
+          return;
+        }
+
         if (reqIndex !== -1 && reqIndex !== undefined) {
            const newReqs = [...c.course_requirements];
            newReqs[reqIndex] = { ...newReqs[reqIndex], teacher: tName, periods: newPeriods };

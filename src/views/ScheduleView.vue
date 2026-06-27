@@ -1614,6 +1614,7 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
       targetClass.timetable[day][period] = {
         subject: item.subject,
         teacher: item.teacherName,
+        ...(item.classroomId && { classroomId: item.classroomId }),
         ...(item.classroomName && { classroomName: item.classroomName }),
         ...(item.pairGroupId && { pairGroupId: item.pairGroupId }),
         ...(item.pairRole && { pairRole: item.pairRole }),
@@ -1628,18 +1629,25 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
         const evenItem = items.find(i => i.week === 'even');
 
         if (oddItem && evenItem) {
+          const sameRoom =
+            (oddItem.classroomId && evenItem.classroomId && oddItem.classroomId === evenItem.classroomId) ||
+            (!oddItem.classroomId && !evenItem.classroomId && oddItem.classroomName && oddItem.classroomName === evenItem.classroomName);
           targetClass.timetable[day][period] = {
             subject: `${oddItem.subject}(單)/${evenItem.subject}(雙)`,
             teacher: `${oddItem.teacherName || ''} / ${evenItem.teacherName || ''}`,
             isAlternating: true,
+            ...(sameRoom && oddItem.classroomId && { classroomId: oddItem.classroomId }),
+            ...(sameRoom && oddItem.classroomName && { classroomName: oddItem.classroomName }),
             oddWeek: {
               subject: oddItem.subject,
               teacher: oddItem.teacherName || '',
+              ...(oddItem.classroomId && { classroomId: oddItem.classroomId }),
               ...(oddItem.classroomName && { classroomName: oddItem.classroomName }),
             },
             evenWeek: {
               subject: evenItem.subject,
               teacher: evenItem.teacherName || '',
+              ...(evenItem.classroomId && { classroomId: evenItem.classroomId }),
               ...(evenItem.classroomName && { classroomName: evenItem.classroomName }),
             }
           };
@@ -1649,6 +1657,7 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
           targetClass.timetable[day][period] = {
             subject: last.subject,
             teacher: last.teacherName,
+            ...(last.classroomId && { classroomId: last.classroomId }),
             ...(last.classroomName && { classroomName: last.classroomName }),
           };
         }
@@ -1669,14 +1678,18 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
             subject: '音樂(單)/美勞(雙)',
             teacher: `${musicTeacher} / ${artTeacher}`,
             isAlternating: true,
+            ...(musicItem?.classroomId && artItem?.classroomId && musicItem.classroomId === artItem.classroomId && { classroomId: musicItem.classroomId }),
+            ...(musicItem?.classroomName && artItem?.classroomName && musicItem.classroomName === artItem.classroomName && { classroomName: musicItem.classroomName }),
             oddWeek: {
               subject: '音樂',
               teacher: musicTeacher,
+              ...(musicItem?.classroomId && { classroomId: musicItem.classroomId }),
               ...(musicItem?.classroomName && { classroomName: musicItem.classroomName }),
             },
             evenWeek: {
               subject: '美勞',
               teacher: artTeacher,
+              ...(artItem?.classroomId && { classroomId: artItem.classroomId }),
               ...(artItem?.classroomName && { classroomName: artItem.classroomName }),
             }
           };
