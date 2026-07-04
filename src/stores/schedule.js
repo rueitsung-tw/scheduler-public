@@ -3,10 +3,14 @@ import { ref, computed } from 'vue'
 import { computeExpectedClassNames, computeClassDiff, checkClassHasData, createMinimalClass } from '../composables/useClassSync'
 import { buildScheduleAiReport, flattenClassTimetablesToEntries } from '../utils/scheduleAiReport'
 import { sanitizeRequirementsByGrade } from '../utils/gradeSubjectUtils'
+import { normalizeCoPlanningSettings } from '../utils/coPlanningSettings'
 
 export const useScheduleStore = defineStore('simpleSchedule', () => {
 
-  const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:3000/api`;
+  // 優先使用相對路徑走 Vite proxy；僅在生產環境 (非 localhost) 時才 fallback 到絕對 URL
+  const API_BASE = import.meta.env.VITE_API_BASE_URL && !import.meta.env.DEV
+    ? import.meta.env.VITE_API_BASE_URL
+    : '/api';
 
   /**
    * 从班级名称提取年级数字（如 "3年1班" → 3）
@@ -15,6 +19,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     const match = String(className).match(/(\d+)\s*(年|grade)/i) || String(className).match(/^(\d)/);
     return match ? parseInt(match[1], 10) : 1;
   };
+
 
   /**
    * 🔧 教室科目名稱 normalization — 統一為 canonical key
@@ -165,6 +170,14 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       '綜合活動': [3, 4, 5, 6],
       '科技-資訊': [3, 4, 5, 6],
       '語文-英語': [1, 2, 3, 4, 5, 6]
+    },
+    // 🆕 [2026-06-28] 五六年級共備設定
+    coPlanningSettings: {
+      enabled: false,
+      grades: [5, 6],
+      mode: "auto",
+      candidateBlocks: [],
+      manualBlocks: { "5": null, "6": null }
     }
   });
 
@@ -330,6 +343,11 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         if (Object.keys(migrated).length > 0) {
           schoolInfo.value.subjectGradeRules = migrated;
         }
+      }
+
+      // [2026-06-28] Normalize coPlanningSettings from DB using central normalizer
+      if (data.schoolInfo) {
+        schoolInfo.value.coPlanningSettings = normalizeCoPlanningSettings(data.schoolInfo.coPlanningSettings);
       }
 
       // 🌟 關鍵修復：從資料庫讀取教師資料時，強制將 JSON 字串解析回陣列
@@ -1392,7 +1410,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         '綜合活動': [3, 4, 5, 6],
         '科技-資訊': [3, 4, 5, 6],
         '語文-英語': [1, 2, 3, 4, 5, 6]
-      }
+      },
+      // [2026-06-28] Use normalizer to guarantee consistent coPlanningSettings shape
+      coPlanningSettings: normalizeCoPlanningSettings(null),
     };
     teachers.value = [];
     classes.value = [];

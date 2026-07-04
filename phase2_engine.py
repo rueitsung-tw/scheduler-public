@@ -463,7 +463,7 @@ class SchedulePhase2Engine:
             print(f"  - {subj}: 需求點數 {demand}, 負荷率 {ratio:.2%} ({status})")
 
         # ==========================================
-        # [SOFT] Task 3.3~3.7: 導師時段與共備軟規則
+        # [SOFT] Task 3.3~3.9: 導師時段與共備軟規則
         # ==========================================
         print("[SOFT] 啟動第 3 階段軟規則 (導師時段 + 共備)...")
         try:
@@ -472,6 +472,8 @@ class SchedulePhase2Engine:
                 build_morning_two_homeroom_periods_penalty,
                 build_co_planning_afternoon_block_penalty,
                 build_co_planning_subject_lesson_penalty,
+                build_homeroom_daily_max_periods_penalty,
+                build_manual_co_planning_penalty,
             )
 
             # Task 3.3: 3-6 年級每週一天第一節導師課偏好
@@ -503,6 +505,21 @@ class SchedulePhase2Engine:
             )
             self.penalty_vars.extend(co_plan_subject_penalty)
             print(f"  [Task 3.7] co_planning_subject_teacher_lesson: {len(co_plan_subject_penalty)} penalty terms")
+
+            # Task 3.8: 導師每日最大節次軟懲罰 (soft)
+            hr_daily_max_penalty = build_homeroom_daily_max_periods_penalty(
+                self.model, self.schedule, self.classes_data
+            )
+            self.penalty_vars.extend(hr_daily_max_penalty)
+            print(f"  [Task 3.8] homeroom_daily_max_periods: {len(hr_daily_max_penalty)} penalty terms")
+
+            # Task 3.9: Manual Co-Planning Block Penalty (near-hard soft)
+            manual_co_plan_penalty = build_manual_co_planning_penalty(
+                self.model, self.schedule, self.classes_data,
+                school_info=getattr(self, 'school_info', None)
+            )
+            self.penalty_vars.extend(manual_co_plan_penalty)
+            print(f"  [Task 3.9] manual_co_planning_subject_teacher_lesson: {len(manual_co_plan_penalty)} penalty terms")
 
         except Exception as e:
             print(f"  [WARN] 第 3 階段軟規則建立失敗 (不影響主流程): {e}")

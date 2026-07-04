@@ -333,7 +333,7 @@ const toggleCellLock = async (day, period) => {
     if (currentClass) {
       const req = currentClass.course_requirements?.find(r => isSubjectMatch(r.subject, course.subject));
       const maxPeriods = req ? Number(req.periods) : 0;
-
+      
       let currentLockedCount = 0;
       if (currentClass.timetable) {
         if (Array.isArray(currentClass.timetable)) {
@@ -357,7 +357,7 @@ const toggleCellLock = async (day, period) => {
           }
         }
       }
-
+      
       if (currentLockedCount + 1 > maxPeriods) {
         alert(`⚠️ 鎖定失敗！【${targetClass.value}】的科目「${course.subject}」需求總節數只有 ${maxPeriods} 節，目前已鎖定 ${currentLockedCount} 節，無法再鎖定更多節數。請先解鎖其他時段，或至排課設定調高需求節數。`);
         return;

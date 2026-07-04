@@ -313,6 +313,18 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
       4. AI自動湊班 (isAutoClass=True)
       5. 班級目標科目 (targetSubject) 同步排課
       6. 特教教師衝堂防護與佔用
+
+    [SEMANTIC FIX 2026-06-30]
+    學習中心抽離事件語意修正：
+    多筆 pullout 記錄（不同 targetSubject）可能代表同一個抽離事件。
+    例如：4165(國語)+4166(國語)+4167(數學)+4168(數學) 都是「3年1/3/10班 → 學習中心」的同一事件。
+
+    修復策略：
+    - 引入 event_key = (name, teacher, mode, classes_key) 作為事件層級分組（不含 subject）
+    - 同一事件內的 pullout 共用同一組時段決策變數 (event_vars)
+    - 教師佔用只計算事件層級（一次），而非每筆 pullout 各算一次
+    - 每筆 pullout 的 sc_decision_vars 仍獨立記錄（供輸出使用），但 vars 指向 event_vars
+    - lockedSlots 取同一事件內所有 pullout 的交集時段
     """
     from collections import defaultdict
     import re
@@ -351,111 +363,174 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
             return d != 2
         return True
 
-    # 3. 按照群組特徵進行分組，確保同一組的班級集合在不同節次保持一致 (isAutoClass = True 時)
-    groups = defaultdict(list)
+    # ============================================================
+    # [SEMANTIC FIX v2] 事件層級分組 + lockedSlot 次分組
+    #
+    # 第一層：event_key = (name, teacher, mode, classes_key)
+    #   同一事件內的 pullout 共享教師與班級池，教師佔用只算一次
+    #
+    # 第二層：按 lockedSlot 簽名次分組
+    #   同一事件內的 pullout 可能代表不同科目的不同抽離時段。
+    #   例如：4165/4166/4167 (day2p2/day4p3) vs 4168 (day3p1)
+    #   這些是同一學習中心事件的不同時段，不能取交集（會為空）
+    #
+    # 次分組策略：
+    #   - 將具有相同 lockedSlot 簽名的 pullout 聚在一起
+    #   - 每個次分組建立一組 event_vars
+    #   - 同一事件的不同次分組之間，教師佔用互相排斥（不能同時進行）
+    # ============================================================
+    events = defaultdict(list)
     for sc in special_courses:
         name = sc.get("name", "")
-        subj = sc.get("targetSubject", "")
         teacher = sc.get("teacher", "")
         is_auto_class = sc.get("isAutoClass", False)
 
         if is_auto_class:
             cfg = sc.get("autoClassConfig") or {}
-            grades = cfg.get("grades") or []
-            grades_key = frozenset(grades)
+            grades = frozenset(cfg.get("grades") or [])
             count = cfg.get("count", 1)
-            group_key = (name, subj, teacher, "auto", grades_key, count)
+            event_key = (name, teacher, "auto", grades, count)
         else:
-            classes_list = sc.get("targetClasses") or []
-            classes_key = frozenset(classes_list)
-            group_key = (name, subj, teacher, "manual", classes_key, 0)
+            classes_key = frozenset(sc.get("targetClasses") or [])
+            event_key = (name, teacher, "manual", classes_key)
 
-        groups[group_key].append(sc)
+        events[event_key].append(sc)
 
     teacher_p_sc_vars = defaultdict(list)
     sc_decision_vars = []
 
-    # 4. 對每個群組進行建模
-    for group_key, sc_list in groups.items():
-        name, subj, teacher, mode, extra_key, count = group_key
+    # 3. 對每個事件進行建模
+    for event_key, event_sc_list in events.items():
+        name, teacher, mode, *rest = event_key
 
-        select_c_vars = {}  # class_name -> BoolVar
-
+        # 3a. 決定 classes_in_pool 與 select_c_vars（事件層級）
         if mode == "auto":
-            grades_pool = extra_key
+            grades_pool = rest[0]
+            count = rest[1] if len(rest) > 1 else 1
             classes_in_pool = [c for c, g in class_grade_map.items() if g in grades_pool]
-            # 建立選擇變數
+            select_c_vars = {}
             for c in classes_in_pool:
-                select_c_vars[c] = model.NewBoolVar(f"select_c_{name}_{subj}_{teacher}_{c}".replace(" ", "_").replace("-", "_"))
-            # 強制選擇 count 個班級
+                select_c_vars[c] = model.NewBoolVar(
+                    f"select_c_{name}_{teacher}_{c}".replace(" ", "_").replace("-", "_")
+                )
             if select_c_vars:
                 model.Add(sum(select_c_vars.values()) == count)
         else:
-            classes_in_pool = list(extra_key)
-            for c in classes_in_pool:
-                select_c_vars[c] = 1  # 固定為 1
+            classes_in_pool = list(rest[0])
+            select_c_vars = {c: 1 for c in classes_in_pool}
 
-        # 4b. 針對該群組的每個個別特殊課程進行時段排定與約束建模
-        for idx, sc in enumerate(sc_list):
-            sc_id = sc.get("id")
+        # 3b. [SEMANTIC FIX v2] 按 lockedSlot 簽名次分組
+        # 將具有相同 lockedSlot 配置的 pullout 聚在一起
+        slot_signature_groups = defaultdict(list)
+        for sc in event_sc_list:
             is_auto_time = sc.get("isAutoTime", False)
             locked_slots = sc.get("lockedSlots", [])
+            if is_auto_time or not locked_slots:
+                sig = ("auto",)
+            else:
+                sig = frozenset((s.get("day", 1), s.get("period", 1)) for s in locked_slots)
+            slot_signature_groups[sig].append(sc)
 
-            # 建立時段決策變數：sc_vars[p] = 1 代表此特殊課程排在時段 p
-            sc_vars = [model.NewBoolVar(f"sc_at_{sc_id}_p{p}") for p in range(TOTAL_PERIODS)]
-            model.Add(sum(sc_vars) == 1)
+        # 3c. 為每個次分組建立 event_vars
+        event_id_parts = []
+        for sc in event_sc_list:
+            event_id_parts.append(str(sc.get("id", "")))
+        event_id_tag = "_".join(sorted(event_id_parts))
 
-            # 儲存此變數結構以便後續主程式讀取與輸出
-            sc_decision_vars.append({
-                "sc": sc,
-                "vars": sc_vars,
-                "classes_pool": classes_in_pool,
-                "select_vars": select_c_vars,
-                "mode": mode
-            })
+        sub_event_vars_list = []
+        sub_idx = 0
+        for sig, sub_sc_list in slot_signature_groups.items():
+            sub_tag = f"{event_id_tag}_s{sub_idx}"
+            sub_event_vars = [
+                model.NewBoolVar(f"sc_event_{sub_tag}_p{p}")
+                for p in range(TOTAL_PERIODS)
+            ]
+            model.Add(sum(sub_event_vars) == 1)
+            sub_event_vars_list.append((sig, sub_sc_list, sub_event_vars))
 
-            # 關聯特教教師與此課程時段變數，用於限制特教教師不排課與防衝堂
-            if teacher:
-                for p in range(TOTAL_PERIODS):
-                    teacher_p_sc_vars[(teacher, p)].append(sc_vars[p])
+            # 3d. 計算此次分組的 allowed periods
+            sub_allowed = set(range(TOTAL_PERIODS))
+            for sc in sub_sc_list:
+                is_auto_time = sc.get("isAutoTime", False)
+                locked_slots = sc.get("lockedSlots", [])
+                if not is_auto_time and locked_slots:
+                    allowed = set()
+                    for slot in locked_slots:
+                        d = int(slot.get("day", 1))
+                        pr = int(slot.get("period", 1))
+                        p_lock = (d - 1) * PERIODS_PER_DAY + (pr - 1)
+                        if 0 <= p_lock < TOTAL_PERIODS:
+                            allowed.add(p_lock)
+                    sub_allowed &= allowed
 
-            # 4c. 時段限制 (Teachable Periods & Locked Slots)
+            # 3e. 下午禁排過濾
             for p in range(TOTAL_PERIODS):
                 for c in classes_in_pool:
                     grade = class_grade_map.get(c, 1)
                     if not is_period_allowed_for_grade(grade, p):
                         if mode == "auto":
-                            model.Add(sc_vars[p] + select_c_vars[c] <= 1)
+                            model.Add(sub_event_vars[p] + select_c_vars[c] <= 1)
                         else:
-                            model.Add(sc_vars[p] == 0)
+                            model.Add(sub_event_vars[p] == 0)
 
-            # 手動指定時段 (isAutoTime = False)
-            if not is_auto_time and locked_slots:
-                slot = locked_slots[0]
-                d = int(slot.get("day", 1))
-                pr = int(slot.get("period", 1))
-                p_lock = (d - 1) * PERIODS_PER_DAY + (pr - 1)
-                if 0 <= p_lock < TOTAL_PERIODS:
-                    model.Add(sc_vars[p_lock] == 1)
-
-            # 4d. 同步排課約束：若特殊課程在時段 p 進行 (sc_vars[p] = 1) 且班級 c 被選中 (select_c = 1)，
-            # 則班級 c 必須在時段 p 排定該目標科目 (targetSubject)
-            if subj:
+            # 3f. 應用 lockedSlots 約束
+            if len(sub_allowed) == 1:
+                p_lock = next(iter(sub_allowed))
+                model.Add(sub_event_vars[p_lock] == 1)
+            elif len(sub_allowed) > 1:
                 for p in range(TOTAL_PERIODS):
-                    for c in classes_in_pool:
-                        class_p_subj_vars = [var for (sch_c, sch_p, sch_t, sch_s), var in schedule.items()
-                                             if sch_c == c and sch_p == p and sch_s == subj]
-                        if not class_p_subj_vars:
-                            continue
+                    if p not in sub_allowed:
+                        model.Add(sub_event_vars[p] == 0)
 
-                        if mode == "auto":
-                            model.Add(sum(class_p_subj_vars) >= sc_vars[p] + select_c_vars[c] - 1)
-                        else:
-                            model.Add(sum(class_p_subj_vars) >= sc_vars[p])
+            sub_idx += 1
 
-    # 5. 特教教師衝堂防護與常規配課衝突限制
+        # 3g. [SEMANTIC FIX] 教師佔用：同一事件的所有次分組共用教師佔用
+        # 但每個次分組在不同時段，所以不會互相衝突
+        if teacher:
+            for sig, sub_sc_list, sub_event_vars in sub_event_vars_list:
+                for p in range(TOTAL_PERIODS):
+                    teacher_p_sc_vars[(teacher, p)].append(sub_event_vars[p])
+
+        # 3h. 為每個 pullout 記錄 sc_decision_vars
+        for sig, sub_sc_list, sub_event_vars in sub_event_vars_list:
+            for sc in sub_sc_list:
+                sc_id = sc.get("id")
+                subj = sc.get("targetSubject", "")
+
+                sc_decision_vars.append({
+                    "sc": sc,
+                    "vars": sub_event_vars,  # [SEMANTIC FIX] 指向次分組 vars
+                    "classes_pool": classes_in_pool,
+                    "select_vars": select_c_vars,
+                    "mode": mode
+                })
+
+                # 3i. 同步排課約束
+                if subj:
+                    for p in range(TOTAL_PERIODS):
+                        for c in classes_in_pool:
+                            class_p_subj_vars = [
+                                var for (sch_c, sch_p, sch_t, sch_s), var in schedule.items()
+                                if sch_c == c and sch_p == p and sch_s == subj
+                            ]
+                            if not class_p_subj_vars:
+                                continue
+
+                            if mode == "auto":
+                                model.Add(
+                                    sum(class_p_subj_vars) >= sub_event_vars[p] + select_c_vars[c] - 1
+                                )
+                            else:
+                                model.Add(sum(class_p_subj_vars) >= sub_event_vars[p])
+
+    # 4. 特教教師衝堂防護與常規配課衝突限制
+    # [SEMANTIC FIX] 因為 teacher_p_sc_vars 現在是事件層級，
+    # 同一抽離事件只貢獻一個變數，不會被重複計算
     for (teacher, p), sc_vars_at_p in teacher_p_sc_vars.items():
-        regular_vars = [var for (c, per, t, s), var in schedule.items() if t == teacher and per == p]
+        regular_vars = [
+            var for (c, per, t, s), var in schedule.items()
+            if t == teacher and per == p
+        ]
         model.Add(sum(regular_vars) + sum(sc_vars_at_p) <= 1)
 
     # 把 sc_decision_vars 暫存到 model 中，方便主程式存取

@@ -470,11 +470,11 @@ def _validate_schedule_result(
 
 def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
     """Return True when hard errors exist.
-
+    
     unassigned_special_rooms is always a hard error because:
     - PE (體育) is already excluded in _validate_schedule_result (capacity-type space)
     - Other subjects with physical classrooms MUST have classroomId assigned
-    - If a subject has no physical classrooms but only classroomLimits, it should not
+    - If a subject has no physical classrooms but only classroomLimits, it should not 
       appear in unassigned_special_rooms (handled by _validate_schedule_result filtering)
     """
     if not isinstance(validation_report, dict):
@@ -1191,7 +1191,7 @@ def main():
     # 前處理（grade修正 / ghost art清理 / homeroom合併 / arts拆分）
     # ==========================================
     subject_grade_rules = schoolInfo.get("subjectGradeRules", {}) or {}
-
+    
     classes_data, _metadata = preprocess_classes(
         classes_data,
         ai_settings,
@@ -1241,7 +1241,7 @@ def main():
                             s = cell.get("subject")
                             if s:
                                 lock_counts_by_subj[s] = lock_counts_by_subj.get(s, 0) + 1
-
+                        
         reqs_dict = {r.get("subject", ""): int(r.get("periods", 0)) for r in reqs}
         trace_item = {
             "className": cls.get("name", ""),
@@ -1279,7 +1279,7 @@ def main():
 
     # 將 classLoadTrace 寫入 metadata，供後端分析使用
     _metadata["classLoadTrace"] = class_load_trace
-
+    
     if invalid_classes:
         # 輸入超載：不進 solver，直接回傳 INVALID_INPUT
         # 🔧 修復 B (RC-CONF-01 輔因)：附加 gradeCapacityMap 過渡方案
@@ -1306,7 +1306,7 @@ def main():
                 print(f"  - {ic['className']}: 總節數 {ic['totalPeriods']} > 容量 {ic['capacity']} (超限 {ic['periodExcess']})")
             elif ic.get("validationError") == "INVALID_INPUT_LOCK_CONSERVATION":
                 print(f"  - {ic['className']}: {ic['conservationError']}")
-
+        
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         sys.exit(0)
@@ -1675,13 +1675,13 @@ def main():
                 fallback_attempted = True
                 # Run fallback pass with FEASIBILITY_RECOVERY mode
                 attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.FEASIBILITY_RECOVERY)
+                _fb_breakdown = {}
 
                 if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     # Fallback succeeded - mark as degraded
                     solve_pass = "feasibility_recovery"
                     degraded = True
                     # [Task 02] Compute penaltyBreakdown early to build specific degradationReasons
-                    _fb_breakdown = {}
                     for pv_entry in attempt["phase2_penalty_vars"] or []:
                         if not isinstance(pv_entry, dict):
                             continue
@@ -1709,13 +1709,26 @@ def main():
                     if not degradation_reasons:
                         degradation_reasons.append("teaching-shape constraints relaxed in fallback mode")
                     print("[INFO] [求解] Fallback pass 成功產出可行解（已降級）")
-                # else: Fallback also infeasible — do NOT relax room capacity (R2: room safety must remain hard)
+                if "classroom_capacity_overload" in _fb_breakdown and _fb_breakdown["classroom_capacity_overload"] > 0:
+                    degradation_reasons.append("specialty room capacity relaxed to soft penalty in fallback mode")
+                # else: Fallback also infeasible — try soft room capacity as last resort
+                if attempt["status"] in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID):
+                    print("[WARN] [求解] FEASIBILITY_RECOVERY 仍無解，啟動 Soft Room Capacity 最終回退...")
+                    soft_room_attempt = _solve_attempt(relax_room_capacity=True, solve_mode=SolveMode.FEASIBILITY_RECOVERY)
+                    if soft_room_attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                        attempt = soft_room_attempt
+                        solve_pass = "soft_room_capacity_recovery"
+                        degraded = True
+                        if not degradation_reasons:
+                            degradation_reasons.append("specialty room capacity relaxed to soft penalty")
+                        print("[INFO] [求解] Soft Room Capacity 回退成功產出可行解（已降級）")
             else:
                 if not strict_policy.fallback_enabled:
                     print("[INFO] [求解] Strict pass 無解但 fallback_enabled=false，不執行 fallback")
                 elif fallback_attempted:
                     print("[INFO] [求解] Fallback 已嘗試過，不再重複執行")
             # Per YAML §105, §208: physical room safety is a hard constraint that never degrades
+            # Exception: when manual_locks create unsolvable pressure, soft capacity prevents INFEASIBLE
 
         model = attempt["model"]
         schedule = attempt["schedule"]

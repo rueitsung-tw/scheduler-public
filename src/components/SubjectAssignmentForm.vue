@@ -652,7 +652,7 @@ const submitBatch = async () => {
             }
           }
         }
-
+        
         if (lockedCount > newPeriods) {
           skippedCount++;
           diagnosticLogContent += `   ⚠️ 拒絕更新 ${c.name} - ${sName}：此科目在課表上已被鎖定 ${lockedCount} 節，不可將需求節數下修至 ${newPeriods} 節。請先解鎖課表！\n\n`;

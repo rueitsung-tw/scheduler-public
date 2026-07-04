@@ -24,15 +24,24 @@
     "preprocessor.py",
     "prisma.config.js",
     "prisma.config.ts",
+    "requirements.txt",
+    "scheduler_policy.py",
     "public-repo.manifest.json",
     "scripts/public-repo-sync.mjs",
     "server.js",
+    "repair_agent.py",
     "solver.py",
     "terminal_sanitizer.py",
     "config.py",
     "utils.py",
     "vite.config.js",
-    "vitest.config.js"
+    "vitest.config.js",
+    "constraints/__init__.py",
+    "constraints/base_rules.py",
+    "constraints/class_rules.py",
+    "constraints/special_rules.py",
+    "constraints/teacher_rules.py",
+    "constraints/utils.py"
   ],
   "includeDocFiles": [
     "docs/DataDictionary.md",
@@ -66,7 +75,11 @@
     "dist",
     "node_modules",
     "scratch",
-    "venv"
+    "smoke_evidence",
+    "venv",
+    ".clinerules",
+    ".codebase-memory",
+    ".githooks"
   ],
   "ignoredPatterns": [
     ".env",
@@ -109,7 +122,6 @@
     "output*.json",
     "query_classrooms.py",
     "quick_test_solver.py",
-    "repair_agent.py",
     "scratch_*",
     "solver_log.txt",
     "solver_test_*_backup.py",
@@ -118,7 +130,11 @@
     "verify_periods.py",
     "_2TY69~T",
     "_GW3V8~S.MD",
-    "_P35DO~2"
+    "_P35DO~2",
+    ".cbmignore",
+    "payload_sc",
+    "*readonly-copy",
+    "*.r5-backup"
   ],
   "ignoredPaths": [
     "prisma/cleanup_db.cjs",

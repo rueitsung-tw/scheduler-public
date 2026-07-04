@@ -252,13 +252,13 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
     導師科目自動區塊化：
     若啟用此功能，將所有 defaultTeacher == 'homeroom' 且非生活、非游泳、非體育的導師自授科目，
     全部合併壓縮為名為「導師區塊」的單一條目，以減少演算法約束負擔並將排課權交還給導師。
-
+    
     Invariant: homeroom blockization 只能「重組」不能「增量」。
     前後總節數必須一致，若不一致則標記 INVALID_INPUT_CLASS_LOAD。
     """
     if ai_settings is None:
         ai_settings = {}
-
+    
     block_enabled = ai_settings.get("homeroomBlockizationEnabled", False)
     if not block_enabled:
         # 未啟用時，執行原有的 1-2 年級基本導師區塊合併
@@ -266,25 +266,25 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
         return
 
     reqs = cls.get("course_requirements", [])
-
+    
     # 📊 Invariant trace：記錄原始總節數
     raw_total_periods = sum(float(r.get("periods", 0)) for r in reqs)
-
+    
     homeroom_subs_to_block = []
     exempt_homeroom_subs = []
     other_reqs = []
-
+    
     for req in reqs:
         subj = req.get("subject", "")
         default_t = req.get("defaultTeacher", "")
         if subj == "導師區塊":
             other_reqs.append(req)
             continue
-
+        
         # 判定是否為導師自授科目，並排除特規科目
         is_homeroom_sub = (default_t == "homeroom")
         is_exempt = "生活" in subj or "游泳" in subj or "體育" in subj
-
+        
         if is_homeroom_sub and not is_exempt:
             homeroom_subs_to_block.append(req)
         elif is_homeroom_sub and is_exempt:
@@ -295,11 +295,11 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
 
     existing_hr = next((r for r in other_reqs if r.get("subject") == "導師區塊"), None)
     existing_hr_periods = float(existing_hr.get("periods", 0)) if existing_hr else 0
-
+            
     if homeroom_subs_to_block:
         # 1. 累加節數
         total_blocked_periods = sum(float(r.get("periods", 0)) for r in homeroom_subs_to_block)
-
+        
         # 2. 獲取導師姓名
         teacher_name = (cls.get("homeroom_teacher") or "").strip()
         if not teacher_name:
@@ -308,7 +308,7 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
                 if tn:
                     teacher_name = tn
                     break
-
+                
         # 3. 合併至既有的「導師區塊」或新增一筆
         if existing_hr:
             existing_hr["periods"] = float(existing_hr.get("periods", 0)) + total_blocked_periods
@@ -323,7 +323,7 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
                 "allow_consecutive": True
             }
             other_reqs.insert(0, merged)
-
+            
         cls["course_requirements"] = other_reqs
         print(f"  [LINK] [Homeroom Blockization] {cls.get('name', '')}: 已合併 {len(homeroom_subs_to_block)} 個導師科目，共 {total_blocked_periods} 節課至「導師區塊」")
     elif not existing_hr and not exempt_homeroom_subs:
@@ -331,7 +331,7 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
 
     # 📊 Invariant trace：記錄最終總節數並驗證
     final_total_periods = sum(float(r.get("periods", 0)) for r in cls.get("course_requirements", []))
-
+    
     if metadata is not None and (homeroom_subs_to_block or existing_hr or exempt_homeroom_subs):
         trace_entry = {
             "className": cls.get("name", ""),
@@ -371,13 +371,13 @@ def _homeroom_blockization(cls, ai_settings, metadata=None):
                 else "existing_homeroom_block_only"
             ),
         }
-
+        
         # 🛡️ Invariant 檢查：若總節數增加，標記為 INVALID_INPUT_CLASS_LOAD
         if final_total_periods > raw_total_periods + 0.01:  # 容許浮點誤差
             trace_entry["validationError"] = "INVALID_INPUT_CLASS_LOAD"
             trace_entry["periodIncrease"] = round(final_total_periods - raw_total_periods, 2)
             print(f"  [ERROR] [Homeroom Blockization] {cls.get('name', '')}: 總節數從 {raw_total_periods} 增加到 {final_total_periods}！標記 INVALID_INPUT_CLASS_LOAD")
-
+        
         metadata.setdefault("homeroomBlockizationTrace", []).append(trace_entry)
 
 def _homeroom_blockization_legacy(cls):
@@ -437,7 +437,7 @@ def _split_arts_15_15(cls, metadata):
     # 找音樂和美勞的需求
     music_reqs = [r for r in reqs if "音樂" in r.get("subject", "") and "_固定" not in r.get("subject", "") and "_交替" not in r.get("subject", "")]
     art_reqs = [r for r in reqs if "美勞" in r.get("subject", "") and "_固定" not in r.get("subject", "") and "_交替" not in r.get("subject", "")]
-
+    
     if not music_reqs or not art_reqs:
         return
 
@@ -620,15 +620,15 @@ def _parse_bool_field(value, default=True):
 def _normalize_classroom_metadata(classrooms):
     """
     [Task 08.1] Specialty Room Metadata Normalization
-
+    
     確保每間 room dict 包含三個標準欄位:
       - gradePreferences: list, 預設 []
       - primaryTeacher: string, 預設 ""
       - allowSharing: boolean, 預設 true (YAML §340)
-
+    
     Args:
         classrooms: list of room dicts (mutated in-place)
-
+    
     Returns:
         dict — normalization trace with keys:
             total_rooms, rooms_with_grade_prefs, rooms_with_primary_teacher,
@@ -659,7 +659,7 @@ def _normalize_classroom_metadata(classrooms):
             room["gradePreferences"] = []
         else:
             room["gradePreferences"] = _parse_list_field(raw_gp, "gradePreferences")
-
+        
         if room["gradePreferences"]:
             gp_count += 1
 
@@ -671,7 +671,7 @@ def _normalize_classroom_metadata(classrooms):
             room["primaryTeacher"] = ""
         else:
             room["primaryTeacher"] = str(raw_pt).strip()
-
+        
         if room["primaryTeacher"]:
             pt_count += 1
 
@@ -682,7 +682,7 @@ def _normalize_classroom_metadata(classrooms):
             room["allowSharing"] = True
         else:
             room["allowSharing"] = _parse_bool_field(raw_as, default=True)
-
+        
         as_count += 1
 
     trace = {
@@ -813,43 +813,43 @@ def _build_priority_teacher_placeholders(classrooms, classes_data=None):
 def normalize_classroom_metadata(classrooms):
     """
     [Task 08.1] Public wrapper: Normalize specialty room metadata and return normalized classrooms.
-
+    
     Ensures each room dict contains:
       - gradePreferences: list, default []
       - primaryTeacher: string, default ""
       - allowSharing: boolean, default true (YAML §340)
-
+    
     Args:
         classrooms: list of room dicts (mutated in-place)
-
+    
     Returns:
         list — the normalized classrooms (same objects, mutated in-place)
     """
     if not classrooms:
         return classrooms or []
-
+    
     trace = _normalize_classroom_metadata(classrooms)
-
+    
     # Log summary
     print(f"  [INFO] [Task 08.1] Normalized {trace['total_rooms']} classroom(s): "
           f"{trace['rooms_with_grade_prefs']} with gradePrefs, "
           f"{trace['rooms_with_primary_teacher']} with primaryTeacher, "
           f"{trace['rooms_with_allow_sharing']} with allowSharing")
-
+    
     return classrooms
 
 
 def build_priority_teacher_placeholders(classrooms, classes_data=None):
     """
     [Task 08.4] Public wrapper: Build priority teacher placeholders from normalized classrooms.
-
+    
     Identifies priority teachers from room.primaryTeacher and creates placeholder dicts
     with candidate classes (not pre-bound to specific classes).
-
+    
     Args:
         classrooms: list of normalized room dicts (must have been through normalize_classroom_metadata)
         classes_data: optional list of class dicts for candidate class derivation
-
+    
     Returns:
         list of placeholder dicts with teacherName, subject, roomId, roomName,
         demandPeriods, candidateClasses, candidatePeriods, isPlaceholder
@@ -872,7 +872,7 @@ def _fix_existing_pair_group_ids(cls):
             t_name = req.get("teacher_name") or req.get("teacher", "")
             music_t = req.get("teacher_music") or t_name
             art_t = req.get("teacher_art") or req.get("teacher_partner") or t_name
-
+            
             import hashlib
             if "音樂美勞" in subj or ("音樂" in subj and "美勞" in subj):
                 raw_key = f"{music_t}|{art_t}|{grade}"
@@ -880,6 +880,6 @@ def _fix_existing_pair_group_ids(cls):
             else:
                 raw_key = f"{t_name}|{subj}|{grade}"
                 new_gid = "g_alt_" + hashlib.md5(raw_key.encode("utf-8")).hexdigest()[:8]
-
+            
             req["pair_group_id"] = new_gid
             req["is_alternating"] = True

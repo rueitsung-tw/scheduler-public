@@ -186,13 +186,17 @@ graph TD
 npm install
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install ortools numpy pandas
+pip install -r requirements.txt
 npx prisma db push
 ```
+*(備註：`npm install` 執行後會自動觸發 `postinstall` 執行 `prisma generate` 產生資料庫客戶端)*
+
 4. 啟動後端：
 ```powershell
-node server.js
+npm start
 ```
+*驗證後端是否成功啟動：開啟瀏覽器造訪 [http://localhost:3000/api/system/status](http://localhost:3000/api/system/status)*
+
 5. 開啟另一個終端機啟動前端：
 ```powershell
 npm run dev
@@ -213,13 +217,17 @@ sudo apt install -y python3 python3-venv python3-pip
 npm install
 python3 -m venv venv
 source venv/bin/activate
-pip install ortools numpy pandas
+pip install -r requirements.txt
 npx prisma db push
 ```
+*(備註：`npm install` 執行後會自動觸發 `postinstall` 執行 `prisma generate` 產生資料庫客戶端)*
+
 4. 啟動後端：
 ```bash
-node server.js
+npm start
 ```
+*驗證後端是否成功啟動：開啟造訪 `http://localhost:3000/api/system/status`*
+
 5. 開啟另一個終端機啟動前端：
 ```bash
 npm run dev

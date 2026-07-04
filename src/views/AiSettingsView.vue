@@ -212,6 +212,113 @@
         </div>
       </div>
 
+      <!-- [2026-06-28] 五六年級共備設定 -->
+      <div class="settings-card co-planning-controls">
+        <h3>五六年級共備設定 (Co-Planning)</h3>
+        <p class="desc">
+          控制五六年級導師共備區塊的排課策略，包含自動候選區塊與手動指定區塊兩種模式。
+        </p>
+
+        <div class="control-item">
+          <label class="switch">
+            <input type="checkbox" v-model="coPlanningEnabled" />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">啟用五六年級共備</span>
+            <span class="sub">啟用後，5/6 年級導師將依設定模式安排共備區塊。</span>
+          </div>
+        </div>
+
+        <!-- Grades selector -->
+        <div class="control-item" v-if="coPlanningEnabled">
+          <div class="label-box" style="flex-direction: row; align-items: center; gap: 12px;">
+            <span class="title" style="margin: 0;">啟用年級</span>
+            <label class="grade-checkbox">
+              <input type="checkbox" :value="5" v-model="coPlanningGrades" />
+              <span>5 年級</span>
+            </label>
+            <label class="grade-checkbox">
+              <input type="checkbox" :value="6" v-model="coPlanningGrades" />
+              <span>6 年級</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="control-item" v-if="coPlanningEnabled">
+          <label class="switch">
+            <input type="checkbox" v-model="coPlanningManualMode" />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">手動指定共備區塊</span>
+            <span class="sub">關閉時使用自動模式；開啟時需手動指定各年級共備時段。</span>
+          </div>
+        </div>
+
+        <!-- Candidate Blocks editor (auto mode) -->
+        <div v-if="coPlanningEnabled && !coPlanningManualMode" class="candidate-blocks-section">
+          <h4>候選區塊 (自動模式)</h4>
+          <p class="desc">新增下午連續 2 節的候選區塊，solver 會從中偏好選擇。</p>
+
+          <div class="candidate-block-row" v-for="(block, idx) in coPlanningCandidateBlocks" :key="idx">
+            <span class="block-index">#{{ idx + 1 }}</span>
+            <select :value="block.day" @change="updateCandidateBlockField(idx, 'day', $event)">
+              <option :value="null" disabled>星期</option>
+              <option v-for="d in 5" :key="'cb_d' + idx + '_' + d" :value="d">{{ dayLabel(d) }}</option>
+            </select>
+            <select :value="block.startPeriod" @change="updateCandidateBlockField(idx, 'startPeriod', $event)">
+              <option :value="null" disabled>開始節次</option>
+              <option :value="5">第 5 節（下午第 1 節）</option>
+              <option :value="6">第 6 節（下午第 2 節）</option>
+            </select>
+            <span class="block-length-badge">連續 2 節</span>
+            <button class="btn-remove" @click="removeCandidateBlock(idx)" :disabled="coPlanningCandidateBlocks.length <= 1">✕</button>
+          </div>
+
+          <button class="btn-add" @click="addCandidateBlock">＋ 新增候選區塊</button>
+        </div>
+
+        <div v-if="coPlanningEnabled && coPlanningManualMode" class="manual-blocks-section">
+          <h4>手動指定共備區塊</h4>
+          <p class="desc">為 5 年級與 6 年級分別指定共備時段（固定連續 2 節）。</p>
+
+          <div class="manual-block-row">
+            <label>5 年級共備時段</label>
+            <div class="block-selectors">
+              <select v-model="manualBlock5Day">
+                <option :value="null" disabled>選擇星期</option>
+                <option v-for="d in 5" :key="'d5_' + d" :value="d">{{ dayLabel(d) }}</option>
+              </select>
+              <select v-model="manualBlock5Period">
+                <option :value="null" disabled>選擇開始節次</option>
+                <option :value="5">第 5 節（下午第 1 節）</option>
+              </select>
+              <span class="block-length-badge">連續 2 節</span>
+            </div>
+          </div>
+
+          <div class="manual-block-row">
+            <label>6 年級共備時段</label>
+            <div class="block-selectors">
+              <select v-model="manualBlock6Day">
+                <option :value="null" disabled>選擇星期</option>
+                <option v-for="d in 5" :key="'d6_' + d" :value="d">{{ dayLabel(d) }}</option>
+              </select>
+              <select v-model="manualBlock6Period">
+                <option :value="null" disabled>選擇開始節次</option>
+                <option :value="5">第 5 節（下午第 1 節）</option>
+              </select>
+              <span class="block-length-badge">連續 2 節</span>
+            </div>
+          </div>
+
+          <div class="manual-block-warning" v-if="manualBlocksConflict">
+            ⚠️ 5 年級與 6 年級的共備時段重疊，請調整為不同時段。
+          </div>
+        </div>
+      </div>
+
       <button @click="saveSettings" class="main-save-btn">儲存所有設定</button>
     </div>
   </div>
@@ -279,6 +386,206 @@ const activeService = computed(() => {
 const artsClasses = computed(() => {
   return scheduleStore.classes.filter((cls) => cls.isArtsClass)
 })
+
+// [2026-06-28] Co-Planning UI state
+const coPlanningSettings = computed(() => {
+  return scheduleStore.schoolInfo.coPlanningSettings || {
+    enabled: false,
+    grades: [5, 6],
+    mode: 'auto',
+    candidateBlocks: [],
+    manualBlocks: { '5': null, '6': null }
+  }
+})
+
+const coPlanningEnabled = computed({
+  get: () => coPlanningSettings.value.enabled,
+  set: (val) => {
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      enabled: val,
+      mode: val ? coPlanningSettings.value.mode : 'auto',
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+const coPlanningManualMode = computed({
+  get: () => coPlanningSettings.value.mode === 'manual',
+  set: (val) => {
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      mode: val ? 'manual' : 'auto',
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+const manualBlock5Day = computed({
+  get: () => coPlanningSettings.value.manualBlocks?.['5']?.day ?? null,
+  set: (val) => {
+    const current = coPlanningSettings.value.manualBlocks?.['5']
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      manualBlocks: {
+        ...coPlanningSettings.value.manualBlocks,
+        '5': current ? { ...current, day: val } : (val ? { day: val, startPeriod: null, length: 2 } : null),
+      }
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+const manualBlock5Period = computed({
+  get: () => coPlanningSettings.value.manualBlocks?.['5']?.startPeriod ?? null,
+  set: (val) => {
+    const current = coPlanningSettings.value.manualBlocks?.['5']
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      manualBlocks: {
+        ...coPlanningSettings.value.manualBlocks,
+        '5': current ? { ...current, startPeriod: val } : (val ? { day: null, startPeriod: val, length: 2 } : null),
+      }
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+const manualBlock6Day = computed({
+  get: () => coPlanningSettings.value.manualBlocks?.['6']?.day ?? null,
+  set: (val) => {
+    const current = coPlanningSettings.value.manualBlocks?.['6']
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      manualBlocks: {
+        ...coPlanningSettings.value.manualBlocks,
+        '6': current ? { ...current, day: val } : (val ? { day: val, startPeriod: null, length: 2 } : null),
+      }
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+const manualBlock6Period = computed({
+  get: () => coPlanningSettings.value.manualBlocks?.['6']?.startPeriod ?? null,
+  set: (val) => {
+    const current = coPlanningSettings.value.manualBlocks?.['6']
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      manualBlocks: {
+        ...coPlanningSettings.value.manualBlocks,
+        '6': current ? { ...current, startPeriod: val } : (val ? { day: null, startPeriod: val, length: 2 } : null),
+      }
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+const manualBlocksConflict = computed(() => {
+  const b5 = coPlanningSettings.value.manualBlocks?.['5']
+  const b6 = coPlanningSettings.value.manualBlocks?.['6']
+  if (!b5 || !b6 || !b5.day || !b5.startPeriod || !b6.day || !b6.startPeriod) return false
+  // Conflict if same day and overlapping periods (length=2 for both)
+  if (b5.day !== b6.day) return false
+  const s5Start = b5.startPeriod, s5End = b5.startPeriod + 1
+  const s6Start = b6.startPeriod, s6End = b6.startPeriod + 1
+  return s5Start <= s6End && s6Start <= s5End
+})
+
+// [2026-06-28] Grades selector
+const coPlanningGrades = computed({
+  get: () => {
+    const grades = coPlanningSettings.value.grades
+    if (Array.isArray(grades)) return grades.filter(g => g === 5 || g === 6)
+    return [5, 6]
+  },
+  set: (val) => {
+    const grades = Array.isArray(val) ? val : []
+    // Ensure at least one grade is selected; if empty, default to [5,6]
+    const effective = grades.length > 0 ? grades : [5, 6]
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      grades: effective,
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+// [2026-06-28] Candidate Blocks reactive array
+const coPlanningCandidateBlocks = computed({
+  get: () => {
+    const blocks = coPlanningSettings.value.candidateBlocks
+    if (Array.isArray(blocks)) return blocks
+    return []
+  },
+  set: (val) => {
+    scheduleStore.schoolInfo.coPlanningSettings = {
+      ...coPlanningSettings.value,
+      candidateBlocks: val,
+    }
+    scheduleStore.markScheduleDirty()
+  }
+})
+
+function addCandidateBlock() {
+  const current = coPlanningCandidateBlocks.value
+  const newBlock = { day: null, startPeriod: 5, length: 2 }
+  scheduleStore.schoolInfo.coPlanningSettings = {
+    ...coPlanningSettings.value,
+    candidateBlocks: [...current, newBlock],
+  }
+  scheduleStore.markScheduleDirty()
+}
+
+/**
+ * [2026-06-29] Immutable update for candidate block fields.
+ * Ensures Vue/Pinia detects the change and marks schedule dirty.
+ * Validates: day in 1..5, startPeriod in {5, 6}, length always 2.
+ */
+function updateCandidateBlockField(idx, field, event) {
+  const blocks = coPlanningCandidateBlocks.value
+  if (idx < 0 || idx >= blocks.length) return
+
+  let rawVal = event.target?.value ?? event
+  // Convert string from select to number
+  const val = rawVal === '' || rawVal === null || rawVal === undefined ? null : Number(rawVal)
+
+  // Validate day: must be 1-5
+  if (field === 'day') {
+    if (val !== null && (val < 1 || val > 5)) return
+  }
+  // Validate startPeriod: must be 5 or 6 (afternoon periods)
+  if (field === 'startPeriod') {
+    if (val !== null && !([5, 6].includes(val))) return
+  }
+
+  // Immutable update: clone array, clone block, set field
+  const newBlocks = blocks.map((b, i) => {
+    if (i !== idx) return b
+    return { ...b, [field]: val }
+  })
+
+  scheduleStore.schoolInfo.coPlanningSettings = {
+    ...coPlanningSettings.value,
+    candidateBlocks: newBlocks,
+  }
+  scheduleStore.markScheduleDirty()
+}
+
+function removeCandidateBlock(idx) {
+  const current = coPlanningCandidateBlocks.value
+  if (current.length <= 1) return
+  const next = current.filter((_, i) => i !== idx)
+  scheduleStore.schoolInfo.coPlanningSettings = {
+    ...coPlanningSettings.value,
+    candidateBlocks: next,
+  }
+  scheduleStore.markScheduleDirty()
+}
+
+function dayLabel(d) {
+  return ['週一', '週二', '週三', '週四', '週五'][d - 1] || `第 ${d} 天`
+}
 
 onMounted(() => {
   aiStore.loadFromApi()
@@ -823,6 +1130,168 @@ input:checked + .slider:before {
   outline: none;
   border-color: #6366f1;
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.co-planning-controls {
+  border-top: 4px solid #8b5cf6;
+}
+
+.manual-blocks-section {
+  margin: 16px 0 0 64px;
+  padding: 16px;
+  background: #f8fafc;
+  border-left: 3px solid #8b5cf6;
+  border-radius: 0 10px 10px 0;
+}
+
+.manual-blocks-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 0.95em;
+  color: #5b21b6;
+}
+
+.manual-block-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.manual-block-row label {
+  min-width: 120px;
+  font-weight: 700;
+  font-size: 0.9em;
+  color: #334155;
+}
+
+.block-selectors {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.block-selectors select {
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9em;
+  background: white;
+}
+
+.block-length-badge {
+  font-size: 0.78em;
+  background: #ede9fe;
+  color: #5b21b6;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.manual-block-warning {
+  margin-top: 12px;
+  padding: 10px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 8px;
+  font-size: 0.85em;
+  border: 1px solid #f59e0b;
+}
+
+/* [2026-06-28] Grade checkboxes */
+.grade-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.9em;
+  color: #334155;
+  font-weight: 600;
+}
+
+.grade-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #8b5cf6;
+}
+
+/* [2026-06-28] Candidate blocks section */
+.candidate-blocks-section {
+  margin: 16px 0 0 64px;
+  padding: 16px;
+  background: #f8fafc;
+  border-left: 3px solid #8b5cf6;
+  border-radius: 0 10px 10px 0;
+}
+
+.candidate-blocks-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 0.95em;
+  color: #5b21b6;
+}
+
+.candidate-blocks-section .desc {
+  margin: 0 0 12px 0;
+  font-size: 0.85em;
+  color: #64748b;
+}
+
+.candidate-block-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.block-index {
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #8b5cf6;
+  min-width: 20px;
+}
+
+.candidate-block-row select {
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9em;
+  background: white;
+}
+
+.btn-add {
+  margin-top: 8px;
+  padding: 6px 14px;
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px dashed #c4b5fd;
+  border-radius: 8px;
+  font-size: 0.85em;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-add:hover {
+  background: #ddd6fe;
+}
+
+.btn-remove {
+  padding: 4px 10px;
+  background: #fee2e2;
+  color: #dc2626;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  font-size: 0.8em;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-remove:hover:not(:disabled) {
+  background: #fecaca;
+}
+
+.btn-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 @media (max-width: 860px) {

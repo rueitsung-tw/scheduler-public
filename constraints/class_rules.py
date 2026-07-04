@@ -152,7 +152,7 @@ def apply_daily_subject_limit(model, classes_data, schedule, locked_vars=None):
                     teachers_in_vars = [t for t, s, var in schedule_by_class_period.get((c_name, p), []) if var in subject_vars]
                     if all(is_virtual_teacher(t) for t in teachers_in_vars if t):
                         continue
-
+                        
                 model.Add(sum(subject_vars) <= daily_limit)
 
 
@@ -897,7 +897,7 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
         # STRICT mode: natural shape = hard constraint
         # FALLBACK mode: natural shape = near-hard soft penalty (from policy adapter)
         from scheduler_policy import SolveMode, get_active_policy
-
+        
         if grade in [3, 4]:
             all_consec = list(consec_vars.values())
             if all_consec:
@@ -907,7 +907,7 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
                                if (d, pi) in consec_vars]
                     if d_consec:
                         model.Add(sum(d_consec) <= 1)
-
+                
                 if solve_mode == SolveMode.STRICT_TEACHING_SHAPE:
                     # STRICT: hard constraint — must have at least 1 consecutive pair
                     model.Add(sum(all_consec) >= 1)
@@ -935,7 +935,7 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
                                if (d, pi) in consec_vars]
                     if d_consec:
                         model.Add(sum(d_consec) <= 2)
-
+                
                 if solve_mode == SolveMode.STRICT_TEACHING_SHAPE:
                     # STRICT: hard constraint — must have at least 2 consecutive pairs
                     model.Add(sum(all_consec) >= 2)
@@ -1413,13 +1413,15 @@ __all__ = [
     "apply_week_specific_art_capacity_model",
     "apply_week_specific_art_capacity",
     "apply_week_specific_art_capacity_entries",
-    # Task 3.2~3.7: soft rule helpers
+    # Task 3.2~3.9: soft rule helpers
     "is_homeroom_lesson",
     "is_subject_teacher_lesson",
     "build_grade_morning_first_period_homeroom_penalty",
     "build_morning_two_homeroom_periods_penalty",
     "build_co_planning_afternoon_block_penalty",
     "build_co_planning_subject_lesson_penalty",
+    "build_homeroom_daily_max_periods_penalty",
+    "build_manual_co_planning_penalty",
     # Task 07: grade1-2 Tuesday life-course & daily subject-teacher minimum
     "apply_grade12_tuesday_life_course",
     "build_daily_subject_teacher_minimum_penalty",
@@ -1547,6 +1549,183 @@ def build_grade_morning_first_period_homeroom_penalty(
                 "weight": max(weight // max(len(configurable_grades), 1), 1),
                 "var": violation,
             })
+
+    return penalty_vars
+
+
+# ============================================================
+# Task 3.8: 導師每日最大節次軟懲罰 (soft)
+# ============================================================
+
+def build_homeroom_daily_max_periods_penalty(
+    model,
+    schedule,
+    classes_data,
+    max_periods=4,
+):
+    """
+    導師每日超過 max_periods 節時產生 soft penalty。
+
+    語意：對每位 type==homeroom 的老師，按「該老師每天實際授課的占用節次」計數。
+    violation = max(0, occupied_count - max_periods)
+
+    這不等於「某班有幾節導師型科目」；而是「導師本人在該日實際被排了幾節課」。
+    若導師兼多班，各班的授課節次會累加。
+
+    Args:
+        model: ortools CpModel
+        schedule: dict[(c,p,t,s), BoolVar]
+        classes_data: list of class dicts
+        max_periods: 每日導師課程上限（預設 4）
+
+    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    """
+    weight = WEIGHT_REGISTRY.get("homeroom_daily_max_periods", 3200)
+    penalty_vars = []
+
+    # Step 1: Collect all homeroom teacher names
+    # A teacher is homeroom if they appear as homeroom_teacher in any class
+    homeroom_teachers = set()
+    for cls in classes_data:
+        ht = cls.get("homeroom_teacher") or cls.get("homeroom_teacher_id") or ""
+        if ht:
+            homeroom_teachers.add(str(ht).strip())
+
+    if not homeroom_teachers:
+        return []
+
+    # Step 2: For each homeroom teacher, for each day, count occupied slots
+    for teacher in homeroom_teachers:
+        for day in range(DAYS):
+            day_start = day * PERIODS_PER_DAY
+            day_end = day_start + PERIODS_PER_DAY
+
+            # Collect all schedule vars where this teacher teaches on this day
+            teacher_vars = [
+                var for (c, p, t, s), var in schedule.items()
+                if str(t).strip() == teacher and day_start <= p < day_end
+            ]
+
+            if not teacher_vars:
+                continue
+
+            count_var = model.NewIntVar(
+                0, len(teacher_vars),
+                f"hr_teacher_daily_count_{teacher}_day{day+1}"
+            )
+            model.Add(count_var == sum(teacher_vars))
+
+            overload = model.NewIntVar(
+                0, len(teacher_vars),
+                f"hr_teacher_daily_overload_{teacher}_day{day+1}"
+            )
+            model.Add(overload >= count_var - max_periods)
+            model.Add(overload >= 0)
+
+            penalty_vars.append({
+                "rule_id": "homeroom_daily_max_periods",
+                "weight": weight // (len(homeroom_teachers) * DAYS),
+                "var": overload,
+            })
+
+    return penalty_vars
+
+
+# ============================================================
+# Task 3.9: Manual Co-Planning Block Penalty (near-hard soft)
+# ============================================================
+
+def build_manual_co_planning_penalty(
+    model,
+    schedule,
+    classes_data,
+    school_info=None,
+):
+    """
+    當 coPlanningSettings.mode == "manual" 時，對 manualBlocks 指定的區塊
+    施加 near-hard soft penalty：該年級所有班級在該時段內偏好排入科任課。
+
+    Args:
+        model: ortools CpModel
+        schedule: dict[(c,p,t,s), BoolVar]
+        classes_data: list of class dicts
+        school_info: dict with coPlanningSettings
+
+    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    """
+    co_settings = _parse_co_planning_settings(school_info)
+
+    if not co_settings["enabled"]:
+        return []
+
+    if co_settings["mode"] != "manual":
+        return []
+
+    manual_blocks = co_settings.get("manualBlocks", {})
+    if not manual_blocks:
+        return []
+
+    weight = WEIGHT_REGISTRY.get("manual_co_planning_subject_teacher_lesson", 9000)
+    penalty_vars = []
+
+    grade_classes = defaultdict(list)
+    for cls in classes_data:
+        g = resolve_class_grade(cls)
+        grade_classes[g].append(cls.get("name", ""))
+
+    subject_teacher_subjects = set()
+    for cls in classes_data:
+        for req in cls.get("course_requirements", []):
+            if is_subject_teacher_lesson(req):
+                subject_teacher_subjects.add(req.get("subject", ""))
+
+    for grade, block in manual_blocks.items():
+        if block is None:
+            continue
+
+        class_names = grade_classes.get(grade, [])
+        if not class_names:
+            continue
+
+        day_1based = block["day"]
+        start_p_1based = block["startPeriod"]
+
+        day_idx = day_1based - 1 if 1 <= day_1based <= DAYS else None
+        if day_idx is None:
+            continue
+
+        p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
+        block_periods = [p_start_idx, p_start_idx + 1]
+
+        for c_name in class_names:
+            for p_index in block_periods:
+                if p_index >= TOTAL_PERIODS:
+                    continue
+
+                subject_vars = [
+                    var for (c, p, t, s), var in schedule.items()
+                    if c == c_name and p == p_index and s in subject_teacher_subjects
+                ]
+
+                has_subject = model.NewBoolVar(f"manual_co_plan_subject_{grade}_{c_name}_p{p_index}")
+                if subject_vars:
+                    subject_sum = model.NewIntVar(0, len(subject_vars), f"manual_co_plan_subjectSum_{grade}_{c_name}_p{p_index}")
+                    model.Add(subject_sum == sum(subject_vars))
+                    model.Add(subject_sum >= 1).OnlyEnforceIf(has_subject)
+                    model.Add(subject_sum == 0).OnlyEnforceIf(has_subject.Not())
+                else:
+                    model.Add(has_subject == 0)
+
+                penalty_var = model.NewBoolVar(
+                    f"manual_co_plan_penalty_{grade}_{c_name}_p{p_index}"
+                )
+                model.Add(penalty_var == 1 - has_subject)
+
+                penalty_vars.append({
+                    "rule_id": "manual_co_planning_subject_teacher_lesson",
+                    "weight": weight // max(len(classes_data), 1),
+                    "var": penalty_var,
+                })
 
     return penalty_vars
 
@@ -1835,21 +2014,30 @@ def _parse_co_planning_settings(school_info):
     """
     Parse coPlanningSettings from schoolInfo with backward compatibility.
 
-    Returns dict with keys: enabled, grades, candidateBlocks
+    Supports two modes:
+    - "auto": solver picks one block from candidateBlocks per grade (soft preference)
+    - "manual": user specifies exact block per grade via manualBlocks; treated as near-hard
+
+    Returns dict with keys:
+      enabled, grades, mode, candidateBlocks, manualBlocks
     Missing/None/disabled -> returns safe defaults that skip all rules.
     """
     if not school_info or not isinstance(school_info, dict):
-        return {"enabled": False, "grades": [], "candidateBlocks": []}
+        return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
 
     co_planning = school_info.get("coPlanningSettings", {})
     if not co_planning or not isinstance(co_planning, dict):
-        return {"enabled": False, "grades": [], "candidateBlocks": []}
+        return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
 
     if not co_planning.get("enabled"):
-        return {"enabled": False, "grades": [], "candidateBlocks": []}
+        return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
 
     grades = co_planning.get("grades", []) or []
+    mode = co_planning.get("mode", "auto")
+    if mode not in ("auto", "manual"):
+        mode = "auto"
     candidate_blocks = co_planning.get("candidateBlocks", []) or []
+    manual_blocks_raw = co_planning.get("manualBlocks", {}) or {}
 
     # Filter: keep only valid afternoon blocks with length == 2
     valid_blocks = []
@@ -1865,7 +2053,6 @@ def _parse_co_planning_settings(school_info):
             continue
 
         # Must be afternoon (1-based period > LUNCH_BOUNDARY)
-        # startPeriod is 1-based, so afternoon means startPeriod > LUNCH_BOUNDARY
         if start_period is None or start_period <= LUNCH_BOUNDARY:
             continue
 
@@ -1875,10 +2062,36 @@ def _parse_co_planning_settings(school_info):
             "length": length,
         })
 
+    # Parse manualBlocks: { "5": {day, startPeriod, length}, "6": null }
+    # null means no manual block for that grade (fall back to auto or skip)
+    manual_blocks = {}
+    if isinstance(manual_blocks_raw, dict):
+        for grade_key, block_val in manual_blocks_raw.items():
+            try:
+                g = int(grade_key)
+            except (ValueError, TypeError):
+                continue
+            if block_val is None:
+                manual_blocks[g] = None
+            elif isinstance(block_val, dict):
+                d = block_val.get("day")
+                sp = block_val.get("startPeriod")
+                ln = block_val.get("length", 2)
+                if d is not None and sp is not None and ln == 2:
+                    # Validate afternoon
+                    if sp > LUNCH_BOUNDARY:
+                        manual_blocks[g] = {
+                            "day": d,
+                            "startPeriod": sp,
+                            "length": ln,
+                        }
+
     return {
         "enabled": True,
         "grades": grades if isinstance(grades, list) else [],
+        "mode": mode,
         "candidateBlocks": valid_blocks,
+        "manualBlocks": manual_blocks,
     }
 
 
@@ -1897,8 +2110,11 @@ def build_co_planning_afternoon_block_penalty(
     """
     co_settings = _parse_co_planning_settings(school_info)
 
-    # Guard clause: skip if not enabled or no blocks/grades
+    # Guard clause: skip if not enabled, no blocks/grades, or mode is manual
+    # (manual mode uses build_manual_co_planning_penalty instead)
     if not co_settings["enabled"] or not co_settings["grades"] or not co_settings["candidateBlocks"]:
+        return [], {}
+    if co_settings["mode"] == "manual":
         return [], {}
 
     weight = WEIGHT_REGISTRY.get("grade_co_planning_afternoon_block", 2500)

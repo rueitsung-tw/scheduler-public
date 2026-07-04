@@ -109,7 +109,7 @@ function assertPlatformStartupEnvironment() {
             `[Startup Warning] Python venv not found at ${pythonVenvPath}. The server will fall back to system Python if available.`
         );
         console.warn(
-            '[Startup Warning] If Python scripts fail, recreate the venv on this machine: `python -m venv venv` (Windows) or `python3 -m venv venv` (Ubuntu).'
+            '[Startup Warning] If Python scripts fail, recreate the venv and install dependencies: `python -m venv venv` then `pip install -r requirements.txt`'
         );
     }
 
@@ -251,7 +251,7 @@ const __dirname = dirname(__filename);
 
 
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    origin: ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:5174', 'http://127.0.0.1:5174', 'http://localhost:5175', 'http://127.0.0.1:5175'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true
 }));

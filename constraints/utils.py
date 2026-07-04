@@ -13,16 +13,16 @@ All other constraint modules should import from here instead of duplicating logi
 def canonical_subject(subject: str) -> str:
     """
     Subject name normalization — single source of truth.
-
+    
     Handles Traditional/Simplified Chinese variants and aliases.
     Strips suffixes like '_固定', '_交替' before normalization.
-
+    
     Args:
         subject: Raw subject name (may contain suffixes, mixed scripts)
-
+        
     Returns:
         Normalized canonical subject name
-
+        
     Examples:
         >>> canonical_subject("音樂_固定")
         '音乐'
@@ -37,15 +37,15 @@ def canonical_subject(subject: str) -> str:
     """
     if not subject:
         return ''
-
+    
     s = subject.strip()
-
+    
     # Strip alternating/fixed suffixes first
     for suffix in ('_固定', '_交替'):
         if s.endswith(suffix):
             s = s[:-len(suffix)]
             break
-
+    
     # Normalize based on prefix/content matching
     if s.startswith("音樂") or s.startswith("音乐"):
         return "音乐"
@@ -55,22 +55,22 @@ def canonical_subject(subject: str) -> str:
         return "自然科学"
     if any(x in s for x in ("科技-資訊", "科技-资讯", "資訊", "资讯", "電腦", "电脑")):
         return "科技-资讯"
-
+    
     return s
 
 
 def is_subject_allowed_for_grade(subject: str, grade: int, subject_grade_rules: dict) -> bool:
     """
     Check if a subject can be scheduled in the given grade.
-
+    
     Uses the subjectGradeRules setting as the authoritative source.
     If no rule is defined for the subject, it is allowed in all grades.
-
+    
     Args:
         subject: Subject name (will be normalized)
         grade: Grade number (1-6)
         subject_grade_rules: Dict mapping canonical subject names to list of allowed grades
-
+        
     Returns:
         True if the subject is allowed in this grade, False otherwise
     """
@@ -83,11 +83,11 @@ def is_subject_allowed_for_grade(subject: str, grade: int, subject_grade_rules: 
 
 def _normalize_room_subject(subj_raw):
     """Normalize subject name to solver's room-assignment canonical form.
-
+    
     This MUST align with solver.py::_normalize_special_room_subject so that
     classroom config keys (subjectClassroomGrades) match the subjects used
     in apply_special_classroom_capacity and _validate_schedule_result.
-
+    
     Returns Traditional Chinese canonical names:
         - "科技-資訊", "資訊", "電腦" -> "資訊"
         - "英語" -> "語文-英語"
@@ -128,18 +128,18 @@ def _normalize_room_subject(subj_raw):
 def grade_needs_special_room(subject: str, grade: int, subject_classroom_grades: dict) -> bool:
     """
     Determine if a subject in this grade needs a specialty classroom.
-
+    
     Uses _normalize_room_subject (Traditional Chinese canonical) to align with
     solver.py::_normalize_special_room_subject and class_rules.py room assignment.
-
+    
     This controls room capacity counting, NOT whether the subject is allowed.
     Low grades (1-2) typically can use regular classrooms.
-
+    
     Args:
         subject: Subject name (will be normalized to room-canonical form)
         grade: Grade number (1-6)
         subject_classroom_grades: Dict mapping canonical subject names to list of grades needing special room
-
+        
     Returns:
         True if this grade needs a specialty classroom for this subject
     """
