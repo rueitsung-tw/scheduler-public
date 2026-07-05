@@ -46,7 +46,15 @@
   "includeDocFiles": [
     "docs/DataDictionary.md",
     "docs/Scheduler_Engine_Overview.md",
-    "docs/藝才班特規排課模組_使用說明手冊.md"
+    "docs/藝才班特規排課模組_使用說明手冊.md",
+    "docs/20260701_phase1_formal_delivery_readiness_policy.yaml",
+    "docs/phase1_formal_delivery_acceptance_summary.md",
+    "docs/phase1_formal_delivery_user_guide.md",
+    "docs/phase1_frontend_smoke_test_report.md",
+    "docs/20260702_stage2_progress_report.md",
+    "docs/20260704_phase1_release_readiness_for_operator_pilot.md",
+    "docs/20260706_operator_pilot_execution_checklist.md",
+    "docs/20260706_operator_pilot_decision_template.md"
   ],
   "targetOnlyRoots": [
     "tests"

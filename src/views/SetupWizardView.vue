@@ -111,8 +111,10 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
+import { useScheduleStore } from '../stores/schedule'
 
 const router = useRouter()
+const scheduleStore = useScheduleStore()
 
 // --- 響應式變數 ---
 const schoolName = ref('')
@@ -196,6 +198,13 @@ const handleSetup = async () => {
 
     if (!response.ok) {
       throw new Error(data.error || '初始化失敗')
+    }
+
+    // P2 修復：setup 成功後主動刷新全域狀態，讓首頁 schoolInfo 立即更新
+    try {
+      await scheduleStore.loadFromDB(true)
+    } catch (e) {
+      console.warn('[SetupWizard] 無法在 setup 後立即刷新 store:', e)
     }
 
     // 成功後跳轉回首頁

@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useScheduleStore } from '@/stores/schedule'
 
 const routes = [
   {
@@ -114,6 +115,38 @@ router.beforeEach(async (to, _from) => {
     // 情境 C：已初始化 → 不准再進入 /setup
     if (isSetup && to.path === '/setup') {
       return '/'
+    }
+
+    // P0-1 修復：保護未套用的排課結果
+    // 當使用者從 /schedule 離開，且存在 engineResult 但 engineStatus === 'COMPLETED'
+    // 表示排課完成但尚未點擊「套用此課表並前往編輯器」
+    if (_from?.path === '/schedule') {
+      try {
+        const dataStore = useScheduleStore();
+        const hasUnappliedResult = dataStore.engineStatus === 'COMPLETED'
+          && dataStore.engineResult
+          && Array.isArray(dataStore.engineResult.schedule)
+          && dataStore.engineResult.schedule.length > 0;
+
+        // 如果目標頁面會 loadFromDB(true)，則會靜默覆蓋新結果
+        const dangerousRoutes = ['/export', '/classrooms', '/editor', '/teachers', '/classes', '/validation', '/'];
+        if (hasUnappliedResult && dangerousRoutes.includes(to.path)) {
+          const confirmed = window.confirm(
+            '⚠️ 你有一筆排課結果尚未套用。\n\n' +
+            '如果你現在離開，這筆新課表會遺失。\n\n' +
+            '確定要離開嗎？\n\n' +
+            '按「確定」離開（新課表會遺失）\n' +
+            '按「取消」返回排課頁面完成套用。'
+          );
+          if (!confirmed) return false;
+
+          // 使用者明確選擇放棄這筆未套用結果，立即清掉暫存狀態，
+          // 避免稍後回到 /schedule 時又看到舊的完成結果「幽靈復甦」。
+          dataStore.resetEngineState();
+        }
+      } catch (_) {
+        // store 可能尚未初始化，不阻擋
+      }
     }
 
     // 允許導航 (return undefined 等同通過)

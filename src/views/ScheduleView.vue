@@ -1052,7 +1052,19 @@ const startEngine = async () => {
   }
   // --- 防呆檢查結束 ---
 
-  let hasDirtyData = false;
+  // ============================================================================
+  // 🧹 前置清洗與拆分（P0 Hotfix：不再靜默寫回 DB）
+  // ============================================================================
+  //
+  // 重要原則：
+  // 1. 低年級移除誤塞的音樂/美勞/藝術是「安全清洗」——可以寫回 DB
+  // 2. 中高年級拆分藝術/健康與體育是「結構性變更」——可能產生空白 teacher
+  // 3. 拆分後若產生空白 teacher，必須攔截、不同步、不送引擎
+  // ============================================================================
+
+  let hasSafeCleanup = false;    // 低年級移除誤塞科目
+  let hasSplit = false;          // 中高年級拆分
+  const splitErrors = [];        // 拆分後驗證失敗的錯誤清單
 
   dataStore.classes.forEach(cls => {
     if (!cls.course_requirements) return;
@@ -1066,32 +1078,38 @@ const startEngine = async () => {
     // ==========================================
     if (grade === 1 || grade === 2) {
       // 🚨 低年級大掃除：強制殺掉之前被誤塞進資料庫的音樂、美勞、藝術
+      // 這是「安全清洗」——移除錯誤資料，不會產生新問題
       for (let i = cls.course_requirements.length - 1; i >= 0; i--) {
         const subj = cls.course_requirements[i].subject;
         if (subj === '音樂' || subj === '美勞' || subj === '藝術') {
           cls.course_requirements.splice(i, 1);
-          hasDirtyData = true;
+          hasSafeCleanup = true;
         }
       }
     } else {
-      // ✅ 中高年級 (3~6年級)：只拆分「藝術」為音樂/美勞
-      // 保留原始 periods 值（如 1.5），讓 Python 引擎處理
+      // ✅ 中高年級 (3~6年級)：拆分「藝術」為音樂/美勞
       const artIndex = cls.course_requirements.findIndex(r => r.subject && r.subject.trim() === '藝術');
       if (artIndex !== -1) {
         const oldTeacherName = cls.course_requirements[artIndex].teacher;
-        cls.course_requirements.splice(artIndex, 1);
         const teacherObj = dataStore.teachers.find(t => t.name === oldTeacherName);
         const exps = teacherObj?.expertiseSubjects || [];
-        let musicTeacher = exps.includes('音樂') ? oldTeacherName : '';
-        let artTeacher = exps.includes('美勞') ? oldTeacherName : '';
-        // 拆分藝術時寫入 1.5 節，符合藍圖 Rule 1
-        cls.course_requirements.push({ subject: '音樂', periods: 1.5, teacher: musicTeacher });
-        cls.course_requirements.push({ subject: '美勞', periods: 1.5, teacher: artTeacher });
-        hasDirtyData = true;
-      }
+        const hasMusicExpertise = exps.includes('音樂');
+        const hasArtExpertise = exps.includes('美勞');
 
-      // [Phase 1 完成] 刪除強制將 periods 改為 2 的 forEach 邏輯
-      // 讓前端原汁原味地傳送 1.5 節給後端
+        // 🔒 拆分前驗證：老師是否具備對應專長
+        if (!hasMusicExpertise || !hasArtExpertise) {
+          const missing = [];
+          if (!hasMusicExpertise) missing.push('音樂');
+          if (!hasArtExpertise) missing.push('美勞');
+          splitErrors.push(
+            `🚨 ${cls.name} 的「藝術」老師「${oldTeacherName || '未指定'}」不具備 ${missing.join('、')} 專長，` +
+            `無法拆分為「音樂」與「美勞」。請先指派具對應專長的老師。`
+          );
+        }
+
+        // 即使驗證失敗，仍記錄拆分狀態（用於後續統一處理）
+        hasSplit = true;
+      }
     }
 
     // ==========================================
@@ -1099,23 +1117,71 @@ const startEngine = async () => {
     // ==========================================
     const hpIndex = cls.course_requirements.findIndex(r => r.subject && r.subject.trim() === '健康與體育');
     if (hpIndex !== -1) {
-      const oldTeacherName = cls.course_requirements[hpIndex].teacher;
-      cls.course_requirements.splice(hpIndex, 1);
+      const homeroomTeacher = cls.homeroom_teacher;
 
-      // 體育(2節)給科任，健康(1節)給導師
-      cls.course_requirements.push({ subject: '體育', periods: 2, teacher: oldTeacherName });
-      const homeroomTeacher = cls.homeroom_teacher || '';
-      cls.course_requirements.push({ subject: '健康', periods: 1, teacher: homeroomTeacher });
+      // 🔒 拆分前驗證：必須有導師
+      if (!homeroomTeacher || homeroomTeacher.trim() === '') {
+        splitErrors.push(
+          `🚨 ${cls.name} 沒有設定導師（homeroom_teacher），` +
+          `無法將「健康與體育」拆分為「體育」與「健康」。請先設定導師。`
+        );
+      }
 
-      hasDirtyData = true;
+      hasSplit = true;
     }
   });
 
-  // 💾 如果有大掃除，立刻同步回資料庫覆蓋髒資料
-  if (hasDirtyData) {
+  // 🔒 若拆分驗證失敗，阻擋啟動並提示
+  if (splitErrors.length > 0) {
+    alert(
+      "⛔ 排課啟動前發現資料問題，無法繼續：\n\n" +
+      splitErrors.join('\n') +
+      "\n\n請修正上述問題後再試。系統不會將錯誤資料寫入資料庫。"
+    );
+    return;
+  }
+
+  // ✅ 驗證通過後，才實際執行拆分
+  if (hasSplit) {
+    dataStore.classes.forEach(cls => {
+      if (!cls.course_requirements) return;
+
+      // 拆分藝術 → 音樂 + 美勞
+      const artIndex = cls.course_requirements.findIndex(r => r.subject && r.subject.trim() === '藝術');
+      if (artIndex !== -1) {
+        const oldTeacherName = cls.course_requirements[artIndex].teacher;
+        cls.course_requirements.splice(artIndex, 1);
+        const teacherObj = dataStore.teachers.find(t => t.name === oldTeacherName);
+        const exps = teacherObj?.expertiseSubjects || [];
+        const musicTeacher = exps.includes('音樂') ? oldTeacherName : '';
+        const artTeacher = exps.includes('美勞') ? oldTeacherName : '';
+        cls.course_requirements.push({ subject: '音樂', periods: 1.5, teacher: musicTeacher });
+        cls.course_requirements.push({ subject: '美勞', periods: 1.5, teacher: artTeacher });
+      }
+
+      // 拆分健康與體育 → 體育 + 健康
+      const hpIndex = cls.course_requirements.findIndex(r => r.subject && r.subject.trim() === '健康與體育');
+      if (hpIndex !== -1) {
+        const oldTeacherName = cls.course_requirements[hpIndex].teacher;
+        cls.course_requirements.splice(hpIndex, 1);
+        cls.course_requirements.push({ subject: '體育', periods: 2, teacher: oldTeacherName });
+        const homeroomTeacher = cls.homeroom_teacher || '';
+        cls.course_requirements.push({ subject: '健康', periods: 1, teacher: homeroomTeacher });
+      }
+    });
+  }
+
+  // 💾 只有「安全清洗」才同步回 DB
+  // 拆分結果只存在於本次 payload，不寫回 source-of-truth
+  if (hasSafeCleanup) {
     dataStore.markScheduleDirty();
     await dataStore.syncToCloud();
-    console.log("🧹 已成功清洗低年級髒資料，並完成中高年級科目轉換！");
+    console.log("🧹 已成功清洗低年級髒資料！");
+  }
+
+  // 拆分結果的日誌（不寫 DB）
+  if (hasSplit) {
+    console.log("🧹 已完成中高年級科目轉換（僅用於本次排課 payload，不寫回 DB）！");
   }
 
   const homeroomRequirementTrace = dataStore.classes.map((cls) => {
@@ -1580,6 +1646,28 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
     return;
   }
 
+  // ========== P0-2 修復：收集既有 isLocked 狀態 ==========
+  // key: "className|day|period" -> { isLocked, teacher, subject }
+  const existingLockMap = {};
+  dataStore.classes.forEach(cls => {
+    if (!cls.timetable) return;
+    for (let d = 1; d <= 5; d++) {
+      for (let p = 1; p <= 7; p++) {
+        const slot = cls.timetable[d]?.[p];
+        if (slot && slot.isLocked) {
+          const key = `${cls.name}|${d}|${p}`;
+          existingLockMap[key] = {
+            isLocked: true,
+            teacher: slot.teacher || '',
+            subject: slot.subject || '',
+            oddWeek: slot.oddWeek ? { ...slot.oddWeek } : null,
+            evenWeek: slot.evenWeek ? { ...slot.evenWeek } : null,
+          };
+        }
+      }
+    }
+  });
+
   // ========== 1. 初始化所有班級課表 ==========
   dataStore.classes.forEach(cls => {
     cls.timetable = { 1: {}, 2: {}, 3: {}, 4: {}, 5: {} };
@@ -1603,10 +1691,35 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
 
     const day = slot.day;
     const period = slot.period;
+    const slotKey = `${slot.className}|${day}|${period}`;
 
     if (!targetClass.timetable[day]) targetClass.timetable[day] = {};
 
     const items = slot.items;
+
+    // P1-1 修復：從 items 中提取完整的 pair 資訊
+    const pairInfo = {};
+    if (items.length === 1) {
+      const item = items[0];
+      if (item.pairGroupId) pairInfo.pairGroupId = item.pairGroupId;
+      if (item.pairRole) pairInfo.pairRole = item.pairRole;
+      if (item.pairPartnerClass) pairInfo.pairPartnerClass = item.pairPartnerClass;
+      if (item.pairDirection) pairInfo.pairDirection = item.pairDirection;
+    } else {
+      // 多筆時取第一筆有 pair 資訊的
+      for (const item of items) {
+        if (item.pairGroupId) { pairInfo.pairGroupId = item.pairGroupId; break; }
+      }
+      for (const item of items) {
+        if (item.pairRole) { pairInfo.pairRole = item.pairRole; break; }
+      }
+      for (const item of items) {
+        if (item.pairPartnerClass) { pairInfo.pairPartnerClass = item.pairPartnerClass; break; }
+      }
+      for (const item of items) {
+        if (item.pairDirection) { pairInfo.pairDirection = item.pairDirection; break; }
+      }
+    }
 
     if (items.length === 1) {
       // 單筆：直接寫入
@@ -1616,8 +1729,7 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
         teacher: item.teacherName,
         ...(item.classroomId && { classroomId: item.classroomId }),
         ...(item.classroomName && { classroomName: item.classroomName }),
-        ...(item.pairGroupId && { pairGroupId: item.pairGroupId }),
-        ...(item.pairRole && { pairRole: item.pairRole }),
+        ...pairInfo,
       };
     } else {
       // 多筆：檢查是否為交替課（依 item.week 動態決定 oddWeek / evenWeek）
@@ -1678,6 +1790,7 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
             subject: '音樂(單)/美勞(雙)',
             teacher: `${musicTeacher} / ${artTeacher}`,
             isAlternating: true,
+            ...pairInfo,
             ...(musicItem?.classroomId && artItem?.classroomId && musicItem.classroomId === artItem.classroomId && { classroomId: musicItem.classroomId }),
             ...(musicItem?.classroomName && artItem?.classroomName && musicItem.classroomName === artItem.classroomName && { classroomName: musicItem.classroomName }),
             oddWeek: {
@@ -1698,8 +1811,35 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
           const last = items[items.length - 1];
           targetClass.timetable[day][period] = {
             subject: last.subject,
-            teacher: last.teacherName
+            teacher: last.teacherName,
+            ...pairInfo,
           };
+        }
+      }
+    }
+  });
+
+  // ========== P0-2 修復：恢復 isLocked 狀態 ==========
+  // 遍歷所有已寫入的 slot，檢查是否有對應的既有 lock
+  dataStore.classes.forEach(cls => {
+    if (!cls.timetable) return;
+    for (let d = 1; d <= 5; d++) {
+      for (let p = 1; p <= 7; p++) {
+        const slotKey = `${cls.name}|${d}|${p}`;
+        const currentSlot = cls.timetable[d]?.[p];
+        const prevLock = existingLockMap[slotKey];
+
+        if (currentSlot && prevLock) {
+          // 判斷是否為「同一格位」：同一班級、同一天、同一節次
+          // 如果新結果的教師和科目與之前相同（或接近），保留 lock
+          const teacherMatch = currentSlot.teacher && prevLock.teacher &&
+            (currentSlot.teacher.includes(prevLock.teacher) || prevLock.teacher.includes(currentSlot.teacher));
+          const subjectMatch = currentSlot.subject && prevLock.subject &&
+            (currentSlot.subject.includes(prevLock.subject) || prevLock.subject.includes(currentSlot.subject));
+
+          if (teacherMatch || subjectMatch) {
+            currentSlot.isLocked = true;
+          }
         }
       }
     }
@@ -1736,6 +1876,9 @@ const applyAndGoToEditor = async (scheduleArrayOverride = null) => {
   try {
     await dataStore.syncToCloud();
     alert('✅ 完美排課結果已成功套用並存入資料庫！');
+
+    // 套用成功後，這筆 engineResult 已成為正式資料，不應再被未套用保護攔下。
+    dataStore.resetEngineState();
 
     // 6. 切換頁面到「人工微調編輯器」
     router.push('/editor');

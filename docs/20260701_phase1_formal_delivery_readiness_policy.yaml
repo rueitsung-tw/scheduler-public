@@ -1,0 +1,209 @@
+文件資訊:
+  schema版本: '1.0'
+  文件類型: '第一期正式交付判定清單'
+  標題: '排課系統第一期正式交付 readiness policy'
+  建立日期: '2026-07-01'
+  語言: 'zh-TW'
+  狀態: '進度檢核與正式交付判定依據'
+  最高依據:
+    - 'README.md'
+    - 'docs/20260621-schedule-result-acceptance-review-policy.yaml'
+    - 'docs/20260621-special-room-assignment-workflow-repair-policy.yaml'
+  適用範圍:
+    - 'formal_feasible_suite'
+    - 'phase2 negative suite'
+    - 'solver.py'
+    - 'constraints/*.py'
+    - 'phase2_engine.py'
+    - 'preprocessor.py'
+    - 'repair_agent.py'
+    - 'server.js'
+    - 'src/views/ClassroomManagerView.vue'
+    - 'src/views/ExportHubView.vue'
+    - 'exportUtils / classroom assignment consumer flow'
+
+交付目標:
+  第一期正式交付定義:
+    - '可提出正式場合使用的排課引擎與核心排課結果驗收版。'
+    - '正式場景中不得出現 teacher_conflicts、room_conflicts、class_slot_conflicts。'
+    - '所有硬約束必須遵守，不接受以 fallback 降級作為正式可交付結果。'
+    - '專科教室結果必須可落地、可匯出、可由前端消費。'
+  非目標:
+    - '本文件不直接等同於 public runtime sync 完成。'
+    - '本文件不直接等同於全系統最終上線候選版完成。'
+
+核心原則:
+  - id: 'P1-01'
+    內容: '正式交付不以單純 FEASIBLE 為準，而以可實際使用、可匯出、可審查的課表為準。'
+  - id: 'P1-02'
+    內容: 'negative suite 與 formal feasible suite 必須分流；正式交付主證據只引用 formal feasible suite。'
+  - id: 'P1-03'
+    內容: '若 formal suite 任一 payload 需要 degraded/fallback 才成功，不得視為正式交付達標。'
+  - id: 'P1-04'
+    內容: '專科教室 assignment 必須是真實 solver / backfill workflow 的結果，不得靠 validation 放寬或人工猜測。'
+  - id: 'P1-05'
+    內容: 'progress review 必須同時檢查功能完成度、正式 evidence chain、與產品級 acceptance 項目。'
+
+必須完成的功能與任務:
+  formal_suite:
+    - id: 'F-01'
+      名稱: 'formal_feasible_suite 已建立'
+      完成條件:
+        - '存在獨立 suite 目錄。'
+        - '存在 formal suite manifest。'
+        - '存在 formal suite generation report。'
+    - id: 'F-02'
+      名稱: '5 個 formal payload 已生成'
+      完成條件:
+        - '`payload_baseline_formal_acceptance.json`'
+        - '`payload_special_room_pressure_balanced.json`'
+        - '`payload_teacher_shared_but_time_disjoint.json`'
+        - '`payload_mixed_manual_locks_with_feasible_margin.json`'
+        - '`payload_formal_end_to_end_acceptance.json`'
+    - id: 'F-03'
+      名稱: 'formal suite 每一輪都走正式 harness'
+      完成條件:
+        - '每輪均產生 output JSON。'
+        - '每輪均產生 validation report。'
+        - '每輪均產生 review report。'
+        - '每輪均產生 readiness report。'
+        - '每輪均產生 summary JSON。'
+    - id: 'F-04'
+      名稱: 'formal suite final report 已建立'
+      完成條件:
+        - '存在 formal suite 專屬 final report。'
+        - '報告中明確標出正式展示主案例。'
+
+  negative_suite:
+    - id: 'N-01'
+      名稱: 'negative suite 結論已固定'
+      完成條件:
+        - 'R3/R7 明確標記為 confirmed INFEASIBLE legitimate negative cases。'
+        - 'manifest / generation report / triage report / final report 口徑一致。'
+    - id: 'N-02'
+      名稱: 'negative suite 不混用於正式交付主證據'
+      完成條件:
+        - 'formal delivery 文件中將 negative suite 明確標記為工程保險與拒絕不可能輸入的輔助證據。'
+
+  acceptance_integration:
+    - id: 'A-01'
+      名稱: '產品級 acceptance summary 已建立'
+      完成條件:
+        - '不只 readiness=READY，還要有產品級 acceptance 摘要。'
+        - '摘要需對齊 README 與 acceptance policy。'
+    - id: 'A-02'
+      名稱: '前端與匯出最小驗證完成'
+      完成條件:
+        - '至少一輪正式展示案例可被 ClassroomManagerView 消費。'
+        - '至少一輪正式展示案例可被 ExportHubView / export flow 正常使用。'
+    - id: 'A-03'
+      名稱: '第一期正式交付說明已建立'
+      完成條件:
+        - '有明確交付範圍。'
+        - '有已知限制。'
+        - '有正式展示主案例與輔助 negative case 說明。'
+
+必須完成的驗證項目:
+  formal_hard_checks:
+    - id: 'V-01'
+      名稱: 'formal suite 5/5 FEASIBLE + READY'
+      條件:
+        - 'formal suite 五輪全部 `status = FEASIBLE`'
+        - 'formal suite 五輪全部 `solverStatus = FEASIBLE`'
+        - 'formal suite 五輪全部 `readinessStatus = READY`'
+    - id: 'V-02'
+      名稱: 'formal suite 無降級'
+      條件:
+        - 'formal suite 五輪全部 `degraded = false`'
+        - '不得使用 fallback 成功作為正式驗收主證據'
+    - id: 'V-03'
+      名稱: 'formal suite 六大硬檢查全零'
+      條件:
+        - '`teacher_conflicts = 0`'
+        - '`room_conflicts = 0`'
+        - '`class_slot_conflicts = 0`'
+        - '`room_overloads = 0`'
+        - '`unassigned_special_rooms = 0`'
+        - '`grade_subject_issues = 0`'
+    - id: 'V-04'
+      名稱: 'same-round evidence chain 完整'
+      條件:
+        - '`payload -> output -> validation -> review -> readiness` 同輪對齊'
+        - '`evidenceChain.sameRound = true`'
+
+  product_acceptance_checks:
+    - id: 'V-05'
+      名稱: 'special-room assignment 可落地'
+      條件:
+        - '所有需要實體專科教室的正式課程 occurrence 都有 classroomId/classroomName。'
+        - '不得只靠 subject 模糊猜測教室。'
+    - id: 'V-06'
+      名稱: 'manual locks preserved'
+      條件:
+        - 'isLocked 課程未被後處理或局部優化移動。'
+    - id: 'V-07'
+      名稱: '已刪除與 zero-period 課程未復活'
+      條件:
+        - 'periods <= 0 的課程未被排入。'
+        - 'payload 已刪除課程未被 solver / preprocessor / repair_agent 補回。'
+    - id: 'V-08'
+      名稱: 'alternating / 音美交替可讀'
+      條件:
+        - 'odd/even 或等價欄位可讀。'
+        - 'week-specific subject 與 classroom assignment 對齊。'
+    - id: 'V-09'
+      名稱: '最小前端 / 匯出驗證通過'
+      條件:
+        - '至少一輪 formal showcase case 在前端可讀。'
+        - '至少一輪 formal showcase case 可成功匯出。'
+
+目前可提出第一期正式交付的階段定義:
+  stage_1_engine_formal_delivery:
+    名稱: '第一期正式交付：排課引擎與核心排課結果驗收版'
+    必須全部成立:
+      - 'F-01 ~ F-04 完成'
+      - 'N-01 ~ N-02 完成'
+      - 'A-01 完成'
+      - 'V-01 ~ V-08 完成'
+    可選但建議:
+      - 'V-09 完成'
+  stage_2_system_delivery_candidate:
+    名稱: '第一期正式上線候選版'
+    必須全部成立:
+      - 'stage_1_engine_formal_delivery 已完成'
+      - 'A-02 完成'
+      - 'A-03 完成'
+      - 'V-09 完成'
+      - '完成最小 public/runtime/部署層驗證'
+
+進度判讀:
+  完成度估算規則:
+    - '若 formal suite 仍未跑滿 5/5，第一期正式交付不得判定完成。'
+    - '若 formal suite 5/5 READY 但缺產品級 acceptance summary，僅能視為接近完成。'
+    - '若 formal suite 5/5 READY 且 acceptance summary 完成，但前端/匯出未驗證，只能視為引擎交付接近完成，不視為整套系統交付完成。'
+
+CLINE_進度檢核指令:
+  使用方式: '當 Cline 回報第一期正式交付進度時，必須對照本檔逐項打勾，不得只用口頭百分比。'
+  指令: |
+    請以 `docs/20260701_phase1_formal_delivery_readiness_policy.yaml` 作為第一期正式交付唯一進度判定清單。
+
+    每次回報都必須逐項列出：
+    1. F-01 ~ F-04 是否完成
+    2. N-01 ~ N-02 是否完成
+    3. A-01 ~ A-03 是否完成
+    4. V-01 ~ V-09 是否完成
+
+    每一項都要附上具體證據檔案路徑，不接受「應該已完成」或「大致完成」。
+
+    若要宣稱可提出第一期正式交付，至少必須證明：
+    - stage_1_engine_formal_delivery 的全部條件成立
+
+    若要宣稱接近整套系統第一期正式交付，必須進一步證明：
+    - stage_2_system_delivery_candidate 的全部條件成立
+
+    若任一條件缺證據，請明確標記為未完成，不得自行補成完成。
+
+Codex_規則掛載要求:
+  - 'Rules.md 必須將本檔列為正式交付與進度檢核時的必讀政策。'
+  - '.clinerules/PROJECT_RULES.md 必須將本檔加入 start-here 與 required context。'
+  - 'README.md 的政策與檢核紀錄區段應列出本檔。'
