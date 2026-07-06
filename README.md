@@ -113,14 +113,32 @@ repository-root/
 3. `dev.db` 不會隨 repo 提供；執行 Prisma 初始化後會在本機建立。
 
 ### Windows 安裝步驟
+1. 先安裝 PowerShell 7。
+   - Windows 預設的 Windows PowerShell 在處理 UTF-8 檔案與終端機編碼時較容易出現亂碼或相容性問題。
+   - 建議先安裝 PowerShell 7，再進行後續安裝與啟動步驟，以確保 UTF-8 檔案與指令執行更穩定。
+2. 安裝 Node.js 20.19+ 或 22.12+。
+3. 安裝 Python 3.9+，並確認 PowerShell 可以執行 `python --version`。
+4. 在專案根目錄執行：
 
+**💡 提示**：在 Windows 系統，強烈建議使用 `py` 取代 `python` 指令，以避免微軟商店 (Windows Store) 的路徑攔截問題。
+**👉 若您使用 PowerShell (推薦)**：
 ```powershell
 npm install
 python -m venv venv
+py -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 npx prisma db push
 ```
+**👉 若您使用 傳統命令提示字元 (cmd)**：
+```cmd
+npm install
+py -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
+npx prisma db push
+```
+
 
 啟動後端：
 
