@@ -45,11 +45,9 @@ analyze_payload.py
 anti_collision_diagnose.py
 binary_diagnose.py
 diagnose_constraints.py
-diagnostic_stats.py
 magic_eq_diagnose.py
 query_classrooms.py
 quick_test_solver.py
-repair_agent.py
 verify_alternating_fix.py
 verify_periods.py
 
