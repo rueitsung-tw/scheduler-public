@@ -247,6 +247,253 @@ def apply_no_consecutive_subject(model, classes_data, schedule, locked_vars=None
 
 
 
+# ============================================================
+# Subject Day-Spread Hard Constraint
+# ============================================================
+# 目標科目：語文-英語、資訊、體育、健康、社會
+# 規則：同班同科同日最多 1 堂；相鄰兩天至多出現一天
+# ============================================================
+
+_TARGET_SPREAD_SUBJECTS = {
+    "語文-英語": {"語文-英語", "英語"},
+    "資訊": {"資訊", "科技-資訊", "電腦"},
+    "體育": {"體育", "健康與體育"},
+    "健康": {"健康"},
+    "社會": {"社會"},
+}
+
+
+def _resolve_spread_canonical(subj_raw):
+    """
+    將原始 subject 字串映射到 day-spread canonical key。
+    回傳 canonical key (str) 或 None（不屬於目標科目）。
+    """
+    subj = str(subj_raw or "").strip()
+    # 先用既有 canonical 邏輯正規化
+    normalized = _normalize_special_room_subject(subj)
+    for canonical_key, alias_set in _TARGET_SPREAD_SUBJECTS.items():
+        if subj in alias_set or normalized in alias_set or normalized == canonical_key:
+            return canonical_key
+    return None
+
+
+def apply_subject_day_spread(model, classes_data, schedule, locked_vars=None):
+    """
+    [硬約束] 科任課日分散規則
+
+    目標科目：語文-英語、資訊、體育、健康、社會
+    規則：
+      1. 同班同科同日最多 1 堂（sum <= 1）
+      2. 相鄰兩天至多出現一天（has_on_day[d] + has_on_day[d+1] <= 1）
+
+    豁免：
+      - 藝才班 + 虛擬教師的課程跳過
+      - locked_vars 中的變數跳過（但不跳過整個科目）
+
+    Args:
+        model: CpModel
+        classes_data: list of class dicts
+        schedule: dict (c, p, t, s) -> BoolVar
+        locked_vars: set of locked BoolVars (from apply_preallocation_locks)
+    """
+    if locked_vars is None:
+        locked_vars = set()
+
+    # 預先建立 (c, per) -> list of (t, s, var) 索引
+    schedule_by_class_period = defaultdict(list)
+    for (sch_c, sch_per, sch_t, sch_s), var in schedule.items():
+        schedule_by_class_period[(sch_c, sch_per)].append((sch_t, sch_s, var))
+
+    for cls in classes_data:
+        c_name = cls.get("name", "")
+        is_arts_class = cls.get("isArtsClass") or cls.get("is_arts_class", False)
+        reqs = cls.get("course_requirements", [])
+
+        # 收集該班的所有目標科目 canonical key
+        target_canonical_set = set()
+        for req in reqs:
+            subj_raw = req.get("subject", "")
+            canonical_key = _resolve_spread_canonical(subj_raw)
+            if canonical_key is None:
+                continue
+
+            # 豁免二：藝才班 + 虛擬教師
+            teacher_name = req.get("teacher_name") or req.get("teacher", "")
+            if is_arts_class and is_virtual_teacher(teacher_name):
+                continue
+
+            target_canonical_set.add(canonical_key)
+
+        if not target_canonical_set:
+            continue
+
+        # 對每個 canonical key 建立 day-level presence 並加入約束
+        for canonical_key in target_canonical_set:
+            alias_set = _TARGET_SPREAD_SUBJECTS[canonical_key]
+
+            # [Task B] 收集每一天該科目的變數（包含 locked）
+            # locked 的課也要算進 day-level presence / daily count，
+            # 否則 solver 可能在同一天再塞一節，或在相鄰日再塞一節。
+            all_day_vars = {d: [] for d in range(DAYS)}
+            locked_day_count = {d: 0 for d in range(DAYS)}
+            for d in range(DAYS):
+                base = d * PERIODS_PER_DAY
+                for p in range(base, min(base + PERIODS_PER_DAY, TOTAL_PERIODS)):
+                    for t, s, var in schedule_by_class_period.get((c_name, p), []):
+                        subj_check = str(s or "").strip()
+                        norm_s = _normalize_special_room_subject(subj_check)
+                        if subj_check in alias_set or norm_s in alias_set or norm_s == canonical_key:
+                            all_day_vars[d].append(var)
+                            if var in locked_vars:
+                                locked_day_count[d] += 1
+
+            # 過濾掉完全沒有變數的天
+            active_days = {d: vars_list for d, vars_list in all_day_vars.items() if vars_list}
+            if not active_days:
+                continue
+
+            # 1. 同天最多 1 堂（sum constraint）
+            # [Task B] 若使用者已鎖超過 1 節在同一天，upper bound 需尊重既有 locked 現況
+            for d, vars_list in active_days.items():
+                upper_bound = max(1, locked_day_count[d])
+                model.Add(sum(vars_list) <= upper_bound)
+
+            # 2. 相鄰兩天至多出現一天（day-level presence）
+            # [Task B] day_present 必須由包含 locked 的 all_day_vars 建出來
+            has_on_day = {}
+            for d, vars_list in active_days.items():
+                h = model.NewBoolVar(
+                    f"spread_has_{c_name}_{canonical_key}_d{d}".replace(" ", "_").replace("-", "_")
+                )
+                model.AddMaxEquality(h, vars_list)
+                has_on_day[d] = h
+
+            for d in range(DAYS - 1):
+                d_next = d + 1
+                if d in has_on_day and d_next in has_on_day:
+                    model.Add(has_on_day[d] + has_on_day[d_next] <= 1)
+
+
+def apply_music_fixed_vs_alternating_day_spread(
+    model, classes_data, schedule, alternating_class_is_music_odd=None
+):
+    """
+    [硬約束] 音樂固定課 vs 交替課不同日規則
+
+    若同一班同時存在「音樂固定課」entry 與「音樂/美勞交替課」entry，
+    則兩者不可出現在同一天。
+
+    識別方式（與 base_rules.py 第 130 行 create_alternating_vars 一致）：
+      - 交替課：is_alternating=True, 或 subject 含 "交替", 或 subject 含 "/"
+      - 固定音樂課：subject 含 "音樂" 且不符合交替條件
+
+    Args:
+        model: CpModel
+        classes_data: list of class dicts
+        schedule: dict (c, p, t, s) -> BoolVar
+        alternating_class_is_music_odd: dict[(class_name, teacher_name), BoolVar]
+            由 create_alternating_vars() 產生。若為 None 或空 dict，直接 return。
+    """
+    if not alternating_class_is_music_odd:
+        return
+
+    # 預先建立 (c, per) -> list of (t, s, var) 索引
+    schedule_by_class_period = defaultdict(list)
+    for (sch_c, sch_per, sch_t, sch_s), var in schedule.items():
+        schedule_by_class_period[(sch_c, sch_per)].append((sch_t, sch_s, var))
+
+    for cls in classes_data:
+        c_name = cls.get("name", "")
+        reqs = cls.get("course_requirements", [])
+
+        # [Task C] 第一段：從 course_requirements 建立 fixed / alternating 的 key 集合
+        # alternating 判定必須從 requirement metadata 來，不靠第二段字串重猜。
+        # key 格式: (teacher, normalized_subject)
+        fixed_music_keys = set()
+        alt_music_keys = set()
+
+        for req in reqs:
+            subj = str(req.get("subject", "") or "").strip()
+            teacher = str(req.get("teacher", "") or req.get("teacher_name", "") or "").strip()
+            is_alternating = req.get("is_alternating", False)
+
+            # 沿用現有規格判定 alternating
+            is_alt_entry = (
+                is_alternating
+                or "交替" in subj
+                or "/" in subj
+            )
+            is_music = "音樂" in subj
+
+            if not is_music or not teacher:
+                continue
+
+            # 用 _normalize_special_room_subject 正規化 subject
+            norm_subj = _normalize_special_room_subject(subj)
+            key = (teacher, norm_subj)
+
+            if is_alt_entry:
+                alt_music_keys.add(key)
+            else:
+                fixed_music_keys.add(key)
+
+        if not fixed_music_keys or not alt_music_keys:
+            continue
+
+        # 收集固定音樂與交替音樂的變數
+        day_fixed = {d: [] for d in range(DAYS)}
+        day_alt = {d: [] for d in range(DAYS)}
+
+        for d in range(DAYS):
+            base = d * PERIODS_PER_DAY
+            for p in range(base, min(base + PERIODS_PER_DAY, TOTAL_PERIODS)):
+                for t, s, var in schedule_by_class_period.get((c_name, p), []):
+                    subj = str(s or "").strip()
+
+                    if "音樂" not in subj:
+                        continue
+
+                    norm_s = _normalize_special_room_subject(subj)
+                    key = (t, norm_s)
+
+                    # [Task C] 依照第一段記錄的 key 來分流
+                    is_alt_class = (c_name, t) in alternating_class_is_music_odd
+
+                    if key in alt_music_keys and is_alt_class:
+                        day_alt[d].append(var)
+                    elif key in fixed_music_keys:
+                        day_fixed[d].append(var)
+
+        # 過濾空天
+        active_fixed = {d: v for d, v in day_fixed.items() if v}
+        active_alt = {d: v for d, v in day_alt.items() if v}
+
+        if not active_fixed or not active_alt:
+            continue
+
+        # 建立 day-level presence
+        has_fixed_day = {}
+        for d, vars_list in active_fixed.items():
+            h = model.NewBoolVar(
+                f"music_fixed_has_{c_name}_d{d}".replace(" ", "_")
+            )
+            model.AddMaxEquality(h, vars_list)
+            has_fixed_day[d] = h
+
+        has_alt_day = {}
+        for d, vars_list in active_alt.items():
+            h = model.NewBoolVar(
+                f"music_alt_has_{c_name}_d{d}".replace(" ", "_")
+            )
+            model.AddMaxEquality(h, vars_list)
+            has_alt_day[d] = h
+
+        # 同一天不可同時有固定音樂和交替音樂
+        for d in range(DAYS):
+            if d in has_fixed_day and d in has_alt_day:
+                model.Add(has_fixed_day[d] + has_alt_day[d] <= 1)
+
+
 def _normalize_special_room_subject(subj_raw):
     subj = str(subj_raw or "").strip()
     if subj in ("語文-本土語", "本土語言", "閩南語", "客語"):
@@ -263,24 +510,37 @@ def _normalize_special_room_subject(subj_raw):
 
 
 def _canonical_schedule_subject_for_room(subject):
+    """
+    Normalize schedule subject to room-assignment canonical (Traditional Chinese).
+    
+    [SAFETY] Must handle both Traditional and Simplified Chinese input.
+    Output must match repair_agent.canonical_subject() for consistency.
+    Falls through to _normalize_room_subject from utils.py for any
+    subjects not explicitly handled here, ensuring Simplified Chinese
+    variants are properly converted.
+    """
+    from .utils import _normalize_room_subject
+    
     subj = str(subject or "").strip()
     if not subj:
         return ""
-    if "自然" in subj:
+    # Handle both Traditional and Simplified Chinese
+    if "自然" in subj or "科学" in subj:
         return "自然科學"
-    if "英語" in subj or "英文" in subj:
+    if "英語" in subj or "英语" in subj or "英文" in subj:
         return "語文-英語"
-    if "音樂" in subj:
+    if "音樂" in subj or "音乐" in subj:
         return "音樂"
-    if "美勞" in subj:
+    if "美勞" in subj or "美劳" in subj:
         return "美勞"
-    if "體育" in subj or "游泳" in subj:
+    if "體育" in subj or "体育" in subj or "游泳" in subj:
         return "體育"
-    if "資訊" in subj or "電腦" in subj or "科技-資訊" in subj:
+    if any(x in subj for x in ("資訊", "资讯", "電腦", "电脑", "科技-資訊", "科技-资讯")):
         return "資訊"
     if "本土" in subj:
         return "本土語"
-    return _normalize_special_room_subject(subj)
+    # Fallback: use utils._normalize_room_subject for any remaining variants
+    return _normalize_room_subject(subj)
 
 
 def _subject_capacity_weight(subject, canonical_subject):
@@ -548,12 +808,25 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
         if not canonical_room_subject or canonical_room_subject not in constrained_subjects:
             continue
 
-        grade = class_grade_map.get(class_name, 1)
-        if not grade_needs_special_room(canonical_room_subject, grade, classroom_grades_cfg):
-            continue
-
         actual_rooms = rooms_by_subject.get(canonical_room_subject, [])
         if not actual_rooms:
+            continue
+
+        grade = class_grade_map.get(class_name, 1)
+        # [SAFETY] grade_needs_special_room 控制兩件事：
+        # 1. 容量計數（上方 loop 已用此過濾 usage_terms）
+        # 2. 是否建立 room assignment 變數
+        # 兩者必須一致，否則會把原本不計入硬容量的課強制塞進有限教室，
+        # 造成 solver INFEASIBLE。
+        needs_room = grade_needs_special_room(
+            canonical_room_subject, grade, classroom_grades_cfg
+        )
+
+        # [P0-1 FIX] If this grade does not need a specialty room for this subject,
+        # skip the entire hard room assignment / room occupancy path.
+        # This prevents solver INFEASIBLE when the subject is not configured
+        # in subjectClassroomGrades for this grade.
+        if not needs_room:
             continue
 
         is_alt = "交替" in str(raw_subject or "") or "/" in str(raw_subject or "")
@@ -1425,6 +1698,9 @@ __all__ = [
     # Task 07: grade1-2 Tuesday life-course & daily subject-teacher minimum
     "apply_grade12_tuesday_life_course",
     "build_daily_subject_teacher_minimum_penalty",
+    # Subject Day-Spread Hard Constraint
+    "apply_subject_day_spread",
+    "apply_music_fixed_vs_alternating_day_spread",
 ]
 
 

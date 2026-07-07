@@ -64,6 +64,8 @@ from constraints.class_rules import (
     apply_week_specific_art_capacity_entries,
     apply_grade12_tuesday_life_course,
     build_daily_subject_teacher_minimum_penalty,
+    apply_subject_day_spread,
+    apply_music_fixed_vs_alternating_day_spread,
 )
 from constraints.utils import grade_needs_special_room
 from constraints.special_rules import (
@@ -1143,6 +1145,144 @@ def _backfill_music_art_classrooms_after_optimization(schedule_entries, classroo
                 entry["classroomName"] = ""
 
 
+def _backfill_other_special_room_classrooms(schedule_entries, classrooms, school_info):
+    """
+    [FIX] 為非音樂/美勞的專科教室科目（資訊、自然科學、語文-英語等）回填 classroomId/classroomName。
+
+    這些科目在 solver 的 apply_special_classroom_capacity 中已有 room assignment 變數，
+    但 output extraction 階段可能因為 assigned_rooms lookup 失敗而遺漏。
+    此函數在 post-processing 階段補齊。
+    """
+    if not classrooms or not schedule_entries:
+        return
+
+    from constraints.utils import grade_needs_special_room
+
+    # 建立 subject -> rooms 映射（涵蓋所有專科教室）
+    rooms_by_subject = defaultdict(list)
+    for room in classrooms:
+        subj = _normalize_special_room_subject(room.get("subject", ""))
+        if subj in ("音樂", "美勞"):
+            continue  # 音樂/美勞由 _backfill_music_art_classrooms_after_optimization 處理
+        if not subj:
+            continue
+        rooms_by_subject[subj].append({
+            "id": str(room.get("id") or room.get("name", "")),
+            "name": str(room.get("name", "")),
+            "subject": subj,
+            "gradePreferences": room.get("gradePreferences", []) or [],
+        })
+
+    if not rooms_by_subject:
+        return
+
+    classroom_grades_cfg = (school_info or {}).get("subjectClassroomGrades", {}) or {}
+
+    # 收集需要 backfill 的 entry（沒有 classroomId 的專科教室科目）
+    entries_to_backfill = []
+    for entry in schedule_entries:
+        subj_raw = str(entry.get("subject", "")).strip()
+        canonical = _normalize_special_room_subject(subj_raw)
+        if not canonical or canonical not in rooms_by_subject:
+            continue
+
+        # 跳過已有 classroomId 的 entry
+        existing_id = str(entry.get("classroomId", "") or "").strip()
+        if existing_id:
+            continue
+
+        className = str(entry.get("className", "")).strip()
+        day = int(entry.get("day", 0) or 0)
+        period = int(entry.get("period", 0) or 0)
+        week = _normalize_week_tag(entry.get("week"))
+        if not className or not day or not period:
+            continue
+
+        grade = _get_class_grade_from_name(className, school_info)
+
+        # [FIX] 必須尊重 grade_needs_special_room 語意：
+        # 只有 grade_needs_special_room == True 的課才能 backfill classroomId。
+        # 否則與 class_rules.py 的 needs_room guard 互相矛盾。
+        if not grade_needs_special_room(canonical, grade, classroom_grades_cfg):
+            continue
+
+        entries_to_backfill.append({
+            "entry": entry,
+            "subject": canonical,
+            "className": className,
+            "grade": grade,
+            "day": day,
+            "period": period,
+            "week": week,
+        })
+
+    if not entries_to_backfill:
+        return
+
+    # 按 (day, period, week) 分組
+    slot_groups = defaultdict(list)
+    for item in entries_to_backfill:
+        slot_key = (item["day"], item["period"], item["week"])
+        slot_groups[slot_key].append(item)
+
+    # 記錄已佔用: (room_id, day, period, week) -> set
+    occupied = set()
+
+    # 載入所有已有 classroomId 的 entry 的佔用狀態
+    for entry in schedule_entries:
+        existing_room_id = str(entry.get("classroomId", "") or "").strip()
+        if not existing_room_id:
+            continue
+        e_day = int(entry.get("day", 0) or 0)
+        e_period = int(entry.get("period", 0) or 0)
+        if not e_day or not e_period:
+            continue
+        e_week = _normalize_week_tag(entry.get("week"))
+        for w in _expand_validation_weeks(e_week):
+            occupied.add((existing_room_id, e_day, e_period, w))
+
+    for slot_key, items in slot_groups.items():
+        day, period, week = slot_key
+
+        for item in items:
+            canonical_subj = item["subject"]
+            grade = item["grade"]
+            entry = item["entry"]
+
+            candidate_rooms = list(rooms_by_subject.get(canonical_subj, []))
+            if not candidate_rooms:
+                continue
+
+            # 優先偏好年級
+            def room_sort_key(room):
+                gp = room.get("gradePreferences", []) or []
+                has_pref = grade in gp if isinstance(gp, list) else False
+                return (0 if has_pref else 1, room.get("name", ""))
+
+            candidate_rooms.sort(key=room_sort_key)
+
+            weeks_to_occupy = ("odd", "even") if week == "both" else (week,)
+            assigned = False
+            for room in candidate_rooms:
+                room_id = room["id"]
+
+                is_free = True
+                for w in weeks_to_occupy:
+                    if (room_id, day, period, w) in occupied:
+                        is_free = False
+                        break
+
+                if is_free:
+                    entry["classroomId"] = room_id
+                    entry["classroomName"] = room["name"]
+                    for w in weeks_to_occupy:
+                        occupied.add((room_id, day, period, w))
+                    assigned = True
+                    break
+
+            # 如果沒有分配到教室，保留空值（由 validation report 報告 overload）
+
+
 def _get_class_grade_from_name(class_name, school_info):
     """從班級名稱提取年級"""
     import re as _re
@@ -1509,6 +1649,17 @@ def main():
         # ============================================================
         print("[CONSTRAINT] [核心約束] 加入體育不連堂...")
         apply_no_consecutive_pe(model, classes_data, schedule)
+
+        # [Subject Day-Spread] 科任課日分散規則（英語/資訊/體育/健康/社會）
+        print("[CONSTRAINT] [核心約束] 加入科任課日分散規則（英語/資訊/體育/健康/社會）...")
+        apply_subject_day_spread(model, classes_data, schedule, locked_vars=locked_vars)
+
+        # [Subject Day-Spread] 音樂固定課 vs 交替課不同日規則
+        print("[CONSTRAINT] [核心約束] 加入音樂固定課 vs 交替課不同日規則...")
+        apply_music_fixed_vs_alternating_day_spread(
+            model, classes_data, schedule,
+            alternating_class_is_music_odd=alternating_class_is_music_odd,
+        )
 
         print("[CONSTRAINT] [核心約束] 加入音樂美勞至少一組連堂...")
         apply_art_consecutive_constraint(
@@ -1970,6 +2121,10 @@ def main():
                 schoolInfo,
             )
             result["schedule"] = optimized_schedule
+
+            # [FIX] backfill other special-room subjects (資訊, 自然科學, 語文-英語, etc.)
+            # This ensures explicit classroom assignment regardless of whether music/art optimization occurred.
+            _backfill_other_special_room_classrooms(result["schedule"], classrooms, schoolInfo)
 
             # [Task 2/5] Week-specific 音美教室容量後驗檢查
             ws_check = apply_week_specific_art_capacity_entries(

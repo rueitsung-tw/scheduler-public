@@ -8,8 +8,6 @@ repair_agent.py — Phase 2 修補代理 (Repair Agent)
 - 教師過度連堂（連上 4 堂）
 - 班級科任課過度集中（單日 > 3 節）
 - 交替課未完美對齊（單雙週音樂/美勞時段不一致）
-- 20260706
-
 
 用法：
     python repair_agent.py <payload.json> <phase1_output.json> <output_path>
@@ -27,16 +25,26 @@ from collections import defaultdict
 
 
 def canonical_subject(subject: str) -> str:
-    """Subject name normalization — single source of truth for repair agent."""
+    """
+    Subject name normalization — single source of truth for repair agent.
+    
+    [SAFETY] Must use Traditional Chinese canonical names to match
+    solver/class_rules.py _canonical_schedule_subject_for_room() output.
+    Mismatch here causes room capacity checks to use wrong keys,
+    leading to stale classroomId assignments after repair swaps.
+    """
     s = subject.strip()
+    if not s:
+        return ""
     if "音樂" in s or "音乐" in s:
-        return "音乐"
+        return "音樂"
     if "美勞" in s or "美劳" in s:
-        return "美劳"
-    if "自然" in s:
-        return "自然科学"
+        return "美勞"
+    # "自然科學" must match both Traditional and Simplified variants
+    if any(x in s for x in ("自然", "科学")):
+        return "自然科學"
     if any(x in s for x in ("科技-資訊", "科技-资讯", "資訊", "资讯", "電腦", "电脑")):
-        return "科技-资讯"
+        return "資訊"
     return s
 
 
@@ -590,20 +598,14 @@ class RepairAgent:
 
     def _needs_special_room(self, subject: str, class_name: str) -> bool:
         """
-        Determine if a subject in this class needs a specialty classroom.
-        
-        Low grades (1-2) are exempt from room capacity for certain subjects.
+        [FIX] 委派給 constraints.utils.grade_needs_special_room，確保與 solver config 對齊。
         """
-        canonical = self._canonical_subject(subject)
-        # Only these subjects have special room requirements
-        if canonical not in {"音乐", "美劳", "自然科学", "科技-资讯"}:
-            return True  # Non-specialty subjects don't use specialty rooms
-        
+        from constraints.utils import grade_needs_special_room
+        school_info = self.payload.get("schoolInfo", {})
+        classroom_grades_cfg = school_info.get("subjectClassroomGrades", {}) or {}
         grade = self._grade_for_class(class_name)
-        if grade <= 2:
-            return False  # Low grade exemption
-        
-        return True
+        canonical = self._canonical_subject(subject)
+        return grade_needs_special_room(canonical, grade, classroom_grades_cfg)
 
     def _check_room_capacity(self, day, period, subject):
         """檢查此科目在此時段的使用數是否超載（使用正規化科目名稱）"""
@@ -736,6 +738,20 @@ class RepairAgent:
         if not valid:
             self.schedule[key_A], self.schedule[key_B] = self.schedule[key_B], self.schedule[key_A]
             return False
+
+        # === [P0-2 FIX] Clear stale classroomId/classroomName after swap ===
+        # After a swap, the old classroomId/classroomName may no longer be valid
+        # for the new period. If two entries in the same period share the same
+        # classroomId, the export would show incorrect room assignments.
+        specialty_canonicals = {"音樂", "美勞", "自然科學", "資訊"}
+        for key in (key_A, key_B):
+            slot = self.schedule.get(key)
+            if slot:
+                canonical = self._canonical_subject(slot.get("subject", ""))
+                if canonical in specialty_canonicals:
+                    slot.pop("classroomId", None)
+                    slot.pop("classroomName", None)
+                    slot.pop("roomName", None)
 
         return True
 
@@ -877,10 +893,188 @@ class RepairAgent:
         self.schedule = best_schedule
         return self.schedule
 
+    def _reassign_specialty_classrooms(self):
+        """
+        [P1-repair FIX] 在 export 前重新指派專科教室。
+
+        try_swap 成功後會 pop 掉 stale classroomId。
+        此方法掃描所有缺少 classroomId 的專科教室課，
+        根據可用教室重新分配，確保 repair output 自洽。
+
+        規則：
+        1. 只處理 canonical subject 在 specialty set 中的課
+        2. 只處理缺少 classroomId 的 entry
+        3. 同一時段同一週別不能重複占用同一 room id
+        4. 容量不足時保留空白，不假裝分配成功
+        5. 以 subjectClassroomGrades 為準，沒有配置就不處理
+        """
+        specialty_canonicals = {"音樂", "美勞", "自然科學", "資訊"}
+
+        # 建立 canonical subject -> rooms 映射
+        rooms_by_subject = defaultdict(list)
+        for room in self.classrooms:
+            subj = canonical_subject(room.get("subject", ""))
+            if subj and subj in specialty_canonicals:
+                rooms_by_subject[subj].append({
+                    "id": str(room.get("id") or room.get("name", "")),
+                    "name": str(room.get("name", "")),
+                    "gradePreferences": room.get("gradePreferences", []) or [],
+                })
+
+        if not rooms_by_subject:
+            return
+
+        # 穩定排序：按 name 排序，確保決定性
+        for subj in rooms_by_subject:
+            rooms_by_subject[subj].sort(key=lambda r: r["name"])
+
+        # 第一遍：收集所有已占用的 (room_id, day, period, week)
+        occupied = set()
+        for key, slot in self.schedule.items():
+            if not slot:
+                continue
+            day, period, cls = key
+            room_id = str(slot.get("classroomId", "") or "").strip()
+            if not room_id:
+                continue
+            occupied.add((room_id, day, period, "odd"))
+            occupied.add((room_id, day, period, "even"))
+
+        # 也要考慮 week_specific_entries 的占用
+        for entry in self.week_specific_entries:
+            room_id = str(entry.get("classroomId", "") or "").strip()
+            if not room_id:
+                continue
+            e_day = int(entry.get("day", 0) or 0) - 1  # 轉 0-based
+            e_period = int(entry.get("period", 0) or 0) - 1
+            week = self._normalize_week_tag(entry.get("week"))
+            if e_day < 0 or e_period < 0:
+                continue
+            if week in ("odd", "even"):
+                occupied.add((room_id, e_day, e_period, week))
+            else:
+                occupied.add((room_id, e_day, e_period, "odd"))
+                occupied.add((room_id, e_day, e_period, "even"))
+
+        # 第二遍：收集需要指派的 slots，穩定排序
+        needs_assignment = []
+        for key, slot in self.schedule.items():
+            if not slot:
+                continue
+            day, period, cls = key
+            subj_raw = slot.get("subject", "")
+            canonical = self._canonical_subject(subj_raw)
+            if canonical not in specialty_canonicals:
+                continue
+            if canonical not in rooms_by_subject:
+                continue
+            # 跳過已有 classroomId 的
+            existing_id = str(slot.get("classroomId", "") or "").strip()
+            if existing_id:
+                continue
+            # 尊重 config 豁免
+            if not self._needs_special_room(subj_raw, cls):
+                continue
+            needs_assignment.append((day, period, cls, canonical, slot))
+
+        # 穩定排序：按 (day, period, className) 排序
+        needs_assignment.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        # 第三遍：逐一分配
+        assigned_count = 0
+        unassigned_count = 0
+        for day, period, cls, canonical, slot in needs_assignment:
+            candidate_rooms = list(rooms_by_subject.get(canonical, []))
+            if not candidate_rooms:
+                unassigned_count += 1
+                continue
+
+            # 按 gradePreferences 偏好排序
+            grade = self._grade_for_class(cls)
+            def room_sort_key(room, g=grade):
+                gp = room.get("gradePreferences", []) or []
+                has_pref = g in gp if isinstance(gp, list) else False
+                return (0 if has_pref else 1, room["name"])
+            candidate_rooms.sort(key=room_sort_key)
+
+            # 嘗試分配
+            assigned = False
+            for room in candidate_rooms:
+                room_id = room["id"]
+                # non-week-specific -> 需要 odd 和 even 都空閒
+                if (room_id, day, period, "odd") not in occupied and \
+                   (room_id, day, period, "even") not in occupied:
+                    slot["classroomId"] = room_id
+                    slot["classroomName"] = room["name"]
+                    occupied.add((room_id, day, period, "odd"))
+                    occupied.add((room_id, day, period, "even"))
+                    assigned = True
+                    assigned_count += 1
+                    break
+
+            if not assigned:
+                unassigned_count += 1
+
+        # week_specific_entries 也要處理
+        ws_needs = []
+        for i, entry in enumerate(self.week_specific_entries):
+            subj_raw = entry.get("subject", "")
+            canonical = self._canonical_subject(subj_raw)
+            if canonical not in specialty_canonicals:
+                continue
+            if canonical not in rooms_by_subject:
+                continue
+            existing_id = str(entry.get("classroomId", "") or "").strip()
+            if existing_id:
+                continue
+            cls = entry.get("className", "")
+            if not self._needs_special_room(subj_raw, cls):
+                continue
+            e_day = int(entry.get("day", 0) or 0) - 1
+            e_period = int(entry.get("period", 0) or 0) - 1
+            week = self._normalize_week_tag(entry.get("week"))
+            if e_day < 0 or e_period < 0:
+                continue
+            ws_needs.append((e_day, e_period, cls, canonical, week, entry))
+
+        ws_needs.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        for e_day, e_period, cls, canonical, week, entry in ws_needs:
+            candidate_rooms = list(rooms_by_subject.get(canonical, []))
+            if not candidate_rooms:
+                continue
+            grade = self._grade_for_class(cls)
+            def room_sort_key(room, g=grade):
+                gp = room.get("gradePreferences", []) or []
+                has_pref = g in gp if isinstance(gp, list) else False
+                return (0 if has_pref else 1, room["name"])
+            candidate_rooms.sort(key=room_sort_key)
+
+            weeks_to_check = [week] if week in ("odd", "even") else ["odd", "even"]
+            for room in candidate_rooms:
+                room_id = room["id"]
+                is_free = all(
+                    (room_id, e_day, e_period, w) not in occupied
+                    for w in weeks_to_check
+                )
+                if is_free:
+                    entry["classroomId"] = room_id
+                    entry["classroomName"] = room["name"]
+                    for w in weeks_to_check:
+                        occupied.add((room_id, e_day, e_period, w))
+                    assigned_count += 1
+                    break
+
+        if assigned_count > 0 or unassigned_count > 0:
+            print(f"  [INFO] [Repair Room Reassign] 指派: {assigned_count}, 無法指派: {unassigned_count}")
+
     def export_result(self, output_path):
         """
         將優化後的課表導出為與 Phase 1 兼容的 JSON 格式。
         """
+        # [P1-repair FIX] 導出前重新指派專科教室
+        self._reassign_specialty_classrooms()
+
         print(f"\n[SAVE] 導出優化結果到 {output_path} ...")
 
         result = []

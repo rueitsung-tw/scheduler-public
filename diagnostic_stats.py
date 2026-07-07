@@ -1,8 +1,7 @@
 """
 排課診斷統計模組
 計算 primaryTeacher 命中率、gradePreferences 命中率、容量超載診斷
-可作為 CLI 獨立執行，也可被其他 Python 模組 import   
-20260706
+可作為 CLI 獨立執行，也可被其他 Python 模組 import
 """
 
 import terminal_sanitizer
