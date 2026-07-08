@@ -76,6 +76,8 @@ debug_lock_audit.txt
 
 # Dev database
 dev.db
+*.r5-backup
+*.readonly-copy
 
 # Python cache
 __pycache__/
@@ -84,4 +86,3 @@ __pycache__/
 # Python virtual environments
 venv/
 .venv/
-

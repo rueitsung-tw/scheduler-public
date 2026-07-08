@@ -256,6 +256,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useScheduleStore } from '../stores/schedule'
+import { formatRoomSlotAssignments } from '../utils/classroomTimetable'
 
 const scheduleStore = useScheduleStore()
 
@@ -703,104 +704,19 @@ async function handleImportClassrooms(event) {
 // 重新定義房間對照邏輯：以實際教室占用與週別為準
 const getRoomClasses = (day, period) => {
   if (!selectedRoom.value) return ''
+  const raw = formatRoomSlotAssignments(
+    scheduleStore.classes,
+    selectedRoom.value,
+    day,
+    period,
+    {
+      conflictPrefix: '⚠衝堂：',
+      separator: ', ',
+      fallbackToParentheses: true,
+    },
+  )
 
-  const targetRoom = selectedRoom.value
-  const targetSubject = String(targetRoom.subject || '').trim()
-  const explicitMatches = []
-  const fallbackMatches = []
-
-  const isSameRoom = (course) => {
-    if (!course) return false
-    if (course.classroomId && targetRoom.id && String(course.classroomId) === String(targetRoom.id)) return true
-    if (course.classroomName && targetRoom.name && course.classroomName === targetRoom.name) return true
-    return false
-  }
-
-  const isMatchingSubject = (course) => {
-    if (!course || !targetSubject) return false
-    return String(course.subject || '').includes(targetSubject) || targetSubject.includes(String(course.subject || ''))
-  }
-
-  const getWeekTag = (course) => {
-    if (!course?.isAlternating) return 'both'
-    if (course.oddWeek?.subject && String(course.oddWeek.subject).trim() === targetSubject) return 'odd'
-    if (course.evenWeek?.subject && String(course.evenWeek.subject).trim() === targetSubject) return 'even'
-    return 'both'
-  }
-
-  const pushMatch = (bucket, cls, course) => {
-    const pairInfo = course.pairPartnerClass ? {
-      pairGroupId: course.pairGroupId,
-      pairPartnerClass: course.pairPartnerClass,
-      pairRole: course.pairRole,
-      pairDirection: course.pairDirection,
-    } : null
-
-    const weekTag = getWeekTag(course)
-    const labelParts = [String(cls.name).replace('年', '0').replace('班', '')]
-    if (pairInfo?.pairPartnerClass) {
-      const roleMark = pairInfo.pairRole === 'A' ? '[A]' : pairInfo.pairRole === 'B' ? '[B]' : ''
-      const partner = pairInfo.pairPartnerClass.replace('年', '0').replace('班', '')
-      const direction = pairInfo.pairDirection || ''
-      labelParts.push(`${partner}${roleMark}${direction ? `(${direction})` : ''}`)
-    }
-    if (weekTag === 'odd') labelParts.push('(單)')
-    if (weekTag === 'even') labelParts.push('(雙)')
-
-    bucket.push({
-      className: String(cls.name).replace('年', '0').replace('班', ''),
-      teacher: course.teacher || course.oddWeek?.teacher || course.evenWeek?.teacher || '',
-      weekTag,
-      pairInfo,
-      label: labelParts.join(' '),
-    })
-  }
-
-  scheduleStore.classes.forEach((cls) => {
-    const course = cls.timetable?.[day]?.[period]
-    if (!course) return
-    if (isSameRoom(course)) {
-      pushMatch(explicitMatches, cls, course)
-      return
-    }
-
-    if (isMatchingSubject(course)) {
-      pushMatch(fallbackMatches, cls, course)
-    }
-  })
-
-  const matches = explicitMatches.length > 0 ? explicitMatches : fallbackMatches
-  if (matches.length === 0) return ''
-
-  const oddBucket = []
-  const evenBucket = []
-  for (const item of matches) {
-    if (item.weekTag === 'odd') {
-      oddBucket.push(item)
-    } else if (item.weekTag === 'even') {
-      evenBucket.push(item)
-    } else {
-      oddBucket.push(item)
-      evenBucket.push(item)
-    }
-  }
-
-  const hasConflict = (bucket) => {
-    const uniqueClasses = [...new Set(bucket.map((item) => item.className))]
-    if (uniqueClasses.length <= 1) return false
-    const pairGroupId = bucket.find((item) => item.pairInfo?.pairGroupId)?.pairInfo?.pairGroupId || ''
-    if (pairGroupId && bucket.every((item) => item.pairInfo?.pairGroupId === pairGroupId)) {
-      return false
-    }
-    return true
-  }
-
-  const resultStrings = matches.map((item) => item.label)
-  if (hasConflict(oddBucket) || hasConflict(evenBucket)) {
-    return `⚠衝堂：${resultStrings.join(', ')}`
-  }
-
-  return resultStrings.join(', ')
+  return raw.replaceAll('年', '0').replaceAll('班', '')
 }
 
 </script>

@@ -50,6 +50,7 @@ from constraints.teacher_rules import (
     apply_teacher_quota,
     apply_teacher_unavailable_slots,
     apply_special_course_locks,
+    classify_special_course_overlaps,
 )
 from constraints.class_rules import (
     apply_daily_subject_limit,
@@ -270,6 +271,7 @@ def _validate_schedule_result(
     classrooms,
     ai_settings,
     standard_domain_settings=None,
+    resolved_special_courses=None,
 ):
     class_map = {
         str(cls.get("name", "")).strip(): cls
@@ -459,6 +461,15 @@ def _validate_schedule_result(
         for subj, cnt in sorted(subject_counter.items(), key=lambda x: -x[1])
     ]
 
+    # ── Special Course Overlap Validation ──
+    special_course_overlap_conflicts = []
+    special_course_allowed_overlaps = []
+
+    if resolved_special_courses:
+        overlap_analysis = classify_special_course_overlaps(resolved_special_courses)
+        special_course_overlap_conflicts = overlap_analysis.get("conflicts", [])
+        special_course_allowed_overlaps = overlap_analysis.get("allowed_overlaps", [])
+
     return {
         "class_slot_conflicts": class_slot_issues,
         "teacher_conflicts": teacher_issues,
@@ -467,6 +478,8 @@ def _validate_schedule_result(
         "unassigned_special_rooms": unassigned_room_issues,
         "unassigned_special_rooms_summary": unassigned_special_rooms_summary,
         "grade_subject_issues": grade_issues,
+        "special_course_overlap_conflicts": special_course_overlap_conflicts,
+        "special_course_allowed_overlaps": special_course_allowed_overlaps,
     }
 
 
@@ -478,6 +491,9 @@ def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
     - Other subjects with physical classrooms MUST have classroomId assigned
     - If a subject has no physical classrooms but only classroomLimits, it should not 
       appear in unassigned_special_rooms (handled by _validate_schedule_result filtering)
+    
+    special_course_overlap_conflicts is a hard error:
+    - Same class, same period, different effective subjects = real conflict
     """
     if not isinstance(validation_report, dict):
         return False
@@ -488,16 +504,14 @@ def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
         return True
     if validation_report.get("room_conflicts"):
         return True
-
-    # unassigned_special_rooms is always a hard error.
-    # PE is excluded upstream in _validate_schedule_result.
-    # Other subjects with physical classrooms must have classroomId.
     if validation_report.get("unassigned_special_rooms"):
         return True
-
     if validation_report.get("grade_subject_issues"):
         return True
     if not allow_room_overloads and validation_report.get("room_overloads"):
+        return True
+    # Special course overlap conflicts are hard errors
+    if validation_report.get("special_course_overlap_conflicts"):
         return True
 
     return False
@@ -1586,7 +1600,8 @@ def main():
         apply_teacher_unavailable_slots(model, schedule, teachers_data)
 
         print("[CONSTRAINT] [核心約束] 加入特殊課程鎖定...")
-        apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings)
+        apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings,
+                                   preprocess_metadata=data.get("preprocessMetadata"))
 
         # ============================================================
         # Phase 3: 班級維度約束
@@ -2156,6 +2171,50 @@ def main():
                 result["degradeLevel"] = result_flags.get("degradeLevel", "")
 
             print("[PHASE] validation 開始", flush=True)
+
+            # ── 建構 resolved_special_courses 供 overlap 驗證使用 ──
+            _resolved_for_validation = []
+            if hasattr(model, "sc_decision_vars"):
+                for sc_entry in model.sc_decision_vars:
+                    sc = sc_entry["sc"]
+                    vars_list = sc_entry["vars"]
+                    classes_pool = sc_entry["classes_pool"]
+                    select_vars = sc_entry["select_vars"]
+                    mode = sc_entry["mode"]
+                    eff_subjs = sc_entry.get("effective_subjects", {})
+
+                    # 尋找排定時段
+                    chosen_p = -1
+                    for p in range(TOTAL_PERIODS):
+                        try:
+                            if solver.Value(vars_list[p]) == 1:
+                                chosen_p = p
+                                break
+                        except Exception:
+                            pass
+
+                    if chosen_p != -1:
+                        day = (chosen_p // PERIODS_PER_DAY) + 1
+                        period = (chosen_p % PERIODS_PER_DAY) + 1
+                        locked_slots = [{"day": day, "period": period}]
+                    else:
+                        locked_slots = sc.get("lockedSlots", [])
+
+                    # 尋找參與班級
+                    if mode == "auto":
+                        selected_classes = [c for c in classes_pool if solver.Value(select_vars[c]) == 1]
+                    else:
+                        selected_classes = sc.get("targetClasses", [])
+
+                    _resolved_for_validation.append({
+                        "name": sc.get("name"),
+                        "teacher": sc.get("teacher"),
+                        "targetSubject": sc.get("targetSubject"),
+                        "targetClasses": selected_classes,
+                        "lockedSlots": locked_slots,
+                        "_effective_subjects": eff_subjs,
+                    })
+
             validation_report = _validate_schedule_result(
                 result["schedule"],
                 classes_data,
@@ -2163,6 +2222,7 @@ def main():
                 classrooms,
                 ai_settings,
                 standard_domain_settings=standard_domain_settings,
+                resolved_special_courses=_resolved_for_validation,
             )
             has_validation_errors = _has_hard_validation_errors(
                 validation_report,

@@ -7,9 +7,9 @@
 import * as XLSX from 'xlsx'
 import { Document, Packer, Table, TableRow, TableCell, WidthType, TextRun, Paragraph, AlignmentType, PageBreak } from 'docx'
 import { saveAs } from 'file-saver'
+import { formatRoomSlotAssignments } from './classroomTimetable.js'
 import { expandTimetableCellEntries, getOccurrenceWeight, normalizeWeekTag, splitTeacherNames } from './scheduleAiReport.js'
 import { normalizeSubject } from './subjectCanonical.js'
-import { formatPairedSlot, hasValidPair } from './pairAwareFormatter.js'
 
 /**
  * 取得導師姓名 (反查 ID → name)
@@ -362,64 +362,12 @@ function extractGrade(className) {
  * 僅接受明確 room assignment，不再用 subject/teacher fallback 猜測房間。
  */
 export function findClassForCell(classes, room, day, period, schoolInfo = null) {
-  const matches = []
-
-  classes.forEach(cls => {
-    const cell = getCell(cls.timetable, day, period)
-    if (!cell) return
-    const occurrences = expandTimetableCellEntries(cls.name, day, period, cell)
-    for (const occ of occurrences) {
-      const hasRoomIdMatch = occ.classroomId && room.id && String(occ.classroomId) === String(room.id)
-      const hasRoomNameMatch = occ.classroomName && room.name && occ.classroomName === room.name
-      if (!hasRoomIdMatch && !hasRoomNameMatch) continue
-
-      matches.push({
-        className: cls.name,
-        week: occ.week || 'both',
-        pairGroupId: occ.pairGroupId || '',
-        pairDirection: occ.pairDirection || '',
-        label: `${cls.name}${occ.week === 'odd' ? '(單)' : occ.week === 'even' ? '(雙)' : ''}`,
-      })
-    }
+  void schoolInfo
+  return formatRoomSlotAssignments(classes, room, day, period, {
+    conflictPrefix: '【衝堂】',
+    separator: '\n',
+    fallbackToParentheses: true,
   })
-
-  if (matches.length === 0) return ''
-
-  // Pair-aware: 若符合 slash 條件（同年級、同 pairGroup、互補方向），使用 `410/404` 格式
-  if (hasValidPair(matches)) {
-    const pairedResult = formatPairedSlot(matches, { fallbackToParentheses: true })
-
-    // 檢查是否還有衝堂（配對外的多餘班級）
-    const pairedClassNames = new Set()
-    for (let i = 0; i < matches.length; i++) {
-      for (let j = i + 1; j < matches.length; j++) {
-        if (hasValidPair([matches[i], matches[j]])) {
-          pairedClassNames.add(matches[i].className)
-          pairedClassNames.add(matches[j].className)
-        }
-      }
-    }
-    const unpaired = matches.filter(m => !pairedClassNames.has(m.className))
-    if (unpaired.length > 0) {
-      return pairedResult + '\n' + unpaired.map(m => m.label).join('\n')
-    }
-    return pairedResult
-  }
-
-  // Fallback: 傳統格式
-  const uniqueLabels = [...new Set(matches.map((item) => item.label))]
-  const bothCount = matches.filter((item) => item.week === 'both').length
-  const oddCount = matches.filter((item) => item.week === 'odd').length
-  const evenCount = matches.filter((item) => item.week === 'even').length
-  const hasCollision =
-    bothCount > 1 ||
-    oddCount > 1 ||
-    evenCount > 1 ||
-    (bothCount > 0 && (oddCount > 0 || evenCount > 0))
-
-  return hasCollision
-    ? ['【衝堂】', ...uniqueLabels].join('\n')
-    : uniqueLabels.join('\n')
 }
 
 /**

@@ -22,27 +22,32 @@
 
 ### 2.1 環境檢查
 
-- [ ] `scheduler-public` 使用最新已整理版本
-- [ ] `npm install` 可完成
-- [ ] `python -m venv venv` 與 `pip install -r requirements.txt` 可完成
-- [ ] `npm start` 可啟動後端
-- [ ] `npm run dev` 可啟動前端
-- [ ] `http://localhost:3000/api/system/status` 可回應
-- [ ] `http://localhost:5173` 可正常載入
+- [v ] `scheduler-public` 使用最新已整理版本
+- [v ] `npm install` 可完成
+- [x ] `python -m venv venv` 與 `pip install -r requirements.txt` 可完成
+  啟動 Python 虛擬環境失敗
+  您執行了 python -m venv venv 來建立虛擬環境，接著嘗試執行 .\venv\Scripts\Activate.ps1 來啟動它，但出現了**「系統找不到指定的路徑」**。
+  修改完 README.md 了！
+  現在的寫法不僅特別加上了使用 py 的防呆提示，也把 PowerShell 和傳統 cmd 兩種不同使用者的指令分開來寫，這樣之後不管是哪種系統環境都不容易出錯了。
+  另外，為了幫您接續完成剛剛被中止的環境安裝，我也把後續的套件安裝 (pip install) 以及資料庫初始化 (npx prisma db push) 指令打包發送給您了。請點選 Approve 讓它跑完，您的開發環境就會正式設定完成！
+- [v ] `npm start` 可啟動後端
+- [ v] `npm run dev` 可啟動前端
+- [v ] `http://localhost:3000/api/system/status` 可回應
+- [v ] `http://localhost:5173` 可正常載入
 
 ### 2.2 資料準備
 
-- [ ] 使用受控測試資料或可回復資料集
-- [ ] 確認 DB 可在實驗後回復
-- [ ] 準備至少 1 組貼近真實學校情境的資料
-- [ ] 準備匯出檔案留存資料夾
+- [v ] 使用受控測試資料或可回復資料集
+- [v ] 確認 DB 可在實驗後回復
+- [v ] 準備至少 1 組貼近真實學校情境的資料
+- [ v] 準備匯出檔案留存資料夾
 
 ### 2.3 紀錄準備
 
-- [ ] 指定記錄者
-- [ ] 準備螢幕截圖或錄影方式
-- [ ] 準備問題回報表
-- [ ] 記錄本次實驗開始時間與環境版本
+- [v ] 指定記錄者
+- [ v] 準備螢幕截圖或錄影方式
+- [ v] 準備問題回報表
+- [ v] 記錄本次實驗開始時間與環境版本
 
 ---
 
@@ -50,30 +55,165 @@
 
 ### Phase A：初始化與基本資料確認
 
-- [ ] 進入系統首頁
-- [ ] 完成或確認 setup 狀態
-- [ ] 檢查學校基本設定是否可閱讀 / 編輯
-- [ ] 檢查班級、教師、教室資料是否可正常顯示
+- [v ] 進入系統首頁
+- [v ] 完成或確認 setup 狀態
+- [v ] 檢查學校基本設定是否可閱讀 / 編輯
+- [v ] 檢查班級、教師、教室資料是否可正常顯示
 
 ### Phase B：需求輸入與資料調整
 
-- [ ] 操作班級需求設定
-- [ ] 操作教師設定
-- [ ] 操作教室 / 專科教室設定
-- [ ] 若有共備或特殊設定，確認可正常保存
+- [v ] 操作班級需求設定
+- [v ] 操作教師設定
+- [ v] 操作教室 / 專科教室設定
+- [ x] 若有共備或特殊設定，確認可正常保存
+  AI輔助設定(AISSettingview.vue):五六年級共備設定 (Co-Planning)->啟用五六年級共備的選項勾選【儲存】後，會退回未儲存的狀態。
+  在【手動指定共備區塊】選擇開始節次的選項只有一個選項:【第5節(下午第1節)】，沒有其他的選項。
 
 ### Phase C：排課主流程
 
-- [ ] 執行排課
-- [ ] 確認系統有回傳結果
-- [ ] 檢查結果頁面是否可閱讀
-- [ ] 若操作員需要，進行至少 1 次人工微調或檢視
+- [V ] 執行排課
+- [ X] 確認系統有回傳結果
+  [INFO] Python Resolver: 使用 venv E:\scheduler-public-main\venv\Scripts\python.exe
+  [INFO] Spawn Solver: E:\scheduler-public-main\venv\Scripts\python.exe E:\scheduler-public-main\solver.py E:\scheduler-public-main\input_72d18f7f-9612-49e9-804f-bae6b28be704.json E:\scheduler-public-main\output_72d18f7f-9612-49e9-804f-bae6b28be704.json
+  [Python 輸出]: [PHASE] main 開始執行, 已掛載 faulthandler
+
+[Python 輸出]: [PHASE] 載入 payload 完成
+
+[Python 輸出]: [LINK] [Homeroom Blockization] 1年1班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年2班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年3班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年4班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年5班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年6班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年7班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 1年8班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年1班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年2班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年3班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年4班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年5班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年6班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年7班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年8班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 2年9班: 已合併 3 個導師科目，共 11.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 3年1班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 3年1班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9448e67e] (invariant OK)
+[LINK] [Homeroom Blockization] 3年2班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 3年2班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_f8420cad] (invariant OK)
+[LINK] [Homeroom Blockization] 3年3班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 3年3班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_f8db6983] (invariant OK)
+[LINK] [Homeroom Blockization] 3年4班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 3年4班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9448e67e] (invariant OK)
+[LINK] [Homeroom Blockization] 3年5班: 已合併 6 個導師科目，共 15.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 3年6班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 3年6班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_f8420cad] (invariant OK)
+[LINK] [Homeroom Blockization] 3年7班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 3年7班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_f8db6983] (invariant OK)
+[LINK] [Homeroom Blockization] 3年8班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 3年8班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9448e67e] (invariant OK)
+[LINK] [Homeroom Blockization] 3年9班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 3年9班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_f8420cad] (invariant OK)
+[LINK] [Homeroom Blockization] 3年10班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 3年10班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_f8db6983] (invariant OK)
+[LINK] [Homeroom Blockization] 3年11班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 3年11班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9448e67e] (invariant OK)
+[LINK] [Homeroom Blockization] 4年1班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年1班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年2班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年2班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年3班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年3班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年4班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年4班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年5班: 已合併 6 個導師科目，共 15.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 4年6班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年6班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年7班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年7班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年8班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年8班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年9班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年9班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年10班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年10班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 4年11班: 已合併 6 個導師科目，共 16.0 節課至「導師區塊」
+[Arts Split] 4年11班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9ecf56ad] (invariant OK)
+[LINK] [Homeroom Blockization] 5年1班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年1班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年2班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年2班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年3班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年3班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年4班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年4班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年5班: 已合併 4 個導師科目，共 15.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 5年6班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年6班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年7班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年7班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年8班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年8班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年9班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年9班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年10班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年10班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 5年11班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 5年11班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_1e2abcbb] (invariant OK)
+[LINK] [Homeroom Blockization] 6年1班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年1班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年2班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年2班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年3班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年3班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年4班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年4班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年5班: 已合併 4 個導師科目，共 16.0 節課至「導師區塊」
+[LINK] [Homeroom Blockization] 6年6班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年6班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年7班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年7班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年8班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年8班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年9班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年9班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年10班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年10班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[LINK] [Homeroom Blockization] 6年11班: 已合併 5 個導師科目，共 15.0 節課至「導師區塊」
+[Arts Split] 6年11班: 音樂 1.5 + 美勞 1.5 音樂*固定(1) + 美勞*固定(1) + 交替(1) [group=g_9dfe9b33] (invariant OK)
+[PHASE] preprocessing 完成
+
+[Python 輸出]: [ERROR] [Preflight] 6年5班: 總節數 33 > 容量 32！
+
+[ERROR] [Preflight] 1 個班級輸入驗證失敗，不進 solver
+
+- 6年5班: 總節數 33 > 容量 32 (超限 1)
+
+[INFO] Python Resolver: 使用 venv E:\scheduler-public-main\venv\Scripts\python.exe
+[ERROR] Python 腳本不存在: E:\scheduler-public-main\diagnostic_stats.py
+[Diagnostic] preRepair 統計失敗: Error: [ERROR] Python 腳本不存在: E:\scheduler-public-main\diagnostic_stats.py
+at spawnPython (file:///E:/scheduler-public-main/server.js:219:15)
+at file:///E:/scheduler-public-main/server.js:3167:22
+at new Promise (<anonymous>)
+at runDiagnosticStats (file:///E:/scheduler-public-main/server.js:3166:12)
+at ChildProcess.<anonymous> (file:///E:/scheduler-public-main/server.js:3563:48)
+at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+[INFO] Python Resolver: 使用 venv E:\scheduler-public-main\venv\Scripts\python.exe
+[ERROR] Python 腳本不存在: E:\scheduler-public-main\repair_agent.py
+排課任務處理失敗: Error: [ERROR] Python 腳本不存在: E:\scheduler-public-main\repair_agent.py
+at spawnPython (file:///E:/scheduler-public-main/server.js:219:15)
+at file:///E:/scheduler-public-main/server.js:3600:44
+at new Promise (<anonymous>)
+at ChildProcess.<anonymous> (file:///E:/scheduler-public-main/server.js:3599:53)
+at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+- [V ] 檢查結果頁面是否可閱讀
+- [V ] 若操作員需要，進行至少 1 次人工微調或檢視
 - [ ] 判斷結果是否屬於「可使用」而非「看似接近但實際不可用」
 
 ### Phase D：專科教室與結果閱讀
 
-- [ ] 開啟 Classroom Manager
-- [ ] 檢查專科教室分配是否可閱讀
+- [V ] 開啟 Classroom Manager
+- [V ] 檢查專科教室分配是否可閱讀
 - [ ] 抽查至少 3 個班級的關鍵課程
 - [ ] 抽查 alternating / odd-even 呈現是否可理解
 

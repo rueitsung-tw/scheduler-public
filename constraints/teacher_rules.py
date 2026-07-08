@@ -12,6 +12,7 @@ teacher_rules.py — 教師維度約束
 
 import terminal_sanitizer
 import json
+import logging
 from collections import defaultdict
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
 from utils import is_virtual_teacher
@@ -302,7 +303,106 @@ def apply_teacher_quota(model, classes_data, teachers_data, schoolInfo):
         print(f"  [CONSTRAINT] [Soft Quota] {t_name} 總上限: {safe_max_quota} (硬約束已移除，改用懲罰權重)")
 
 
-def apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings):
+def resolve_effective_special_course_subject(sc, class_name, preprocess_metadata):
+    """
+    學習中心若 targetSubject 已被 homeroom blockization merge，
+    回傳 '導師區塊'；否則回傳原始 targetSubject。
+    其他 specialCourse 一律回傳原始 targetSubject。
+    """
+    subj = sc.get("targetSubject", "")
+    if not subj:
+        return subj
+    if sc.get("name") != "學習中心":
+        return subj
+
+    trace_list = (preprocess_metadata or {}).get("homeroomBlockizationTrace", [])
+    for trace in trace_list:
+        if trace.get("className") != class_name:
+            continue
+        merged = [m["subject"] for m in trace.get("mergedSubjects", [])]
+        if subj in merged:
+            return "導師區塊"
+    return subj
+
+
+def classify_special_course_overlaps(resolved_special_courses):
+    """
+    分析已解好的 special courses 結果，找出同班同時段重疊，
+    依 effective subject 分類為 allowed_overlap 或 conflict。
+
+    參數:
+        resolved_special_courses: list[dict]
+            每個 dict 為結果組裝後的 specialCourse，已包含：
+            - "name": str
+            - "teacher": str
+            - "targetSubject": str (原始)
+            - "targetClasses": list[str]
+            - "lockedSlots": list[{"day": int, "period": int}]
+            - "_effective_subjects": dict[str, str]  (className -> effectiveSubject)
+
+    回傳:
+        {
+            "allowed_overlaps": [],
+            "conflicts": [],
+        }
+    """
+    resolved_special_courses = resolved_special_courses or []
+    from collections import defaultdict
+
+    # 建立 (className, day, period) -> [entries] 的索引
+    slot_map = defaultdict(list)
+    for sc in resolved_special_courses:
+        eff_map = sc.get("_effective_subjects", {})
+        for cls_name in sc.get("targetClasses", []):
+            for slot in sc.get("lockedSlots", []):
+                day = slot.get("day", 1)
+                period = slot.get("period", 1)
+                eff_subj = eff_map.get(cls_name, sc.get("targetSubject", ""))
+                slot_map[(cls_name, day, period)].append({
+                    "scName": sc.get("name", ""),
+                    "teacher": sc.get("teacher", ""),
+                    "originalTargetSubject": sc.get("targetSubject", ""),
+                    "effectiveScheduleSubject": eff_subj,
+                })
+
+    allowed_overlaps = []
+    conflicts = []
+
+    for (cls_name, day, period), entries in slot_map.items():
+        if len(entries) <= 1:
+            continue
+
+        # 檢查是否所有 entry 都是學習中心且 effective subject 相同
+        eff_subjects = set(e["effectiveScheduleSubject"] for e in entries)
+        all_learning_center = all(e["scName"] == "學習中心" for e in entries)
+
+        if all_learning_center and len(eff_subjects) <= 1:
+            # 同一 effective subject 的學習中心重疊 -> allowed
+            allowed_overlaps.append({
+                "className": cls_name,
+                "day": day,
+                "period": period,
+                "entries": entries,
+                "disposition": "allowed_same_effective_subject",
+            })
+        else:
+            # 不同 effective subject -> conflict
+            conflicts.append({
+                "className": cls_name,
+                "day": day,
+                "period": period,
+                "entries": entries,
+                "disposition": "conflict_different_effective_subject",
+            })
+
+    return {
+        "allowed_overlaps": allowed_overlaps,
+        "conflicts": conflicts,
+    }
+
+
+def apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings,
+                                preprocess_metadata=None):
     """
     [硬約束 5] 特殊專案與抽離課程建模（學習中心/抽離群組結構）
 
@@ -497,23 +597,47 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                 sc_id = sc.get("id")
                 subj = sc.get("targetSubject", "")
 
+                # ── 記錄 effective_subjects 資訊 ──
+                effective_subjects_map = {}
+                if subj:
+                    effective_subjects_map = {
+                        c: resolve_effective_special_course_subject(sc, c, preprocess_metadata)
+                        for c in classes_in_pool
+                    }
+
                 sc_decision_vars.append({
                     "sc": sc,
                     "vars": sub_event_vars,  # [SEMANTIC FIX] 指向次分組 vars
                     "classes_pool": classes_in_pool,
                     "select_vars": select_c_vars,
-                    "mode": mode
+                    "mode": mode,
+                    "effective_subjects": effective_subjects_map,
                 })
 
-                # 3i. 同步排課約束
+                # 3i. 同步排課約束（使用 effective subject 做映射）
                 if subj:
+                    # ── 映射失敗 warning 去重：每個 (class, effective_subj) 只記一次 ──
+                    _warned_missing = set()
+
                     for p in range(TOTAL_PERIODS):
                         for c in classes_in_pool:
+                            effective_subj = resolve_effective_special_course_subject(
+                                sc, c, preprocess_metadata
+                            )
                             class_p_subj_vars = [
                                 var for (sch_c, sch_p, sch_t, sch_s), var in schedule.items()
-                                if sch_c == c and sch_p == p and sch_s == subj
+                                if sch_c == c and sch_p == p and sch_s == effective_subj
                             ]
                             if not class_p_subj_vars:
+                                # ── 診斷：找不到對應變數，per (class, subject) 只警告一次 ──
+                                warn_key = (c, effective_subj)
+                                if effective_subj != subj and warn_key not in _warned_missing:
+                                    _warned_missing.add(warn_key)
+                                    logging.warning(
+                                        "[特殊課程] %s 班=%s 原始科目=%s 映射科目=%s "
+                                        "但 solver 仍找不到對應 schedule 變數",
+                                        sc.get("name"), c, subj, effective_subj
+                                    )
                                 continue
 
                             if mode == "auto":
