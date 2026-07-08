@@ -2,6 +2,15 @@
 
 國小智慧排課系統是一個面向台灣國小排課情境的智慧排課與課表編排平台。系統以前端資料設定、Node.js API、SQLite/Prisma 資料層，以及 Python OR-Tools CP-SAT 求解器為核心，支援全校排課、自動求解、人工微調與多格式課表匯出。
 
+![Vue](https://img.shields.io/badge/Frontend-Vue%203-42b883.svg)
+![Vite](https://img.shields.io/badge/Build-Vite%208-646cff.svg)
+![Express](https://img.shields.io/badge/Backend-Express%205-black.svg)
+![Prisma](https://img.shields.io/badge/ORM-Prisma%207-2D3748.svg)
+![SQLite](https://img.shields.io/badge/Database-SQLite-003B57.svg)
+![Python](https://img.shields.io/badge/Solver-Python%203.9%2B-3776AB.svg)
+![OR-Tools](https://img.shields.io/badge/Engine-OR--Tools_CP--SAT-f4b400.svg)
+![License](https://img.shields.io/badge/License-AGPL--3.0-red.svg)
+
 > 本倉庫是公開版工作目錄，只保留允許公開的程式碼、文件與測試。
 > 私人開發工作區中的本機資料庫、debug payload、未公開筆記與其他敏感內容不會同步到這裡。
 > 公開同步規則請參考 [PUBLIC_REPO_INDEX.md](./PUBLIC_REPO_INDEX.md) 與 [public-repo.manifest.json](./public-repo.manifest.json)。
@@ -111,6 +120,13 @@ repository-root/
 1. `node_modules` 與 `venv` 不能跨作業系統共用。
 2. 每次換平台或重建環境時，都要重新 `npm install` 與重建 Python 虛擬環境。
 3. `dev.db` 不會隨 repo 提供；執行 Prisma 初始化後會在本機建立。
+
+### 儲存裝置建議
+
+- 本專案使用 `SQLite + Prisma`，本機資料會直接寫入 `dev.db`。
+- 強烈建議將專案資料夾與資料庫檔案放在 `SSD`，不要放在機械式 `HDD`。
+- 若可選擇，優先使用 `NVMe/PCIe SSD`；至少也應使用 `SATA SSD`。
+- 若使用較慢的儲存裝置，可能出現存檔延遲、寫入鎖等待，或讓使用者體感成「慢半拍」。
 
 ### Windows 安裝步驟
 1. 先安裝 PowerShell 7。
