@@ -749,8 +749,10 @@ async function saveAiSettings() {
 }
 
 async function saveSettings() {
-  await scheduleStore.syncToCloud()
-  alert('演算法硬約束設定已儲存。')
+  const ok = await scheduleStore.syncToCloud()
+  if (ok) {
+    alert('演算法硬約束設定已儲存。')
+  }
 }
 </script>
 

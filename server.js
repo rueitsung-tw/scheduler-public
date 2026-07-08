@@ -28,6 +28,10 @@ import {
     validateAiCandidateSelections as validateAiCandidateSelectionsFromResponse,
     validateCandidatePoolConsistency,
 } from './src/services/aiTuningResponseValidation.js';
+import {
+    buildPersistedAiSettings,
+    extractPersistedScheduleSettings,
+} from './src/utils/coPlanningPersistence.js';
 
 /**
  * Runtime contract:
@@ -284,6 +288,7 @@ app.patch('/api/teachers/:name', async (req, res) => {
 app.post('/api/save-all', async (req, res) => {
     try {
         const { teachers, classes, schoolInfo, specialCourses, classrooms, aiSettings } = req.body;
+        const persistedAiSettings = buildPersistedAiSettings(aiSettings, schoolInfo);
 
         if (!teachers || !classes) {
             return res.status(400).json({ error: '缺少必要資料 (teachers 或 classes)' });
@@ -430,30 +435,30 @@ app.post('/api/save-all', async (req, res) => {
                      schoolName: persistedSchoolName,
                      academic_year: academicYear,
                      semester: schoolInfo.semester || "上學期",
-                    grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
-                    period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
-                    alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
-                    standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
-                    class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
-                    ai_settings: JSON.stringify(aiSettings || {}),
-                    classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
-                    subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
-                    subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
+                     grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
+                     period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
+                     alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
+                     standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
+                     class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
+                    ai_settings: JSON.stringify(persistedAiSettings),
+                     classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
+                     subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
+                     subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
                 },
                  create: {
                      id: 1,
                      schoolName: persistedSchoolName,
                      academic_year: academicYear,
                      semester: schoolInfo.semester || "上學期",
-                    grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
-                    period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
-                    alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
-                    standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
-                    class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
-                    ai_settings: JSON.stringify(aiSettings || {}),
-                    classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
-                    subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
-                    subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
+                     grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
+                     period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
+                     alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
+                     standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
+                     class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
+                    ai_settings: JSON.stringify(persistedAiSettings),
+                     classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
+                     subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
+                     subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
                 }
             });
         }
@@ -555,6 +560,11 @@ app.get('/api/schedule', async (req, res) => {
         // 🔧 [Step 3] 專科教室容量預設值（防禦性設計：確保 5 個科目不缺鍵）
         const DEFAULT_CLASSROOM_LIMITS = { 自然科學: 3, '語文-英語': 3, 音樂: 3, 美勞: 3, 體育: 6, 資訊: 1 };
 
+        const persistedAiSettings = systemSetting?.ai_settings
+            ? JSON.parse(systemSetting.ai_settings || '{}')
+            : {};
+        const { aiSettings: publicAiSettings, coPlanningSettings } = extractPersistedScheduleSettings(persistedAiSettings);
+
         // 將資料庫格式還原回前端需要的 JSON 格式
         res.json({
             schoolInfo: systemSetting ? {
@@ -565,11 +575,12 @@ app.get('/api/schedule', async (req, res) => {
                 periodDefaults: JSON.parse(systemSetting.period_defaults || '{}'),
                 alternativeMatrix: JSON.parse(systemSetting.alternative_matrix || '{}'),
                 classExceptions: JSON.parse(systemSetting.class_exceptions || '[]'),
+                coPlanningSettings: coPlanningSettings || undefined,
                 classroomLimits: {
                     ...DEFAULT_CLASSROOM_LIMITS,
                     ...JSON.parse(systemSetting.classroom_limits || '{}')
                 },
-                ai_settings: JSON.parse(systemSetting.ai_settings || '{}'),
+                ai_settings: publicAiSettings,
                 subjectClassroomGrades: JSON.parse(systemSetting.subjectClassroomGrades || '{}'),
                 subjectGradeRules: JSON.parse(systemSetting.subjectGradeRules || '{}'),
              } : null,

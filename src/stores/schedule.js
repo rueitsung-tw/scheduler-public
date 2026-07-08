@@ -347,7 +347,11 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
 
       // [2026-06-28] Normalize coPlanningSettings from DB using central normalizer
       if (data.schoolInfo) {
-        schoolInfo.value.coPlanningSettings = normalizeCoPlanningSettings(data.schoolInfo.coPlanningSettings);
+        // Preserve the current in-memory value as a fallback so a missing DB key
+        // does not silently flip the UI toggle back to disabled.
+        schoolInfo.value.coPlanningSettings = normalizeCoPlanningSettings(
+          data.schoolInfo.coPlanningSettings ?? schoolInfo.value.coPlanningSettings
+        );
       }
 
       // 🌟 關鍵修復：從資料庫讀取教師資料時，強制將 JSON 字串解析回陣列
@@ -664,8 +668,12 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       };
     });
 
+    const normalizedCoPlanningSettings = normalizeCoPlanningSettings(schoolInfo.value.coPlanningSettings);
     const payload = {
-      schoolInfo: schoolInfo.value,
+      schoolInfo: {
+        ...schoolInfo.value,
+        coPlanningSettings: normalizedCoPlanningSettings,
+      },
       teachers: teachers.value, classes: classesWithGrade, specialCourses: specialCourses.value, classrooms: classrooms.value, standardDomainSettings: standardDomainSettings.value,
       aiSettings: aiSettings.value
     };
