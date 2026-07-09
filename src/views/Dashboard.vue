@@ -112,6 +112,11 @@
           <h4>課表編輯與匯出</h4>
           <p>微調課表並輸出正式版本。</p>
         </div>
+        <a class="shortcut-card manual-card" :href="operatorManualUrl" target="_blank" rel="noopener noreferrer">
+          <h4>使用者操作手冊</h4>
+          <p>開啟含圖片標註的 PDF 手冊，依步驟完成排課作業。</p>
+          <span>開啟手冊</span>
+        </a>
       </div>
     </div>
   </div>
@@ -120,6 +125,7 @@
 <script setup>
 import { useScheduleStore } from '../stores/schedule'
 const scheduleStore = useScheduleStore()
+const operatorManualUrl = 'https://github.com/rueitsung-tw/scheduler-public/blob/main/docs/%E6%9D%B1%E9%96%80%E5%9C%8B%E5%B0%8F%E6%8E%92%E8%AA%B2%E7%B3%BB%E7%B5%B1_%E4%BD%BF%E7%94%A8%E8%80%85%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8A_%E5%90%AB%E5%9C%96%E7%89%87%E6%A8%99%E8%A8%BB%E7%89%88.pdf'
 </script>
 
 <style scoped>
@@ -164,6 +170,9 @@ const scheduleStore = useScheduleStore()
 .shortcut-section { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-top: 24px; }
 .shortcut-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
 .shortcut-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; }
+.shortcut-card { text-decoration: none; display: block; }
 .shortcut-card h4 { margin: 0 0 10px 0; color: #334155; font-size: 1.05rem; }
 .shortcut-card p { margin: 0; color: #64748b; line-height: 1.6; }
+.manual-card { border-color: #60a5fa; background: #eff6ff; }
+.manual-card span { display: inline-block; margin-top: 12px; color: #1d4ed8; font-weight: 700; }
 </style>

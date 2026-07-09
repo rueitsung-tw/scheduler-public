@@ -97,6 +97,7 @@ repository-root/
 
 ## 📘 公開文件索引 (Public Documentation)
 
+- [docs/東門國小排課系統_使用者操作手冊_含圖片標註版.pdf](./docs/東門國小排課系統_使用者操作手冊_含圖片標註版.pdf)：操作員使用手冊，含實際畫面截圖、紅框與箭頭標註
 - [docs/DataDictionary.md](./docs/DataDictionary.md)：資料模型、命名規則與前後端資料流對照
 - [docs/Scheduler_Engine_Overview.md](./docs/Scheduler_Engine_Overview.md)：排課引擎整體說明
 - [docs/藝才班特規排課模組_使用說明手冊.md](./docs/藝才班特規排課模組_使用說明手冊.md)：特規排課模組使用手冊
