@@ -125,7 +125,7 @@
 <script setup>
 import { useScheduleStore } from '../stores/schedule'
 const scheduleStore = useScheduleStore()
-const operatorManualUrl = 'https://github.com/rueitsung-tw/scheduler-public/blob/main/docs/%E6%9D%B1%E9%96%80%E5%9C%8B%E5%B0%8F%E6%8E%92%E8%AA%B2%E7%B3%BB%E7%B5%B1_%E4%BD%BF%E7%94%A8%E8%80%85%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8A_%E5%90%AB%E5%9C%96%E7%89%87%E6%A8%99%E8%A8%BB%E7%89%88.pdf'
+const operatorManualUrl = 'https://github.com/rueitsung-tw/scheduler-public/blob/main/docs/%E5%9C%8B%E5%B0%8F%E6%8E%92%E8%AA%B2%E7%B3%BB%E7%B5%B1_%E4%BD%BF%E7%94%A8%E8%80%85%E6%93%8D%E4%BD%9C%E6%89%8B%E5%86%8A_%E5%90%AB%E5%9C%96%E7%89%87%E6%A8%99%E8%A8%BB%E7%89%88.pdf'
 </script>
 
 <style scoped>
