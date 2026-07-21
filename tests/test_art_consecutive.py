@@ -126,21 +126,21 @@ class TestArtConsecutiveIntegration:
 
         apply_art_consecutive_constraint(model, classes_data, schedule)
 
-        # 檢查 art_pair_* 變數：不應出現跨午休邊界的配對
+        # 檢查 art_block_* 變數：不應出現跨午休邊界的配對
         # 跨午休配對的 period index: day*d*7+3 → p3, p10, p17, p24, p31
         forbidden_bases = {d * PERIODS_PER_DAY + 3 for d in range(DAYS)}
         lunch_boundary_vars = [
             n for n in created_names
-            if "art_pair" in n and any(f"_p{b}_" in n for b in forbidden_bases)
+            if "art_block" in n and any(f"_p{b}_" in n for b in forbidden_bases)
         ]
 
         assert len(lunch_boundary_vars) == 0, (
-            f"BUG：仍有跨午休的 art_pair BoolVar：{lunch_boundary_vars}"
+            f"BUG：仍有跨午休的 art_block BoolVar：{lunch_boundary_vars}"
         )
 
-        # 額外驗證：配對總數應為 DAYS * (PERIODS_PER_DAY - 2) = 5 * 5 = 25
-        pair_vars = [n for n in created_names if "art_pair" in n]
-        expected_count = DAYS * (PERIODS_PER_DAY - 2)
+        # 額外驗證：配對總數應為 DAYS * (PERIODS_PER_DAY - 2) * 2 = 5 * 5 * 2 = 50
+        pair_vars = [n for n in created_names if "art_block" in n]
+        expected_count = DAYS * (PERIODS_PER_DAY - 2) * 2
         assert len(pair_vars) == expected_count, (
             f"配對數應為 {expected_count}，實際：{len(pair_vars)}"
         )

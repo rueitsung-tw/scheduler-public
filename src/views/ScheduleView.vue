@@ -182,6 +182,10 @@
 
     <div v-if="dataStore.engineStatus === 'COMPLETED' && dataStore.engineResult" class="result-panel">
       <h3>✅ 排課完成！</h3>
+
+      <!-- 🆕 Movable Locks Review Panel (當需要審核且有移位課程時顯示) -->
+      <MovableLocksReviewPanel />
+
       <div class="result-summary">
         <p v-if="dataStore.engineResult.status"><strong>演算法狀態：</strong>{{ dataStore.engineResult.status }}</p>
         <p v-if="dataStore.engineResult.total_penalty !== undefined"><strong>總扣分 (Penalty)：</strong>{{ dataStore.engineResult.total_penalty }} 分</p>
@@ -200,11 +204,23 @@
           </label>
           <p class="ai-tuning-helper">{{ aiTuningFocusLabel }}</p>
         </div>
-        <button @click="applyAiPreviewAndGoToEditor" class="apply-btn">套用此課表並前往編輯器</button>
+        <button
+          @click="applyAiPreviewAndGoToEditor"
+          class="apply-btn"
+          :disabled="!dataStore.canApplyScheduleResult || undefined"
+          :title="applyButtonTitle || undefined"
+        >
+          {{ applyButtonText }}
+        </button>
         <button @click="downloadAiMarkdown" class="secondary-btn">匯出 Markdown</button>
         <button @click="downloadAiJson" class="secondary-btn">匯出 JSON</button>
-        <button @click="downloadSubmissionBundle" class="secondary-btn" :disabled="isGeneratingBundle">
-          {{ isGeneratingBundle ? '產生中…' : '下載預送出封包' }}
+        <button
+          @click="downloadSubmissionBundle"
+          class="secondary-btn"
+          :disabled="(!dataStore.canDownloadSubmissionBundle || isGeneratingBundle) || undefined"
+          :title="submissionBundleButtonTitle || undefined"
+        >
+          {{ submissionBundleButtonText }}
         </button>
         <button @click="requestAiTuning" class="ai-tune-btn" :disabled="isAiTuning">
           {{ isAiTuning ? 'AI 分析中…' : '送交 AI 微調' }}
@@ -388,7 +404,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import MovableLocksReviewPanel from '../components/MovableLocksReviewPanel.vue';
 import { useAiStore } from '../stores/aiSettings';
 import { useScheduleStore } from '../stores/schedule';
 import { useRouter } from 'vue-router';
@@ -411,6 +428,53 @@ import { runAiInfeasibleAnalysis } from '../services/aiInfeasibleAnalysisClient'
 const dataStore = useScheduleStore();
 const aiStore = useAiStore();
 const router = useRouter();
+
+const hasBlockingMovableLocksReview = computed(() => {
+  return !dataStore.canApplyScheduleResult;
+});
+
+const applyButtonText = computed(() => {
+  if (dataStore.hasRejectedMovableLockReviews) {
+    return '⛔ 微調審核已拒絕（不可直接套用）';
+  }
+  if (!dataStore.canApplyScheduleResult) {
+    return '🔒 待審核微調鎖定課（暫無法直接套用）';
+  }
+  return '套用此課表並前往編輯器';
+});
+
+const applyButtonTitle = computed(() => {
+  if (dataStore.hasRejectedMovableLockReviews) {
+    return '包含已拒絕的鎖定課微調建議，此排課結果不可直接套用';
+  }
+  if (!dataStore.canApplyScheduleResult) {
+    return '包含待審核的鎖定課微調建議，需完成審核後才能套用';
+  }
+  return '';
+});
+
+const submissionBundleButtonText = computed(() => {
+  if (dataStore.hasRejectedMovableLockReviews) {
+    return '⛔ 微調審核已拒絕（不可下載預送出封包）';
+  }
+  if (!dataStore.canDownloadSubmissionBundle) {
+    return '🔒 待審核微調鎖定課（暫無法下載預送出封包）';
+  }
+  if (isGeneratingBundle.value) {
+    return '產生中…';
+  }
+  return '下載預送出封包';
+});
+
+const submissionBundleButtonTitle = computed(() => {
+  if (dataStore.hasRejectedMovableLockReviews) {
+    return '包含已拒絕的鎖定課微調建議，此排課結果不可直接下載';
+  }
+  if (!dataStore.canDownloadSubmissionBundle) {
+    return '包含待審核的鎖定課微調建議，需完成審核後才能下載';
+  }
+  return '';
+});
 const API_BASE = (() => {
   const configuredBase = String(import.meta.env.VITE_API_BASE_URL || '').trim();
   if (configuredBase) {
@@ -1327,8 +1391,9 @@ const downloadSubmissionBundle = async () => {
   if (!aiReportJson.value || !dataStore.engineResult?.schedule) return;
 
   isGeneratingBundle.value = true;
+  await nextTick();
   try {
-    const bundle = createSubmissionBundle(
+    const bundle = await createSubmissionBundle(
       {
         classes: dataStore.classes,
         teachers: dataStore.teachers,

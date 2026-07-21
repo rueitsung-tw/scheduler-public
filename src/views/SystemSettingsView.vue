@@ -229,6 +229,9 @@
               <td class="subject-cell">
                 <span class="color-dot" :style="{ backgroundColor: subject.color }"></span>
                 {{ subject.name }}
+                <span v-if="getRoomSubjectKey(subject.name) !== subject.name" class="canonical-note">
+                  (專科教室鍵：{{ getRoomSubjectKey(subject.name) }})
+                </span>
               </td>
               <td v-for="g in 6" :key="g">
                 <input
@@ -402,10 +405,24 @@ const applyDefaultsToAllClasses = () => {
 }
 
 // 🆕 科任科目分配專科教室之年級設定邏輯
+const getRoomSubjectKey = (subjectName) => {
+  const s = String(subjectName || '').trim();
+  if (s === '英語') return '語文-英語';
+  if (s === '自然') return '自然科學';
+  if (s === '科技-資訊' || s === '資訊' || s === '電腦') return '資訊';
+  if (s === '健康與體育') return '體育';
+  return s;
+};
+
 const filterSpecialSubjects = computed(() => {
-  return scheduleStore.standardDomainSettings.filter(sub =>
-    ['語文-英語', '音樂', '美勞', '自然科學', '資訊', '體育'].includes(sub.name)
-  );
+  const allowedKeys = new Set(['語文-英語', '音樂', '美勞', '自然科學', '資訊', '體育']);
+  const seen = new Set();
+  return scheduleStore.standardDomainSettings.filter(sub => {
+    const key = getRoomSubjectKey(sub.name);
+    if (!allowedKeys.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 });
 
 const getSubjectClassroomGrades = () => {
@@ -414,26 +431,30 @@ const getSubjectClassroomGrades = () => {
       '語文-英語': [2, 3, 4, 5, 6],
       '音樂': [3, 4, 5, 6],
       '美勞': [3, 4, 5, 6],
-      '自然科學': [3, 4, 5, 6]
+      '自然科學': [3, 4, 5, 6],
+      '資訊': [3, 4, 5, 6]
     };
   }
   return scheduleStore.schoolInfo.subjectClassroomGrades;
 };
 
 const isGradeEnabledForRoom = (subjectName, grade) => {
-  const grades = getSubjectClassroomGrades()[subjectName] || [];
+  const key = getRoomSubjectKey(subjectName);
+  const grades = getSubjectClassroomGrades()[key] || [];
   return grades.includes(grade);
 };
 
 const toggleGradeForRoom = (subjectName, grade) => {
   const cfg = getSubjectClassroomGrades();
-  if (!cfg[subjectName]) cfg[subjectName] = [];
+  const key = getRoomSubjectKey(subjectName);
+  if (!cfg[key]) cfg[key] = [];
 
-  const index = cfg[subjectName].indexOf(grade);
+  const index = cfg[key].indexOf(grade);
   if (index > -1) {
-    cfg[subjectName].splice(index, 1); // 取消勾選
+    cfg[key].splice(index, 1); // 取消勾選
   } else {
-    cfg[subjectName].push(grade); // 勾選啟用
+    cfg[key].push(grade); // 勾選啟用
+    cfg[key].sort((a, b) => a - b);
   }
   scheduleStore.markScheduleDirty();
 };
@@ -451,6 +472,14 @@ const toggleGradeForRoom = (subjectName, grade) => {
   font-size: 0.75rem;
   font-weight: bold;
   width: 100%;
+}
+
+.canonical-note {
+  display: inline-block;
+  margin-left: 6px;
+  color: #64748b;
+  font-size: 0.85em;
+  font-weight: 400;
 }
 .sync-all-btn:hover {
   background: #d97706;

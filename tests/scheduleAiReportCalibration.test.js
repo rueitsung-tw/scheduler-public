@@ -97,8 +97,8 @@ describe('schedule AI report calibration', () => {
       .filter((issue) => issue.type === 'grade')
       .map((issue) => issue._dedupSubject)
 
-    expect(gradeSubjects).toContain('音樂_固定')
-    expect(gradeSubjects).toContain('美勞_固定')
+    expect(gradeSubjects).toContain('音樂')
+    expect(gradeSubjects).toContain('美勞')
   })
 })
 
@@ -201,6 +201,80 @@ describe('biweekly alternating space conflicts', () => {
         name: '5年2班',
         grade: 5,
         timetable: { 1: { 1: { oddWeek: { subject: '音樂', teacher: '音樂B' }, classroomId: 'music-a', classroomName: '音樂教室A' } } },
+        course_requirements: [],
+      }),
+    ]
+
+    const result = buildScheduleAiReport({
+      scheduleEntries: [],
+      classes,
+      teachers: [],
+      classrooms: [{ id: 'music-a', name: '音樂教室A', subject: '音樂', gradePreferences: [5] }],
+      schoolInfo: baseSchoolInfo,
+      aiSettings: {},
+    })
+
+    expect(result.exportJson.issues.some((issue) => issue.type === 'room')).toBe(true)
+  })
+
+  it('reports same room collision when alternating cells only store room info inside odd/even branches', () => {
+    const classes = [
+      buildClass({
+        name: '5年1班',
+        grade: 5,
+        timetable: {
+          1: {
+            1: {
+              oddWeek: { subject: '音樂', teacher: '音樂A', classroomId: 'music-a', classroomName: '音樂教室A' },
+            },
+          },
+        },
+        course_requirements: [],
+      }),
+      buildClass({
+        name: '5年2班',
+        grade: 5,
+        timetable: {
+          1: {
+            1: {
+              oddWeek: { subject: '音樂', teacher: '音樂B', classroomId: 'music-a', classroomName: '音樂教室A' },
+            },
+          },
+        },
+        course_requirements: [],
+      }),
+    ]
+
+    const result = buildScheduleAiReport({
+      scheduleEntries: [],
+      classes,
+      teachers: [],
+      classrooms: [{ id: 'music-a', name: '音樂教室A', subject: '音樂', gradePreferences: [5] }],
+      schoolInfo: baseSchoolInfo,
+      aiSettings: {},
+    })
+
+    expect(result.exportJson.issues.some((issue) => issue.type === 'room')).toBe(true)
+  })
+
+  it('reports same room collision when a both-week class overlaps an odd-week class in the same slot', () => {
+    const classes = [
+      buildClass({
+        name: '5年1班',
+        grade: 5,
+        timetable: { 1: { 1: { subject: '音樂', teacher: '音樂A', classroomId: 'music-a', classroomName: '音樂教室A' } } },
+        course_requirements: [],
+      }),
+      buildClass({
+        name: '5年2班',
+        grade: 5,
+        timetable: {
+          1: {
+            1: {
+              oddWeek: { subject: '音樂', teacher: '音樂B', classroomId: 'music-a', classroomName: '音樂教室A' },
+            },
+          },
+        },
         course_requirements: [],
       }),
     ]

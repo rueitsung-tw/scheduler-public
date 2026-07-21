@@ -9,6 +9,14 @@ from scheduler_policy import WEIGHT_REGISTRY, get_active_policy, SolveMode
 
 
 class SchedulePhase2Engine:
+    """
+    Phase 2 軟約束引擎。
+    
+    [2026-07-13] build_level 參數說明:
+    - "core": 只建 near-hard / 初解必要的軟約束 (用於 strict pass)
+    - "quality": 加入所有品質優化 penalty (用於第二階段優化)
+    - 預設 "quality" 保持向後相容
+    """
     def __init__(
         self, 
         model: cp_model.CpModel, 
@@ -30,6 +38,8 @@ class SchedulePhase2Engine:
         priority_placeholders: Optional[List[Dict]] = None,
         # [repair_03] Runtime policy adapter for weight resolution
         policy: Any = None,
+        # [2026-07-13] build_level: "core" | "quality"
+        build_level: str = "quality",
     ):
         self.model = model
         self.schedule = schedule
@@ -55,6 +65,10 @@ class SchedulePhase2Engine:
         # [repair_03] Store policy adapter for weight resolution
         # Falls back to default strict policy if not provided (backward compat)
         self.policy = policy if policy is not None else get_active_policy(SolveMode.STRICT_TEACHING_SHAPE)
+
+        # [2026-07-13] Store build_level for constraint layering
+        self.build_level = build_level
+        print(f"[PHASE2] Engine initialized with build_level={build_level}")
 
         # [NEW] 預先建立 className -> grade 對照表（供軟約束使用）
         self.class_grade_map = {}
@@ -91,53 +105,65 @@ class SchedulePhase2Engine:
             self.teacher_expertise_map[t_name] = expertise_subjects
 
     def build_soft_constraints(self):
-        print("[AI] 啟動 Phase 2 軟約束引擎...")
-
-        # ==========================================
-        # [HARD] [Rule C] 教師連堂疲勞管理 (軟約束 - 滑動視窗)
-        # 導師限連 3 節，科任限連 4 節 (超出部分施加懲罰權重 5000)
-        # ==========================================
-        print("[HARD] 啟動教師連堂疲勞管理機制 (滑動視窗)...")
-        consecutive_count = 0
-        for t_name in self.teachers:
-            # 判斷是否為導師 (若找不到預設為科任)
-            is_homeroom = any(td.get("name") == t_name and td.get("type") in ["homeroom", "導師"] for td in self.teachers_data)
-            
-            # 設定最大連續上課節數 (導師連3，科任連4)
-            max_consec = 3 if is_homeroom else 4
-            window_size = max_consec + 1
-
-            # [INFO] Fix 1: 改用「佔用指示器」避免同一節次多堂課(交替課)被重複計算
-            occupied_cache = {}
-            for d in range(self.days):
-                for p in range(self.periods_per_day):
-                    p_idx = d * self.periods_per_day + p
-                    slot_vars = [var for (c, pp, t, s), var in self.schedule.items() if t == t_name and pp == p_idx]
-                    if slot_vars:
-                        is_occupied = self.model.NewBoolVar(f"occupied_indicator_{t_name}_d{d}_p{p}")
-                        self.model.Add(is_occupied >= slot_vars[0])
-                        for sv in slot_vars[1:]:
-                            self.model.Add(is_occupied >= sv)
-                        occupied_cache[(d, p)] = is_occupied
-                    else:
-                        occupied_cache[(d, p)] = None
-
-                # 每天使用滑動視窗掃描連堂
-                for i in range(self.periods_per_day - window_size + 1):
-                    window_occupancy = []
-                    for offset in range(window_size):
-                        occ = occupied_cache.get((d, i + offset))
-                        if occ is not None:
-                            window_occupancy.append(occ)
-                    
-                    # 只有當該視窗內確實有排課變數時，才加入約束 (重構為帶有懲罰的軟約束)
-                    if window_occupancy:
-                        overload = self.model.NewIntVar(0, window_size, f"consec_overload_{t_name.replace(' ', '_')}_d{d}_i{i}")
-                        self.model.Add(overload >= sum(window_occupancy) - max_consec)
-                        self.penalty_vars.append(5000 * overload)
-                        consecutive_count += 1
+        """
+        建立軟約束。根據 build_level 決定加入哪些 penalty。
         
-        print(f"  > [連堂防護] 已建立 {consecutive_count} 組教師連堂防護網 (導師限連3, 科任限連4，超出懲罰: 5000)")
+        build_level:
+        - "core": 只建 near-hard / 初解必要的軟約束
+          (教師連堂疲勞、科目分散、午休跨堂、教師配額超載、Task 3.x 導師/共備)
+        - "quality": 加入所有品質優化 penalty
+          (跨專長遞補、負載平衡、交替對齊、priority placeholder)
+        """
+        build_level = getattr(self, 'build_level', 'quality')
+        print(f"[AI] 啟動 Phase 2 軟約束引擎 (build_level={build_level})...")
+
+        # ==========================================
+        # [CORE] [Rule C] 教師連堂疲勞管理 (軟約束 - 滑動視窗)
+        # 導師限連 3 節，科任限連 4 節 (超出部分施加懲罰權重 5000)
+        # 這是 near-hard：連堂過長會嚴重影響教學品質
+        # ==========================================
+        if build_level == "quality":
+            print("[CORE] 啟動教師連堂疲勞管理機制 (滑動視窗)...")
+            consecutive_count = 0
+            for t_name in self.teachers:
+                # 判斷是否為導師 (若找不到預設為科任)
+                is_homeroom = any(td.get("name") == t_name and td.get("type") in ["homeroom", "導師"] for td in self.teachers_data)
+                
+                # 設定最大連續上課節數 (導師連3，科任連4)
+                max_consec = 3 if is_homeroom else 4
+                window_size = max_consec + 1
+
+                # [INFO] Fix 1: 改用「佔用指示器」避免同一節次多堂課(交替課)被重複計算
+                occupied_cache = {}
+                for d in range(self.days):
+                    for p in range(self.periods_per_day):
+                        p_idx = d * self.periods_per_day + p
+                        slot_vars = [var for (c, pp, t, s), var in self.schedule.items() if t == t_name and pp == p_idx]
+                        if slot_vars:
+                            is_occupied = self.model.NewBoolVar(f"occupied_indicator_{t_name}_d{d}_p{p}")
+                            self.model.Add(is_occupied >= slot_vars[0])
+                            for sv in slot_vars[1:]:
+                                self.model.Add(is_occupied >= sv)
+                            occupied_cache[(d, p)] = is_occupied
+                        else:
+                            occupied_cache[(d, p)] = None
+
+                    # 每天使用滑動視窗掃描連堂
+                    for i in range(self.periods_per_day - window_size + 1):
+                        window_occupancy = []
+                        for offset in range(window_size):
+                            occ = occupied_cache.get((d, i + offset))
+                            if occ is not None:
+                                window_occupancy.append(occ)
+                        
+                        # 只有當該視窗內確實有排課變數時，才加入約束 (重構為帶有懲罰的軟約束)
+                        if window_occupancy:
+                            overload = self.model.NewIntVar(0, window_size, f"consec_overload_{t_name.replace(' ', '_')}_d{d}_i{i}")
+                            self.model.Add(overload >= sum(window_occupancy) - max_consec)
+                            self.penalty_vars.append(5000 * overload)
+                            consecutive_count += 1
+            
+            print(f"  > [連堂防護] 已建立 {consecutive_count} 組教師連堂防護網 (導師限連3, 科任限連4，超出懲罰: 5000)")
 
         subjects = set(s for (c, p, t, s) in self.schedule.keys())
 
@@ -146,16 +172,17 @@ class SchedulePhase2Engine:
         # ==========================================
         # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
         dispersion_weight = WEIGHT_REGISTRY.get("subject_dispersion", 50)
+        
+        from collections import defaultdict
+        schedule_by_class_subject_day = defaultdict(list)
+        for (c, p, t, s), var in self.schedule.items():
+            day = p // self.periods_per_day
+            schedule_by_class_subject_day[(c, s, day)].append(var)
+
         for c_name in self.classes:
             for d in range(self.days):
-                day_start = d * self.periods_per_day
-                day_end = day_start + self.periods_per_day
-                
                 for subject in subjects:
-                    daily_subject_vars = [
-                        var for (c, p, t, s), var in self.schedule.items()
-                        if c == c_name and s == subject and day_start <= p < day_end
-                    ]
+                    daily_subject_vars = schedule_by_class_subject_day.get((c_name, subject, d), [])
                     if len(daily_subject_vars) > 1:
                         excess_var = self.model.NewIntVar(0, self.periods_per_day, f"excess_c{c_name}_d{d}_s{subject}")
                         self.model.Add(excess_var >= sum(daily_subject_vars) - 1)
@@ -200,44 +227,42 @@ class SchedulePhase2Engine:
                     self.penalty_vars.append(lunch_weight * span_active)
 
         # ==========================================
-        # [SOFT] 軟約束 3：跨專長遞補懲罰 (Phase 4)
+        # [SOFT] 軟約束 3：跨專長遞補懲罰 (Phase 4) — QUALITY-ONLY
         # 當老師被分配教授非專長科目時，施加高額懲罰
-        # 求解器會優先用專長老師，只有在專長老師節數用完時才觸發遞補
+        # [2026-07-13] 移到 quality level：不是初解必需的條件
         # ==========================================
-        # [INFO] Phase 3: 調降跨專長懲罰權重，確保系統優先守住泳池/教室等實體資源
-        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
-        cross_expertise_penalty = WEIGHT_REGISTRY.get("cross_expertise", 5000)
-        cross_expertise_count = 0
-        print(f"[AI] 啟動 Phase 4 跨專長遞補懲罰機制... (權重: {cross_expertise_penalty})")
+        if build_level == "quality":
+            cross_expertise_penalty = WEIGHT_REGISTRY.get("cross_expertise", 5000)
+            cross_expertise_count = 0
+            print(f"[AI] 啟動 Phase 4 跨專長遞補懲罰機制... (權重: {cross_expertise_penalty})")
 
-        for (c_name, p, t_name, subject), var in self.schedule.items():
-            # 排除特殊科目（導師區塊、游泳等引擎內部生成的科目）
-            if "導師區塊" in subject:
-                continue
+            for (c_name, p, t_name, subject), var in self.schedule.items():
+                # 排除特殊科目（導師區塊、游泳等引擎內部生成的科目）
+                if "導師區塊" in subject:
+                    continue
 
-            # 獲取該老師的專長科目集合
-            teacher_subjects = self.teacher_expertise_map.get(t_name, set())
-            
-            # 如果該老師沒有設定專長配額，則不適用此懲罰
-            if not teacher_subjects:
-                continue
+                # 獲取該老師的專長科目集合
+                teacher_subjects = self.teacher_expertise_map.get(t_name, set())
+                
+                # 如果該老師沒有設定專長配額，則不適用此懲罰
+                if not teacher_subjects:
+                    continue
 
-            # 檢查該科目是否在專長列表中
-            # 使用 substring 匹配（如 "體育" in "體育 s"）
-            is_expertise = any(exp_subj in subject for exp_subj in teacher_subjects)
-            
-            if not is_expertise:
-                # 建立跨專長布林變數
-                is_cross = self.model.NewBoolVar(f"cross_expertise_{t_name}_{c_name}_p{p}_{subject}")
-                # 如果該排課變數被選中，則 is_cross 必須為 True
-                self.model.Add(is_cross >= var)
-                self.penalty_vars.append(cross_expertise_penalty * is_cross)
-                cross_expertise_count += 1
+                # 檢查該科目是否在專長列表中
+                is_expertise = any(exp_subj in subject for exp_subj in teacher_subjects)
+                
+                if not is_expertise:
+                    is_cross = self.model.NewBoolVar(f"cross_expertise_{t_name}_{c_name}_p{p}_{subject}")
+                    self.model.Add(is_cross >= var)
+                    self.penalty_vars.append(cross_expertise_penalty * is_cross)
+                    cross_expertise_count += 1
 
-        if cross_expertise_count > 0:
-            print(f"  [WARN] [跨專長遞補] 共建立 {cross_expertise_count} 個跨專長懲罰變數 (權重: {cross_expertise_penalty})")
+            if cross_expertise_count > 0:
+                print(f"  [WARN] [跨專長遞補] 共建立 {cross_expertise_count} 個跨專長懲罰變數 (權重: {cross_expertise_penalty})")
+            else:
+                print("  [OK] [跨專長遞補] 所有排課都在專長範圍內，無需懲罰")
         else:
-            print("  [OK] [跨專長遞補] 所有排課都在專長範圍內，無需懲罰")
+            print("  [SKIP] [跨專長遞補] build_level=core，跳過 quality-only 約束")
 
         # ==========================================
         # [BALANCE] 軟約束 4：負載平衡 (Load Balancing) — 解決贏者全拿問題
@@ -246,69 +271,72 @@ class SchedulePhase2Engine:
         # 4B. 科目集中遞減懲罰 (Subject Concentration Decay Penalty)
         #     當同一老師同科目超過閾值時，每多排一節施加線性遞增懲罰
         # ==========================================
-        print("[BALANCE] 啟動負載平衡機制 (Load Balancing)...")
+        if build_level == "quality":
+            print("[BALANCE] 啟動負載平衡機制 (Load Balancing)...")
 
-        # --- 4A: 覆蓋獎勵 ---
-        coverage_penalty_weight = 500
-        coverage_count = 0
-        for t_name in self.teachers:
-            # 只對有專長配額的老師套用覆蓋獎勵
-            if not self.teacher_expertise_map.get(t_name):
-                continue
-
-            # 找出老師 t_name 所有可能被排課的布林變數
-            t_vars = [var for (c, p, t, s), var in self.schedule.items() if t == t_name]
-            if not t_vars:
-                continue
-
-            # has_any_class[t]: True 當老師至少被排 1 節課
-            has_any = self.model.NewBoolVar(f"has_any_class_{t_name}")
-            # 約束: has_any >= 任意一個 var (如果任一個為1則 has_any=1)
-            for v in t_vars:
-                self.model.Add(has_any >= v)
-            # 如果 has_any 為 0 (沒有課)，則懲罰
-            self.penalty_vars.append(coverage_penalty_weight * (1 - has_any))
-            coverage_count += 1
-
-        if coverage_count > 0:
-            print(f"  [INFO] [覆蓋獎勵] 已為 {coverage_count} 位有專長配額的老師建立覆蓋約束 (權重: {coverage_penalty_weight})")
-
-        # --- 4B: 階梯式集中懲罰 (Step-wise Concentration Penalty) ---
-        # 對每位老師的每個非導師科目，施加多層級閾值懲罰：
-        #   超過 5 節 → 每多 1 節懲罰 80
-        #   超過 10 節 → 每多 1 節再加懲罰 150
-        #   超過 15 節 → 每多 1 節再加懲罰 300
-        # 效果：排得越多，邊際懲罰越高，強迫引擎分發給其他老師
-        thresholds = [
-            (5, 80),    # 第一階：超過 5 節，每多 1 節懲 80
-            (10, 150),  # 第二階：超過 10 節，每多 1 節懲 150
-            (15, 300),  # 第三階：超過 15 節，每多 1 節懲 300
-        ]
-        concentration_count = 0
-
-        for t_name in self.teachers:
-            # 找出該老師參與的所有科目
-            t_subject_set = set(s for (c, p, t, s) in self.schedule.keys() if t == t_name and "導師區塊" not in s)
-
-            for subject in t_subject_set:
-                subj_vars = [var for (c, p, t, s), var in self.schedule.items()
-                             if t == t_name and subject == s]
-                if not subj_vars:
+            # --- 4A: 覆蓋獎勵 ---
+            coverage_penalty_weight = 500
+            coverage_count = 0
+            for t_name in self.teachers:
+                # 只對有專長配額的老師套用覆蓋獎勵
+                if not self.teacher_expertise_map.get(t_name):
                     continue
 
-                total = len(subj_vars)
-                load_var = self.model.NewIntVar(0, total, f"load_{t_name}_{subject}")
-                self.model.Add(load_var == sum(subj_vars))
+                # 找出老師 t_name 所有可能被排課的布林變數
+                t_vars = [var for (c, p, t, s), var in self.schedule.items() if t == t_name]
+                if not t_vars:
+                    continue
 
-                # 為每一層閾值建立 excess 變數
-                for threshold, weight in thresholds:
-                    excess = self.model.NewIntVar(0, total, f"excess_{t_name}_{subject}_t{threshold}")
-                    self.model.Add(excess >= load_var - threshold)
-                    self.penalty_vars.append(weight * excess)
-                    concentration_count += 1
+                # has_any_class[t]: True 當老師至少被排 1 節課
+                has_any = self.model.NewBoolVar(f"has_any_class_{t_name}")
+                # 約束: has_any >= 任意一個 var (如果任一個為1則 has_any=1)
+                for v in t_vars:
+                    self.model.Add(has_any >= v)
+                # 如果 has_any 為 0 (沒有課)，則懲罰
+                self.penalty_vars.append(coverage_penalty_weight * (1 - has_any))
+                coverage_count += 1
 
-        if concentration_count > 0:
-            print(f"  [INFO] [階梯式集中懲罰] 已建立 {concentration_count} 個懲罰變數 (閾值/權重: {thresholds})")
+            if coverage_count > 0:
+                print(f"  [INFO] [覆蓋獎勵] 已為 {coverage_count} 位有專長配額的老師建立覆蓋約束 (權重: {coverage_penalty_weight})")
+
+            # --- 4B: 階梯式集中懲罰 (Step-wise Concentration Penalty) ---
+            # 對每位老師的每個非導師科目，施加多層級閾值懲罰：
+            #   超過 5 節 → 每多 1 節懲罰 80
+            #   超過 10 節 → 每多 1 節再加懲罰 150
+            #   超過 15 節 → 每多 1 節再加懲罰 300
+            # 效果：排得越多，邊際懲罰越高，強迫引擎分發給其他老師
+            thresholds = [
+                (5, 80),    # 第一階：超過 5 節，每多 1 節懲 80
+                (10, 150),  # 第二階：超過 10 節，每多 1 節懲 150
+                (15, 300),  # 第三階：超過 15 節，每多 1 節懲 300
+            ]
+            concentration_count = 0
+
+            for t_name in self.teachers:
+                # 找出該老師參與的所有科目
+                t_subject_set = set(s for (c, p, t, s) in self.schedule.keys() if t == t_name and "導師區塊" not in s)
+
+                for subject in t_subject_set:
+                    subj_vars = [var for (c, p, t, s), var in self.schedule.items()
+                                 if t == t_name and subject == s]
+                    if not subj_vars:
+                        continue
+
+                    total = len(subj_vars)
+                    load_var = self.model.NewIntVar(0, total, f"load_{t_name}_{subject}")
+                    self.model.Add(load_var == sum(subj_vars))
+
+                    # 為每一層閾值建立 excess 變數
+                    for threshold, weight in thresholds:
+                        excess = self.model.NewIntVar(0, total, f"excess_{t_name}_{subject}_t{threshold}")
+                        self.model.Add(excess >= load_var - threshold)
+                        self.penalty_vars.append(weight * excess)
+                        concentration_count += 1
+
+            if concentration_count > 0:
+                print(f"  [INFO] [階梯式集中懲罰] 已建立 {concentration_count} 個懲罰變數 (閾值/權重: {thresholds})")
+        else:
+            print("  [SKIP] [負載平衡] build_level=core，跳過 quality-only 約束")
 
         # ==========================================
         # [SOFT] 軟約束 5：教師總配額 Soft Overload (Phase 2)
@@ -394,47 +422,50 @@ class SchedulePhase2Engine:
         # 確保同師的交替課（單週/雙週）疊合在同一 (day, period)，避免半節空洞
         # 系統中交替課以 "交替" 標記識別，is_music_odd 變量區分單/雙週
         # ====================================
-        # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
-        alternating_alignment_weight = WEIGHT_REGISTRY.get("alternating_alignment_conflict", 10000)
-        alternating_alignment_count = 0
+        if build_level == "quality":
+            # [Task 02] Use WEIGHT_REGISTRY instead of hard-coded weight
+            alternating_alignment_weight = WEIGHT_REGISTRY.get("alternating_alignment_conflict", 10000)
+            alternating_alignment_count = 0
 
-        # 先收集所有交替相關的schedule key，找出涉及的老師
-        alternating_teachers = set()
-        for (c, p, t, s) in self.schedule.keys():
-            if "交替" in s:
-                alternating_teachers.add(t)
+            # 先收集所有交替相關的schedule key，找出涉及的老師
+            alternating_teachers = set()
+            for (c, p, t, s) in self.schedule.keys():
+                if "交替" in s:
+                    alternating_teachers.add(t)
 
-        for t_name in alternating_teachers:
-            for d in range(self.days):
-                for p in range(self.periods_per_day):
-                    period_index = d * self.periods_per_day + p
-                    # 獲取該老師在特定時段的所有變數
-                    slot_vars = [var for (c, per, t, s), var in self.schedule.items()
-                                 if t == t_name and per == period_index]
+            for t_name in alternating_teachers:
+                for d in range(self.days):
+                    for p in range(self.periods_per_day):
+                        period_index = d * self.periods_per_day + p
+                        # 獲取該老師在特定時段的所有變數
+                        slot_vars = [var for (c, per, t, s), var in self.schedule.items()
+                                     if t == t_name and per == period_index]
 
-                    if not slot_vars:
-                        continue
+                        if not slot_vars:
+                            continue
 
-                    # 找出該時段內的交替課標記
-                    # 交替課在solver.py中由音樂老師(單週)與美勞老師(雙週)分別標記
-                    alt_vars = [var for (c, per, t, s), var in self.schedule.items()
-                                if t == t_name and per == period_index and "交替" in s]
+                        # 找出該時段內的交替課標記
+                        # 交替課在solver.py中由音樂老師(單週)與美勞老師(雙週)分別標記
+                        alt_vars = [var for (c, per, t, s), var in self.schedule.items()
+                                    if t == t_name and per == period_index and "交替" in s]
 
-                    if len(alt_vars) >= 2:
-                        # 多個交替課在同一時段可能互相覆蓋，建立衝突懲罰
-                        for i in range(len(alt_vars)):
-                            for j in range(i + 1, len(alt_vars)):
-                                v1 = alt_vars[i]
-                                v2 = alt_vars[j]
-                                conflict = self.model.NewBoolVar(f"alt_conflict_{t_name}_d{d}_p{p}")
-                                self.model.AddBoolOr([v1.Not(), v2.Not(), conflict])
-                                self.penalty_vars.append(alternating_alignment_weight * conflict)
-                                alternating_alignment_count += 1
+                        if len(alt_vars) >= 2:
+                            # 多個交替課在同一時段可能互相覆蓋，建立衝突懲罰
+                            for i in range(len(alt_vars)):
+                                for j in range(i + 1, len(alt_vars)):
+                                    v1 = alt_vars[i]
+                                    v2 = alt_vars[j]
+                                    conflict = self.model.NewBoolVar(f"alt_conflict_{t_name}_d{d}_p{p}")
+                                    self.model.AddBoolOr([v1.Not(), v2.Not(), conflict])
+                                    self.penalty_vars.append(alternating_alignment_weight * conflict)
+                                    alternating_alignment_count += 1
 
-        if alternating_alignment_count > 0:
-            print(f"  [PUZZLE] [交替對齊] 已建立 {alternating_alignment_count} 個對齊懲罰變數 (權重: {alternating_alignment_weight})")
+            if alternating_alignment_count > 0:
+                print(f"  [PUZZLE] [交替對齊] 已建立 {alternating_alignment_count} 個對齊懲罰變數 (權重: {alternating_alignment_weight})")
+            else:
+                print("  [PUZZLE] [交替對齊] 未檢測到交替課同節次衝突，無需懲罰")
         else:
-            print("  [PUZZLE] [交替對齊] 未檢測到交替課同節次衝突，無需懲罰")
+            print("  [SKIP] [交替對齊] build_level=core，跳過 quality-only 約束")
 
         # ==========================================
         # [DEBUG] [BugFix #4] 增強診斷：輸出各科總需求與理論容量比值
@@ -530,7 +561,10 @@ class SchedulePhase2Engine:
         # linked to existing schedule vars. Solver decides final assignment.
         # Rule ID: priority_teacher_placeholder
         # ==========================================
-        self._build_priority_placeholder_objective()
+        if build_level == "quality":
+            self._build_priority_placeholder_objective()
+        else:
+            print("  [SKIP] [Priority Placeholder] build_level=core，跳過 quality-only 約束")
 
         # ==========================================
         # ? 目標函數：最小化總扣分 (含負載平衡 + Soft Quota)

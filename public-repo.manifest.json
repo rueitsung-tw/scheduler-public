@@ -27,7 +27,6 @@
     "requirements.txt",
     "scheduler_policy.py",
     "public-repo.manifest.json",
-    "scripts/public-repo-sync.mjs",
     "server.js",
     "repair_agent.py",
     "solver.py",
@@ -43,21 +42,13 @@
     "constraints/teacher_rules.py",
     "constraints/utils.py"
   ],
-  "includeDocFiles": [
-    "docs/DataDictionary.md",
-    "docs/Scheduler_Engine_Overview.md",
-    "docs/藝才班特規排課模組_使用說明手冊.md",
-    "docs/20260701_phase1_formal_delivery_readiness_policy.yaml",
-    "docs/phase1_formal_delivery_acceptance_summary.md",
-    "docs/phase1_formal_delivery_user_guide.md",
-    "docs/phase1_frontend_smoke_test_report.md",
-    "docs/20260702_stage2_progress_report.md",
-    "docs/20260704_phase1_release_readiness_for_operator_pilot.md",
-    "docs/20260706_operator_pilot_execution_checklist.md",
-    "docs/20260706_operator_pilot_decision_template.md"
-  ],
+  "includeDocFiles": [],
   "targetOnlyRoots": [
-    "tests"
+    "tests",
+    "docs",
+    "node_modules",
+    ".pytest_cache",
+    "__pycache__"
   ],
   "targetOnlyFiles": [
     "LICENSE.md",
@@ -77,13 +68,19 @@
     ".git",
     ".github",
     ".pytest_cache",
+    ".roo",
     ".vscode",
     ".venv",
     "__pycache__",
     "dist",
+    "error",
+    "fixtures",
+    "memory",
     "node_modules",
+    "payload_scenarios",
     "scratch",
     "smoke_evidence",
+    "regression_outputs",
     "venv",
     ".clinerules",
     ".codebase-memory",
@@ -131,6 +128,7 @@
     "query_classrooms.py",
     "quick_test_solver.py",
     "scratch_*",
+    "scripts/**",
     "solver_log.txt",
     "solver_test_*_backup.py",
     "skills-lock.json",
@@ -142,7 +140,9 @@
     ".cbmignore",
     "payload_sc",
     "*readonly-copy",
-    "*.r5-backup"
+    "*.r5-backup",
+    "tmp_diag_*",
+    "tmp_diag_*/**"
   ],
   "ignoredPaths": [
     "prisma/cleanup_db.cjs",

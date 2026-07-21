@@ -3567,7 +3567,23 @@ async function runSchedulingWorker(jobId, payload) {
                     }
                 });
 
+                let isSuccess = false;
+                let actualSolverStatus = null;
+                let outputJson = null;
+
                 if (code === 0 && fs.existsSync(outputPath)) {
+                    try {
+                        outputJson = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+                        actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
+                        if (actualSolverStatus === 'OPTIMAL' || actualSolverStatus === 'FEASIBLE') {
+                            isSuccess = true;
+                        }
+                    } catch (e) {
+                        console.warn(`[Solver Status] 無法解析 output JSON: ${e.message}`);
+                    }
+                }
+
+                if (isSuccess) {
                     // [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
                     let preRepairStats = null;
                     try {
@@ -3724,27 +3740,46 @@ async function runSchedulingWorker(jobId, payload) {
                     });
                     fs.unlinkSync(outputPath);
                 } else {
-                    const errorMsg = code === null ? 'Python 進程被強制終止' : `Exit code ${code}`;
-
                     // 🚨 [狀態分類] 先嘗試從 Python output JSON 讀取真實 solverStatus
                     // 🛡️ 優先讀 solverStatus（solver.py C5 確保所有路徑都有此欄位）
                     //    其次讀 status，最後才 fallback 到 null（表示完全沒有輸出）
-                    let actualSolverStatus = null;
                     let classLoadTrace = null;
                     let gradeCapacityMap = null;
-                    if (fs.existsSync(outputPath)) {
+                    let solverMetadata = {};
+                    if (outputJson) {
+                        classLoadTrace = outputJson?.classLoadTrace || null;
+                        gradeCapacityMap = outputJson?.gradeCapacityMap || null;
+                        solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
+                        solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
+                        solverMetadata.solvePass = outputJson?.solvePass || null;
+                        console.log(`[Solver Status] 從 output JSON 讀取到 solverStatus=${actualSolverStatus}, status=${outputJson?.status}`);
+                    } else if (fs.existsSync(outputPath)) {
                         try {
-                            const outputJson = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+                            outputJson = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
                             // solverStatus > status > null
                             actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
                             classLoadTrace = outputJson?.classLoadTrace || null;
                             // 🔧 修復 B (RC-CONF-01 輔因)：讀取 gradeCapacityMap 過渡方案
                             gradeCapacityMap = outputJson?.gradeCapacityMap || null;
+                            solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
+                            solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
+                            solverMetadata.solvePass = outputJson?.solvePass || null;
                             console.log(`[Solver Status] 從 output JSON 讀取到 solverStatus=${actualSolverStatus}, status=${outputJson?.status}`);
                         } catch (parseErr) {
                             console.warn(`[Solver Status] 無法解析 output JSON: ${parseErr.message}，actualSolverStatus 保持 null`);
                         }
                     }
+
+                    const solverFailureMessage = outputJson?.message || {
+                        TIMEOUT_NO_SOLUTION: '求解逾時，未找到任何可行解',
+                        UNKNOWN_TIMEOUT: '求解逾時，未找到可接受的可行解',
+                        INFEASIBLE: '無法產出符合條件的課表',
+                        INVALID_VALIDATION: '求解結果未通過硬限制驗證',
+                        MODEL_INVALID: '模型構建錯誤',
+                        INVALID_INPUT: '輸入資料驗證失敗',
+                    }[actualSolverStatus];
+
+                    const errorMsg = solverFailureMessage || (code === null ? 'Python 進程被強制終止' : `Exit code ${code}`);
 
                     // 規則式診斷分析：讀取 debug_infeasible_report.txt 並萃取警示摘要
                     let aiAnalysis = buildGenericInfeasibleAnalysis();
@@ -3776,29 +3811,21 @@ async function runSchedulingWorker(jobId, payload) {
                         console.error('診斷報告解析失敗:', parseError);
                     }
 
-                    // 🛡️ P2-B: 根據 effectiveSolverStatus 精確分支——不再 fallback 到 INFEASIBLE
                     const failedResult = {
                         error: errorMsg,
                         aiAnalysis,
                         diagnosticWarnings,
                         analysisBundlePath,
+                        ...solverMetadata
                     };
 
-                    if (effectiveSolverStatus === 'INVALID_INPUT') {
-                        failedResult.status = 'INVALID_INPUT';
-                        failedResult.solverStatus = 'INVALID_INPUT';
-                        if (classLoadTrace) {
+                    const validStatuses = ['INVALID_INPUT', 'INVALID_VALIDATION', 'INFEASIBLE', 'UNKNOWN_TIMEOUT', 'TIMEOUT_NO_SOLUTION', 'MODEL_INVALID'];
+                    if (validStatuses.includes(effectiveSolverStatus)) {
+                        failedResult.status = effectiveSolverStatus;
+                        failedResult.solverStatus = effectiveSolverStatus;
+                        if (effectiveSolverStatus === 'INVALID_INPUT' && classLoadTrace) {
                             failedResult.classLoadTrace = classLoadTrace;
                         }
-                    } else if (effectiveSolverStatus === 'INVALID_VALIDATION') {
-                        failedResult.status = 'INVALID_VALIDATION';
-                        failedResult.solverStatus = 'INVALID_VALIDATION';
-                    } else if (effectiveSolverStatus === 'INFEASIBLE') {
-                        failedResult.status = 'INFEASIBLE';
-                        failedResult.solverStatus = 'INFEASIBLE';
-                    } else if (effectiveSolverStatus === 'UNKNOWN_TIMEOUT') {
-                        failedResult.status = 'UNKNOWN_TIMEOUT';
-                        failedResult.solverStatus = 'UNKNOWN_TIMEOUT';
                     } else {
                         // effectiveSolverStatus 已保證不為 null（預設 'ERROR'），故只剩 ERROR
                         failedResult.status = 'ERROR';

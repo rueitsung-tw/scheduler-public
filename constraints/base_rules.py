@@ -15,6 +15,7 @@ base_rules.py — 排課系統基礎建模規則
 import terminal_sanitizer
 import re
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
+from constraints.movable_locks import is_manual_lock_movable, get_candidate_periods, apply_movable_lock
 
 
 def create_schedule_vars_and_course_demands(model, classes_data, schedule):
@@ -194,15 +195,18 @@ def create_alternating_vars(model, classes_data):
     )
 
 
-def apply_preallocation_locks(model, classes_data, schedule):
+def apply_preallocation_locks(model, classes_data, schedule, movable_locks_policy=None):
     """
     掃描前端傳入的 timetable 中 isLocked=true 的格子，
     將對應的 schedule BoolVar 鎖定為 1，並將同一時段的其他科目鎖定為 0。
+    （若符合可遷移鎖定條件，則套用 movable_locks）
 
     Args:
         model: ortools.sat.python.cp_model.CpModel
         classes_data: list of class dicts (may contain timetable field)
         schedule: dict with (c, p, t, s) -> BoolVar
+        movable_locks_policy: dict with prototype configuration
+
 
     Returns:
         tuple: (locked_count: int, locked_vars: set, lock_audit_log: list[dict])
@@ -220,10 +224,10 @@ def apply_preallocation_locks(model, classes_data, schedule):
             continue
 
         if isinstance(raw_timetable, list):
-            _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars)
+            _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy)
             locked_count += _count_valid_locks(lock_audit_log)
         elif isinstance(raw_timetable, dict):
-            _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars)
+            _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy)
             locked_count += _count_valid_locks(lock_audit_log)
 
     # 輸出 Lock Audit 報告
@@ -256,7 +260,7 @@ def apply_preallocation_locks(model, classes_data, schedule):
     return len(locked_vars), locked_vars, lock_audit_log
 
 
-def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars):
+def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
     """
     處理單個 locked cell。內部輔助函式。
     """
@@ -285,16 +289,31 @@ def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule,
     lock_audit_log.append(audit_entry)
 
     if match_vars:
-        model.Add(match_vars[0] == 1)
-        locked_vars.add(match_vars[0])
-        for ov in other_vars:
-            model.Add(ov == 0)
-        print(f"  [LOCK] [手動鎖定] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})")
+        if is_manual_lock_movable(lock_subj, movable_locks_policy):
+            candidates = get_candidate_periods(abs_p, movable_locks_policy)
+            def var_getter(p):
+                return schedule.get((current_c_name, p, lock_teach, lock_subj))
+            
+            decision_meta = {
+                "lockType": "manual_subject_lock",
+                "className": current_c_name,
+                "subject": lock_subj,
+                "specialCourseType": None,
+                "from_period": abs_p,
+            }
+            apply_movable_lock(model, abs_p, candidates, var_getter, decision_meta)
+            print(f"  [LOCK] [可遷移鎖定] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})")
+        else:
+            model.Add(match_vars[0] == 1)
+            locked_vars.add(match_vars[0])
+            for ov in other_vars:
+                model.Add(ov == 0)
+            print(f"  [LOCK] [手動鎖定] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})")
     else:
         print(f"   [幽靈鎖跳過] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})：無對應課程需求，已略過")
 
 
-def _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars):
+def _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
     """處理 Array 格式的 timetable: timetable[day_idx][period_idx]"""
     for day_idx, day_data in enumerate(raw_timetable):
         if not isinstance(day_data, list):
@@ -308,10 +327,9 @@ def _process_array_timetable(model, current_c_name, raw_timetable, schedule, loc
                 abs_p = day_idx * PERIODS_PER_DAY + period_idx
                 if abs_p >= TOTAL_PERIODS:
                     continue
-                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars)
+                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy)
 
-
-def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars):
+def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
     """處理 Object 格式的 timetable: timetable[dayKey][periodKey]"""
     for day_key, day_data in raw_timetable.items():
         if not isinstance(day_data, dict):
@@ -337,7 +355,7 @@ def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock
                 abs_p = day_idx * PERIODS_PER_DAY + period_idx
                 if abs_p >= TOTAL_PERIODS:
                     continue
-                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars)
+                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy)
 
 
 def _count_valid_locks(lock_audit_log):

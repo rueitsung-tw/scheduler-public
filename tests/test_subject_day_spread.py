@@ -14,7 +14,9 @@ from ortools.sat.python import cp_model
 from constraints.class_rules import (
     apply_subject_day_spread,
     apply_music_fixed_vs_alternating_day_spread,
+    apply_science_habits,
 )
+from scheduler_policy import SolveMode
 
 
 def _collect_target_vars(schedule, cls_name, teacher, subject):
@@ -211,6 +213,46 @@ class TestSubjectDaySpread(unittest.TestCase):
         self.assertIn(status, (cp_model.OPTIMAL, cp_model.FEASIBLE))
 
     # ------------------------------------------------------------------ #
+    # 測試 5：本土語言納入日分散硬約束
+    # ------------------------------------------------------------------ #
+    def test_native_language_same_day_double_period_is_infeasible(self):
+        """本土語言同一天兩節應被視為違規。"""
+        model = self._build_model()
+        schedule = {}
+
+        cls_name = "2年1班"
+        subject = "本土語言"
+        teacher = "本土語老師"
+        periods = 2
+
+        classes_data = [
+            {
+                "name": cls_name,
+                "grade": 2,
+                "isArtsClass": False,
+                "course_requirements": [
+                    {"subject": subject, "teacher": teacher, "periods": periods, "defaultTeacher": teacher},
+                ],
+            }
+        ]
+
+        for period_idx in (0, 1):
+            v = model.NewIntVar(0, 1, f"s_{cls_name}_{period_idx}_{teacher}_{subject}")
+            schedule[(cls_name, period_idx, teacher, subject)] = v
+            model.Add(v == 1)
+
+        target_vars = _collect_target_vars(schedule, cls_name, teacher, subject)
+        model.Add(sum(target_vars) == periods)
+
+        apply_subject_day_spread(model, classes_data, schedule, locked_vars=set())
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 5.0
+        status = solver.Solve(model)
+
+        self.assertEqual(status, cp_model.INFEASIBLE)
+
+    # ------------------------------------------------------------------ #
     # 測試 5：自然科學不被誤傷
     # ------------------------------------------------------------------ #
     def test_science_not_affected_by_day_spread(self):
@@ -249,6 +291,53 @@ class TestSubjectDaySpread(unittest.TestCase):
 
         # 模型應該有可行解（自然科學不受日分散限制，可以連堂）
         self.assertIn(status, (cp_model.OPTIMAL, cp_model.FEASIBLE))
+
+    # ------------------------------------------------------------------ #
+    # 測試 6：自然課 2+1 同天違規
+    # ------------------------------------------------------------------ #
+    def test_science_two_plus_one_same_day_is_infeasible(self):
+        """自然課同一天出現連2堂再加1堂時，應直接視為違規。"""
+        model = self._build_model()
+        schedule = {}
+
+        cls_name = "3年1班"
+        subject = "自然科學"
+        teacher = "周老師"
+        periods = 3
+
+        classes_data = [
+            {
+                "name": cls_name,
+                "grade": 3,
+                "isArtsClass": False,
+                "course_requirements": [
+                    {"subject": subject, "teacher": teacher, "periods": periods, "defaultTeacher": teacher},
+                ],
+            }
+        ]
+
+        for period_idx in (0, 1, 2):
+            v = model.NewIntVar(0, 1, f"s_{cls_name}_{period_idx}_{teacher}_{subject}")
+            schedule[(cls_name, period_idx, teacher, subject)] = v
+            model.Add(v == 1)
+
+        target_vars = _collect_target_vars(schedule, cls_name, teacher, subject)
+        model.Add(sum(target_vars) == periods)
+
+        apply_science_habits(
+            model,
+            classes_data,
+            schedule,
+            ai_settings={"naturalConsecutive": True},
+            penalty_vars=[],
+            solve_mode=SolveMode.STRICT_TEACHING_SHAPE,
+        )
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 5.0
+        status = solver.Solve(model)
+
+        self.assertEqual(status, cp_model.INFEASIBLE)
 
     # ------------------------------------------------------------------ #
     # 測試 6：音樂固定課 vs 音樂交替課不同日 — 補 sum==1

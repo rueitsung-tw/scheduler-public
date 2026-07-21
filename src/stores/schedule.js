@@ -234,6 +234,220 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       : extractDiagnosticWarningLines(engineAiAnalysis.value)
   ));
 
+  // --- 🆕 Movable Locks Policy ---
+  const getDefaultMovableLocksPolicy = () => ({
+    movableLocksEnabled: false,
+    movableSubjects: [],
+    movableSpecialCourseTypes: [],
+    movableCourseTags: [],
+    moveWindow: {
+      scope: 'same_day',
+      allowCrossMorningAfternoon: false,
+      maxPeriodDistance: 2
+    },
+    maxMovesTotal: 0,
+    maxMovesPerClass: 0,
+    maxMovesPerSubject: 0
+  });
+
+  const movableLocksPolicy = ref(getDefaultMovableLocksPolicy());
+  const movableLocksReviewData = ref(null);
+  const movableLockReviewDecisions = ref({});
+
+
+  const isMovableLocksActive = computed(() => {
+    const policy = movableLocksPolicy.value;
+    if (!policy.movableLocksEnabled) return false;
+    if (policy.maxMovesTotal <= 0) return false;
+    const hasWhitelist = (policy.movableSubjects?.length > 0) || 
+                         (policy.movableSpecialCourseTypes?.length > 0) || 
+                         (policy.movableCourseTags?.length > 0);
+    return hasWhitelist;
+  });
+
+  const expectedMovedCount = computed(() => {
+    const data = movableLocksReviewData.value;
+    if (data && data.requiresUserReview === true && Array.isArray(data.movedLockedLessons)) {
+      return data.movedLockedLessons.length;
+    }
+    return 0;
+  });
+
+  const movableLockDecisionSummary = computed(() => {
+    const decisions = Object.values(movableLockReviewDecisions.value || {});
+    const totalCount = decisions.length;
+    let pendingCount = 0;
+    let acceptedCount = 0;
+    let rejectedCount = 0;
+    for (const d of decisions) {
+      if (d.decision === 'accepted') acceptedCount++;
+      else if (d.decision === 'rejected') rejectedCount++;
+      else pendingCount++;
+    }
+    return {
+      totalCount,
+      pendingCount,
+      acceptedCount,
+      rejectedCount,
+      invalidCount: 0
+    };
+  });
+
+  const hasPendingMovableLockReviews = computed(() => {
+    const expectedCount = expectedMovedCount.value;
+    const summary = movableLockDecisionSummary.value;
+    if (expectedCount > 0 && summary.totalCount !== expectedCount) {
+      return true;
+    }
+    return summary.pendingCount > 0;
+  });
+
+  const hasRejectedMovableLockReviews = computed(() => movableLockDecisionSummary.value.rejectedCount > 0);
+
+  const areAllMovableLockReviewsAccepted = computed(() => {
+    const expectedCount = expectedMovedCount.value;
+    const summary = movableLockDecisionSummary.value;
+    if (expectedCount > 0 && summary.totalCount !== expectedCount) {
+      return false;
+    }
+    return summary.totalCount > 0 && summary.acceptedCount === summary.totalCount;
+  });
+
+  const canApplyScheduleResult = computed(() => {
+    const expectedCount = expectedMovedCount.value;
+    const summary = movableLockDecisionSummary.value;
+
+    // 1. If review data requires review of N moved lessons (>0), but decisions count != expectedCount, MUST BLOCK
+    if (expectedCount > 0 && summary.totalCount !== expectedCount) {
+      return false;
+    }
+
+    // 2. If no expected moves AND no decisions, unblocked
+    if (expectedCount === 0 && summary.totalCount === 0) {
+      return true;
+    }
+
+    // 3. If there are pending or rejected decisions, MUST BLOCK
+    if (summary.pendingCount > 0 || summary.rejectedCount > 0) {
+      return false;
+    }
+
+    // 4. Must have all items accepted and totalCount equal to expectedCount
+    return summary.acceptedCount === summary.totalCount && (expectedCount === 0 || summary.totalCount === expectedCount);
+  });
+
+  const canDownloadSubmissionBundle = computed(() => canApplyScheduleResult.value);
+
+  function getMovableLockMoveKey(move, index = 0) {
+    if (!move || typeof move !== 'object') {
+      return `move_invalid_${index}`;
+    }
+    if (move.moveId !== undefined && move.moveId !== null && String(move.moveId).trim() !== '') {
+      return String(move.moveId);
+    }
+    const className = move.className || move.class_name || move.class || 'anon_class';
+    const subject = move.subject || move.subjectName || 'anon_subject';
+    const lockType = move.lockType || move.lock_type || move.type || 'manual';
+
+    const formatSlot = (slot) => {
+      if (!slot) return 'slot_null';
+      if (typeof slot === 'string') return slot;
+      const d = slot.day ?? slot.weekday ?? slot.Day;
+      const p = slot.period ?? slot.section ?? slot.Period;
+      if (d !== undefined && p !== undefined) return `d${d}p${p}`;
+      return JSON.stringify(slot);
+    };
+
+    const fromSlot = formatSlot(move.from || move.originalPeriod || move.original_slot);
+    const toSlot = formatSlot(move.to || move.newPeriod || move.new_slot);
+
+    return `${className}|${subject}|${lockType}|${fromSlot}_to_${toSlot}`;
+  }
+
+  function getMovableLockDecisionKeyForMove(move, index = 0) {
+    if (!move || typeof move !== 'object') {
+      return `move_invalid_${index}`;
+    }
+    if (move.moveId !== undefined && move.moveId !== null && String(move.moveId).trim() !== '') {
+      return String(move.moveId);
+    }
+    const baseKey = getMovableLockMoveKey(move, index);
+    if (movableLockReviewDecisions.value) {
+      const collisionKey = `${baseKey}#${index}`;
+      if (movableLockReviewDecisions.value[collisionKey]) {
+        return collisionKey;
+      }
+      if (movableLockReviewDecisions.value[baseKey]) {
+        return baseKey;
+      }
+    }
+    return baseKey;
+  }
+
+  function initializeMovableLockReviewDecisions(movedLockedLessons) {
+    const decisions = {};
+    if (Array.isArray(movedLockedLessons)) {
+      movedLockedLessons.forEach((move, idx) => {
+        let key = getMovableLockMoveKey(move, idx);
+        if (decisions[key]) {
+          key = `${key}#${idx}`;
+        }
+        decisions[key] = {
+          moveKey: key,
+          decision: 'pending_review',
+          reviewedAt: null,
+          reviewer: null,
+          comment: '',
+          originalMove: move
+        };
+      });
+    }
+    movableLockReviewDecisions.value = decisions;
+  }
+
+  function acceptMovableLockMove(moveKey, comment = '') {
+    if (movableLockReviewDecisions.value && movableLockReviewDecisions.value[moveKey]) {
+      const item = movableLockReviewDecisions.value[moveKey];
+      item.decision = 'accepted';
+      item.reviewedAt = new Date().toISOString();
+      if (comment) {
+        item.comment = comment;
+      }
+    }
+  }
+
+  function rejectMovableLockMove(moveKey, comment = '') {
+    if (movableLockReviewDecisions.value && movableLockReviewDecisions.value[moveKey]) {
+      const item = movableLockReviewDecisions.value[moveKey];
+      item.decision = 'rejected';
+      item.reviewedAt = new Date().toISOString();
+      if (comment) {
+        item.comment = comment;
+      }
+    }
+  }
+
+  function resetMovableLockMoveDecision(moveKey, comment = '') {
+    if (movableLockReviewDecisions.value && movableLockReviewDecisions.value[moveKey]) {
+      const item = movableLockReviewDecisions.value[moveKey];
+      item.decision = 'pending_review';
+      item.reviewedAt = null;
+      item.comment = comment || '';
+    }
+  }
+
+  function resetMovableLockReviewDecisions() {
+    movableLockReviewDecisions.value = {};
+  }
+
+  function syncMovableLockDecisionsWithResult(resultObj) {
+    if (resultObj?.requiresUserReview === true && Array.isArray(resultObj.movedLockedLessons) && resultObj.movedLockedLessons.length > 0) {
+      initializeMovableLockReviewDecisions(resultObj.movedLockedLessons);
+    } else {
+      resetMovableLockReviewDecisions();
+    }
+  }
+
   // --- 🔄 排課進度狀態 (持久化輪詢) ---
   const enginePhase = ref(''); // QUEUED, PROCESSING, SOLVING, REPAIRING, FINALIZING, COMPLETED, FAILED
   const engineMessage = ref('');
@@ -296,6 +510,50 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   };
 
   const markScheduleDirty = () => { syncStatus.value = 'unsaved'; };
+
+  const setMovableLocksEnabled = (enabled) => {
+    movableLocksPolicy.value.movableLocksEnabled = Boolean(enabled);
+    if (!enabled) {
+      resetMovableLocksPolicy();
+    }
+    markScheduleDirty();
+  };
+
+  const updateMovableLocksPolicy = (partialPolicy) => {
+    const current = movableLocksPolicy.value;
+    const defaults = getDefaultMovableLocksPolicy();
+    const moveWindowUpdate = partialPolicy.moveWindow || {};
+    
+    movableLocksPolicy.value = {
+      ...current,
+      ...partialPolicy,
+      // fallback arrays
+      movableSubjects: Array.isArray(partialPolicy.movableSubjects ?? current.movableSubjects) 
+        ? (partialPolicy.movableSubjects ?? current.movableSubjects) : [],
+      movableSpecialCourseTypes: Array.isArray(partialPolicy.movableSpecialCourseTypes ?? current.movableSpecialCourseTypes) 
+        ? (partialPolicy.movableSpecialCourseTypes ?? current.movableSpecialCourseTypes) : [],
+      movableCourseTags: Array.isArray(partialPolicy.movableCourseTags ?? current.movableCourseTags) 
+        ? (partialPolicy.movableCourseTags ?? current.movableCourseTags) : [],
+      // fallback numbers
+      maxMovesTotal: Number(partialPolicy.maxMovesTotal ?? current.maxMovesTotal) || 0,
+      maxMovesPerClass: Number(partialPolicy.maxMovesPerClass ?? current.maxMovesPerClass) || 0,
+      maxMovesPerSubject: Number(partialPolicy.maxMovesPerSubject ?? current.maxMovesPerSubject) || 0,
+      
+      moveWindow: {
+        ...current.moveWindow,
+        ...moveWindowUpdate,
+        scope: moveWindowUpdate.scope ?? current.moveWindow.scope ?? defaults.moveWindow.scope,
+        allowCrossMorningAfternoon: Boolean(moveWindowUpdate.allowCrossMorningAfternoon ?? current.moveWindow.allowCrossMorningAfternoon),
+        maxPeriodDistance: Number(moveWindowUpdate.maxPeriodDistance ?? current.moveWindow.maxPeriodDistance) || defaults.moveWindow.maxPeriodDistance,
+      }
+    };
+    markScheduleDirty();
+  };
+
+  const resetMovableLocksPolicy = () => {
+    movableLocksPolicy.value = getDefaultMovableLocksPolicy();
+    markScheduleDirty();
+  };
 
   const loadFromDB = async (force = false) => {
     // 🚀 智慧門神：只有在真的有資料且非強制更新時才攔截
@@ -469,6 +727,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           aiSettings.value = { ...aiSettings.value, ...data.schoolInfo.ai_settings };
           // 這條規則已固定生效，避免舊資料把它帶回 false
           aiSettings.value.grade12AfternoonOff = true;
+
+          // Note: Movable Locks P3d persistence. Currently we don't load movableLocksPolicy from DB.
+          // Will be implemented in P3d. We intentionally do not auto-enable it from older payloads.
         } catch (e) { console.error('AI 設定解析失敗', e); }
       }
 
@@ -1079,6 +1340,20 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           if (typeof resultObj === 'string') {
             try { resultObj = JSON.parse(resultObj); } catch { resultObj = {}; }
           }
+          
+          // 🆕 Movable Locks Result Processing
+          if (resultObj?.requiresUserReview === true && resultObj?.movedLockedLessons?.length > 0) {
+            movableLocksReviewData.value = {
+              movedLockedLessons: resultObj.movedLockedLessons,
+              movableLockSummary: resultObj.movableLockSummary || null,
+              requiresUserReview: true
+            };
+            syncMovableLockDecisionsWithResult(resultObj);
+          } else {
+            movableLocksReviewData.value = null;
+            resetMovableLockReviewDecisions();
+          }
+
           const solverStatus = resultObj?.solverStatus || resultObj?.status;
           const scheduleEmpty = !resultObj?.schedule || (Array.isArray(resultObj.schedule) && resultObj.schedule.length === 0);
 
@@ -1279,10 +1554,16 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
 
     try {
       // Step 1: 提交任務到後端
+      // 🆕 注入 movableLocksPolicy 到 top-level payload
+      const finalPayload = {
+        ...payload,
+        movableLocksPolicy: movableLocksPolicy.value
+      };
+
       const response = await fetch(`${API_BASE}/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(finalPayload)
       });
 
       const data = await response.json();
@@ -1407,7 +1688,8 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         '語文-英語': [2, 3, 4, 5, 6],
         '音樂': [3, 4, 5, 6],
         '美勞': [3, 4, 5, 6],
-        '自然科學': [3, 4, 5, 6]
+        '自然科學': [3, 4, 5, 6],
+        '資訊': [3, 4, 5, 6]
       },
       subjectGradeRules: {
         '生活': [1, 2],
@@ -1427,6 +1709,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     specialCourses.value = [];
     classrooms.value = [];
     isInitialized.value = false;
+    resetMovableLocksPolicy();
+    movableLocksReviewData.value = null;
+    resetMovableLockReviewDecisions();
     resetEngineState();
     markScheduleDirty();
   };
@@ -1453,5 +1738,28 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     resumePolling, stopPolling, formatElapsed,
     // 新增：班級同步
     syncClassesFromGradeSettings,
+    
+    // 🆕 Movable Locks
+    movableLocksPolicy,
+    movableLocksReviewData,
+    movableLockReviewDecisions,
+    isMovableLocksActive,
+    movableLockDecisionSummary,
+    hasPendingMovableLockReviews,
+    hasRejectedMovableLockReviews,
+    areAllMovableLockReviewsAccepted,
+    canApplyScheduleResult,
+    canDownloadSubmissionBundle,
+    setMovableLocksEnabled,
+    updateMovableLocksPolicy,
+    resetMovableLocksPolicy,
+    getMovableLockMoveKey,
+    getMovableLockDecisionKeyForMove,
+    initializeMovableLockReviewDecisions,
+    acceptMovableLockMove,
+    rejectMovableLockMove,
+    resetMovableLockMoveDecision,
+    resetMovableLockReviewDecisions,
+    syncMovableLockDecisionsWithResult,
   }
 });

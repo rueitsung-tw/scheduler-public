@@ -52,6 +52,8 @@ class SolveMode(enum.Enum):
 
 WEIGHT_REGISTRY: Dict[str, int] = {
     # --- high (1000-5000) ---
+    "english_room_slack_fallback": 8000,
+        # C1 Prototype: English room overload penalty in fallback mode
     "teacher_quota_overtime": 5000,
         # teacher quota 超載懲罰；phase2_engine.py & constraints/teacher_rules.py 共用此 key
 
@@ -139,6 +141,11 @@ WEIGHT_REGISTRY: Dict[str, int] = {
     "manual_co_planning_subject_teacher_lesson": 9000,
         # constraints/class_rules.py — manual 共備區塊內未安排科任課的 near-hard penalty
         # 政策檔: docs/2026-06-28_co_planning_manual_block_and_homeroom_daily_cap_policy.yaml
+
+    "subject_day_spread_adjacent": 800,
+        # constraints/class_rules.py — subject_day_spread Rule B (相鄰兩天至多出現一天)
+        # 產品決策: Rule A (同日最多1堂) 保留 hard; Rule B 改為 soft penalty
+        # 原因: Rule A 接近合法性規則; Rule B 是課表品質偏好，不應讓整份課表 INFEASIBLE
 }
 
 # Fallback default: 當 key 不存在時使用的預設權重

@@ -319,6 +319,194 @@
         </div>
       </div>
 
+      <!-- 🆕 Movable Locks 鎖定課微調建議設定 -->
+      <div class="settings-card movable-locks-controls">
+        <div class="card-header-with-badge">
+          <h3>鎖定課微調建議設定 (Movable Locks Policy)</h3>
+          <span v-if="movableLocksPolicy.movableLocksEnabled" class="status-badge" :class="{ active: isMovableLocksActive, inactive: !isMovableLocksActive }">
+            {{ isMovableLocksActive ? '✅ 提案功能已生效 (Active)' : '⚠️ 條件未滿足 (Inactive)' }}
+          </span>
+        </div>
+        <p class="desc">
+          控制是否允許排課引擎在專科教室空間或時段擠壓時，針對指定白名單科目提出人工鎖定課微調建議。系統絕不靜謀移動，提案必須由人工審核同意後才可套用。
+        </p>
+
+        <!-- 主開關 -->
+        <div class="control-item master-toggle-item">
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="movableLocksPolicy.movableLocksEnabled"
+              @change="toggleMovableLocksEnabled($event.target.checked)"
+            />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">允許系統提出鎖定課微調建議</span>
+            <span class="sub">開啟後，Solver 可在白名單範圍與預算內嘗試微調人工鎖定位，並發起人工審核。</span>
+          </div>
+        </div>
+
+        <div v-if="movableLocksPolicy.movableLocksEnabled" class="movable-locks-body">
+          <!-- 警告訊息框 -->
+          <div v-if="!isMovableLocksActive" class="movable-locks-warning-banner">
+            <span v-if="movableLocksPolicy.maxMovesTotal <= 0">
+              ⚠️ 總微調預算 (maxMovesTotal) 目前設為 0 節，功能暫不會生效。
+            </span>
+            <span v-else>
+              ⚠️ 已開啟微調開關，但尚未勾選任何允許微調的科目或特殊課程類型。功能暫不會生效。
+            </span>
+          </div>
+
+          <!-- 1. 科目白名單 -->
+          <div class="movable-section">
+            <div class="section-header">
+              <span class="section-title">1. 允許微調的科目白名單 (movableSubjects)</span>
+              <span class="section-count">已選擇 {{ (movableLocksPolicy.movableSubjects || []).length }} 個科目</span>
+            </div>
+            <p class="section-sub">勾選允許 Solver 嘗試微調移位的人工鎖定科目。未勾選科目之人動鎖定仍為絕對 Hard Lock。</p>
+            <div class="subject-chips-grid">
+              <label
+                v-for="subj in availableSubjectsForWhitelist"
+                :key="subj"
+                class="subject-chip-item"
+                :class="{ selected: (movableLocksPolicy.movableSubjects || []).includes(subj) }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="(movableLocksPolicy.movableSubjects || []).includes(subj)"
+                  @change="toggleSubjectWhitelist(subj, $event.target.checked)"
+                />
+                <span>{{ subj }}</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 2. 特殊課程類型白名單 -->
+          <div class="movable-section">
+            <div class="section-header">
+              <span class="section-title">2. 允許微調的抽離 / 特殊課程類型 (movableSpecialCourseTypes)</span>
+              <span class="section-count">已選擇 {{ (movableLocksPolicy.movableSpecialCourseTypes || []).length }} 個類型</span>
+            </div>
+            <p class="section-sub">勾選允許微調的特殊課程類型（如抽離課 pullout_lock）。</p>
+            <div v-if="availableSpecialCourseTypes.length > 0" class="subject-chips-grid">
+              <label
+                v-for="typeName in availableSpecialCourseTypes"
+                :key="typeName"
+                class="subject-chip-item"
+                :class="{ selected: (movableLocksPolicy.movableSpecialCourseTypes || []).includes(typeName) }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="(movableLocksPolicy.movableSpecialCourseTypes || []).includes(typeName)"
+                  @change="toggleSpecialCourseTypeWhitelist(typeName, $event.target.checked)"
+                />
+                <span>{{ typeName }}</span>
+              </label>
+            </div>
+            <div v-else class="empty-notice">
+              尚未建置特殊課程或抽離課類型資料。
+            </div>
+          </div>
+
+          <!-- 3. 移動範圍參數 -->
+          <div class="movable-section">
+            <div class="section-header">
+              <span class="section-title">3. 移動視窗與範圍參數 (moveWindow)</span>
+            </div>
+            <div class="params-row-grid">
+              <div class="param-box">
+                <label>微調範圍 (scope)</label>
+                <select
+                  :value="movableLocksPolicy.moveWindow?.scope || 'same_day'"
+                  @change="updateMoveWindowField('scope', $event.target.value)"
+                >
+                  <option value="same_day">同日 (same_day - 推薦)</option>
+                  <option value="same_halfday">同半天 (same_halfday)</option>
+                  <option value="same_week">全週 (same_week)</option>
+                </select>
+              </div>
+
+              <div class="param-box">
+                <label>單次最大搬移節數 (maxPeriodDistance)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="8"
+                  :value="movableLocksPolicy.moveWindow?.maxPeriodDistance ?? 2"
+                  @input="updateMoveWindowField('maxPeriodDistance', Number($event.target.value))"
+                />
+              </div>
+
+              <div class="param-box checkbox-box">
+                <label class="inline-checkbox-label">
+                  <input
+                    type="checkbox"
+                    :checked="movableLocksPolicy.moveWindow?.allowCrossMorningAfternoon ?? false"
+                    @change="updateMoveWindowField('allowCrossMorningAfternoon', $event.target.checked)"
+                  />
+                  <span>允許跨上下午 (早/午) 搬移</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. 預算限制 -->
+          <div class="movable-section">
+            <div class="section-header">
+              <span class="section-title">4. 微調預算限制 (Budget Caps)</span>
+            </div>
+            <div class="params-row-grid">
+              <div class="param-box">
+                <label>單次排課最大微調總數 (maxMovesTotal)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="50"
+                  :value="movableLocksPolicy.maxMovesTotal ?? 0"
+                  @input="updateBudgetField('maxMovesTotal', Number($event.target.value))"
+                />
+                <small>0 代表不允許任何搬移提案</small>
+              </div>
+
+              <div class="param-box">
+                <label>單班最大微調節數 (maxMovesPerClass)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="20"
+                  :value="movableLocksPolicy.maxMovesPerClass ?? 0"
+                  @input="updateBudgetField('maxMovesPerClass', Number($event.target.value))"
+                />
+                <small>0 代表繼承全域最大微調總數</small>
+              </div>
+
+              <div class="param-box">
+                <label>單科最大微調節數 (maxMovesPerSubject)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="20"
+                  :value="movableLocksPolicy.maxMovesPerSubject ?? 0"
+                  @input="updateBudgetField('maxMovesPerSubject', Number($event.target.value))"
+                />
+                <small>0 代表繼承全域最大微調總數</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- 產品語意提示 -->
+          <div class="movable-policy-notice-box">
+            <div class="notice-title">💡 產品語意與防呆說明：</div>
+            <ul>
+              <li>這不是允許 Solver 靜謀移動人工鎖，系統提案絕不自動直接套用。</li>
+              <li>若 Solver 提出移動建議，必須在結果頁面完成人工審核（全數 Accept）後方可套用或匯出封包。</li>
+              <li>未納入白名單之人工鎖定課，仍為絕對 Hard Lock 鎖定，Solver 無權動用。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       <button @click="saveSettings" class="main-save-btn">儲存所有設定</button>
     </div>
   </div>
@@ -586,6 +774,94 @@ function removeCandidateBlock(idx) {
 function dayLabel(d) {
   return ['週一', '週二', '週三', '週四', '週五'][d - 1] || `第 ${d} 天`
 }
+
+// --- 🆕 Movable Locks Policy UI State & Methods ---
+const movableLocksPolicy = computed(() => {
+  return scheduleStore.movableLocksPolicy || {
+    movableLocksEnabled: false,
+    movableSubjects: [],
+    movableSpecialCourseTypes: [],
+    movableCourseTags: [],
+    moveWindow: {
+      scope: 'same_day',
+      allowCrossMorningAfternoon: false,
+      maxPeriodDistance: 2
+    },
+    maxMovesTotal: 0,
+    maxMovesPerClass: 0,
+    maxMovesPerSubject: 0
+  }
+})
+
+const isMovableLocksActive = computed(() => scheduleStore.isMovableLocksActive)
+
+const availableSubjectsForWhitelist = computed(() => {
+  const set = new Set()
+  if (Array.isArray(scheduleStore.standardDomainSettings)) {
+    scheduleStore.standardDomainSettings.forEach((s) => {
+      if (s && s.name) set.add(s.name)
+    })
+  }
+  const defaultList = ['語文-英語', '自然科學', '科技-資訊', '音樂', '美勞', '體育', '社會', '綜合活動', '數學']
+  defaultList.forEach((s) => set.add(s))
+  return Array.from(set)
+})
+
+const availableSpecialCourseTypes = computed(() => {
+  const set = new Set()
+  if (Array.isArray(scheduleStore.specialCourses)) {
+    scheduleStore.specialCourses.forEach((sc) => {
+      if (sc && sc.type) set.add(sc.type)
+    })
+  }
+  if (set.size === 0) {
+    return ['pullout_lock', 'resource_room', 'arts_special']
+  }
+  return Array.from(set)
+})
+
+function toggleMovableLocksEnabled(checked) {
+  scheduleStore.setMovableLocksEnabled(checked)
+}
+
+function toggleSubjectWhitelist(subjName, isChecked) {
+  const current = [...(movableLocksPolicy.value.movableSubjects || [])]
+  let updated
+  if (isChecked) {
+    updated = Array.from(new Set([...current, subjName]))
+  } else {
+    updated = current.filter((s) => s !== subjName)
+  }
+  scheduleStore.updateMovableLocksPolicy({ movableSubjects: updated })
+}
+
+function toggleSpecialCourseTypeWhitelist(typeName, isChecked) {
+  const current = [...(movableLocksPolicy.value.movableSpecialCourseTypes || [])]
+  let updated
+  if (isChecked) {
+    updated = Array.from(new Set([...current, typeName]))
+  } else {
+    updated = current.filter((t) => t !== typeName)
+  }
+  scheduleStore.updateMovableLocksPolicy({ movableSpecialCourseTypes: updated })
+}
+
+function updateMoveWindowField(field, value) {
+  scheduleStore.updateMovableLocksPolicy({
+    moveWindow: {
+      ...movableLocksPolicy.value.moveWindow,
+      [field]: value
+    }
+  })
+}
+
+function updateBudgetField(field, value) {
+  const numVal = Math.max(0, Number(value) || 0)
+  scheduleStore.updateMovableLocksPolicy({
+    [field]: numVal
+  })
+}
+
 
 onMounted(() => {
   aiStore.loadFromApi()
@@ -1305,4 +1581,201 @@ input:checked + .slider:before {
     flex-direction: column;
   }
 }
+
+/* 🆕 Movable Locks Policy Styles */
+.movable-locks-controls {
+  margin-top: 24px;
+}
+
+.card-header-with-badge {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.card-header-with-badge h3 {
+  margin: 0;
+}
+
+.status-badge {
+  font-size: 0.82em;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.status-badge.active {
+  background-color: #dcfce7;
+  color: #15803d;
+  border: 1px solid #86efac;
+}
+
+.status-badge.inactive {
+  background-color: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde047;
+}
+
+.master-toggle-item {
+  margin-bottom: 20px;
+}
+
+.movable-locks-body {
+  border-top: 1px solid #f1f5f9;
+  padding-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.movable-locks-warning-banner {
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #b45309;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.movable-section {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.section-title {
+  font-weight: 700;
+  color: #1e293b;
+  font-size: 0.95em;
+}
+
+.section-count {
+  font-size: 0.8em;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.section-sub {
+  font-size: 0.82em;
+  color: #64748b;
+  margin-bottom: 12px;
+}
+
+.subject-chips-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.subject-chip-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background-color: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 20px;
+  font-size: 0.88em;
+  color: #334155;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+
+.subject-chip-item:hover {
+  border-color: #6366f1;
+  background-color: #f0fdf4;
+}
+
+.subject-chip-item.selected {
+  background-color: #e0e7ff;
+  border-color: #6366f1;
+  color: #3730a3;
+  font-weight: 700;
+}
+
+.empty-notice {
+  font-size: 0.85em;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.params-row-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.param-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.param-box label {
+  font-size: 0.85em;
+  font-weight: 700;
+  color: #475569;
+}
+
+.param-box select,
+.param-box input[type='number'] {
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9em;
+  background-color: #ffffff;
+}
+
+.param-box small {
+  font-size: 0.78em;
+  color: #64748b;
+}
+
+.checkbox-box {
+  justify-content: center;
+}
+
+.inline-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88em;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+}
+
+.movable-policy-notice-box {
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 12px;
+  padding: 14px 18px;
+  color: #166534;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+.notice-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.movable-policy-notice-box ul {
+  margin: 0;
+  padding-left: 20px;
+}
 </style>
+

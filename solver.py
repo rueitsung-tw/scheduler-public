@@ -15,7 +15,21 @@ solver.py — 排課系統主入口
 
 import terminal_sanitizer
 import copy
+import os
 import sys
+
+# Diagnostics helper
+def _dump_diagnostics(label, schedule_entries):
+    print(f"\n[DIAG] === {label} ===", flush=True)
+    found = []
+    for entry in schedule_entries:
+        if entry.get("day") == 2 and entry.get("period") == 1:
+            if entry.get("className") in ["3年10班", "5年11班"]:
+                found.append(entry)
+    for f in found:
+        print(f"[DIAG] {f}", flush=True)
+    print("[DIAG] === END ===\n", flush=True)
+
 import json
 import time
 import re
@@ -43,6 +57,10 @@ from constraints.base_rules import (
     create_schedule_vars_and_course_demands,
     create_alternating_vars,
     apply_preallocation_locks,
+)
+from constraints.movable_locks import (
+    get_movable_lock_policy,
+    apply_movable_budgets,
 )
 from constraints.teacher_rules import (
     apply_anti_collision,
@@ -229,6 +247,101 @@ def _canonical_schedule_subject_for_room(subject):
     if "本土" in subj:
         return "本土語"
     return _normalize_special_room_subject(subj)
+
+
+_VALIDATION_DAY_SPREAD_SUBJECTS = {
+    "語文-英語",
+    "資訊",
+    "體育",
+    "健康",
+    "社會",
+    "本土語",
+}
+
+
+def _validation_day_spread_subject(subject):
+    normalized = _canonical_schedule_subject_for_room(subject)
+    if normalized in _VALIDATION_DAY_SPREAD_SUBJECTS:
+        return normalized
+    return ""
+
+
+def _collect_subject_day_spread_issues(schedule_entries):
+    subject_day_slots = defaultdict(list)
+
+    for entry in schedule_entries or []:
+        subject = str(entry.get("subject", "")).strip()
+        canonical_subject = _validation_day_spread_subject(subject)
+        if not canonical_subject:
+            continue
+
+        class_name = str(entry.get("className", "")).strip()
+        day = int(entry.get("day", 0) or 0)
+        period = int(entry.get("period", 0) or 0)
+        teacher_name = str(entry.get("teacherName", "")).strip()
+
+        for week in _expand_validation_weeks(entry.get("week")):
+            subject_day_slots[(class_name, canonical_subject, day, week)].append({
+                "period": period,
+                "subject": subject,
+                "teacherName": teacher_name,
+            })
+
+    issues = []
+    for (class_name, canonical_subject, day, week), entries in subject_day_slots.items():
+        periods = sorted({item["period"] for item in entries})
+        if len(periods) <= 1:
+            continue
+        issues.append({
+            "className": class_name,
+            "canonicalSubject": canonical_subject,
+            "day": day,
+            "week": week,
+            "count": len(periods),
+            "periods": periods,
+            "subjects": sorted({item["subject"] for item in entries if item["subject"]}),
+            "teacherNames": sorted({item["teacherName"] for item in entries if item["teacherName"]}),
+        })
+
+    return issues
+
+
+def _collect_science_same_day_shape_issues(schedule_entries):
+    science_day_slots = defaultdict(list)
+
+    for entry in schedule_entries or []:
+        subject = str(entry.get("subject", "")).strip()
+        if _canonical_schedule_subject_for_room(subject) != "自然科學":
+            continue
+
+        class_name = str(entry.get("className", "")).strip()
+        day = int(entry.get("day", 0) or 0)
+        period = int(entry.get("period", 0) or 0)
+        teacher_name = str(entry.get("teacherName", "")).strip()
+
+        for week in _expand_validation_weeks(entry.get("week")):
+            science_day_slots[(class_name, day, week)].append({
+                "period": period,
+                "subject": subject,
+                "teacherName": teacher_name,
+            })
+
+    issues = []
+    for (class_name, day, week), entries in science_day_slots.items():
+        periods = sorted({item["period"] for item in entries})
+        if len(periods) != 3:
+            continue
+        issues.append({
+            "className": class_name,
+            "day": day,
+            "week": week,
+            "count": len(periods),
+            "periods": periods,
+            "subjects": sorted({item["subject"] for item in entries if item["subject"]}),
+            "teacherNames": sorted({item["teacherName"] for item in entries if item["teacherName"]}),
+        })
+
+    return issues
 
 
 def _entry_room_weight(entry):
@@ -461,6 +574,9 @@ def _validate_schedule_result(
         for subj, cnt in sorted(subject_counter.items(), key=lambda x: -x[1])
     ]
 
+    subject_day_spread_issues = _collect_subject_day_spread_issues(schedule_entries)
+    science_same_day_shape_issues = _collect_science_same_day_shape_issues(schedule_entries)
+
     # ── Special Course Overlap Validation ──
     special_course_overlap_conflicts = []
     special_course_allowed_overlaps = []
@@ -478,6 +594,8 @@ def _validate_schedule_result(
         "unassigned_special_rooms": unassigned_room_issues,
         "unassigned_special_rooms_summary": unassigned_special_rooms_summary,
         "grade_subject_issues": grade_issues,
+        "subject_day_spread_issues": subject_day_spread_issues,
+        "science_same_day_shape_issues": science_same_day_shape_issues,
         "special_course_overlap_conflicts": special_course_overlap_conflicts,
         "special_course_allowed_overlaps": special_course_allowed_overlaps,
     }
@@ -507,6 +625,10 @@ def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
     if validation_report.get("unassigned_special_rooms"):
         return True
     if validation_report.get("grade_subject_issues"):
+        return True
+    if validation_report.get("subject_day_spread_issues"):
+        return True
+    if validation_report.get("science_same_day_shape_issues"):
         return True
     if not allow_room_overloads and validation_report.get("room_overloads"):
         return True
@@ -929,7 +1051,7 @@ def _optimize_music_art_alternating_locally(schedule_entries, classes_data, clas
         model.Maximize(sum(objective_terms))
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.max_time_in_seconds = float(os.environ.get("LOCAL_ARTS_OPTIMIZER_MAX_TIME_SECONDS", "10.0"))
     solver.parameters.num_search_workers = 8
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -965,9 +1087,11 @@ def _optimize_music_art_alternating_locally(schedule_entries, classes_data, clas
 
     print(f"  [OK] [音美局部優化] 已調整 {len(class_contexts)} 個音美交替班的局部連堂/方向")
 
+    _dump_diagnostics("Before Backfill", working_entries)
     # [P0-06] 優化後重新 backfill classroomId/classroomName
     # 因為上述循環修改了 day/period/subject，原 classroomId 可能不再有效
     _backfill_music_art_classrooms_after_optimization(working_entries, classrooms, school_info)
+    _dump_diagnostics("After Backfill (inside optimize)", working_entries)
 
     optimized_entries = _refresh_music_art_pair_metadata(working_entries, optimizer_configs)
     return optimized_entries, False
@@ -1031,14 +1155,14 @@ def _backfill_music_art_classrooms_after_optimization(schedule_entries, classroo
 
         # 判斷該年級是否需要專科教室
         grade = _get_class_grade_from_name(className, school_info)
-        canonical_subj = subj  # 音樂/美勞已經是 canonical
+        canonical_subj = _normalize_special_room_subject(_check_subj)
         from constraints.utils import grade_needs_special_room
         if not grade_needs_special_room(canonical_subj, grade, classroom_grades_cfg):
             continue
 
         arts_entries.append({
             "entry": entry,
-            "subject": subj,
+            "subject": canonical_subj,
             "className": className,
             "grade": grade,
             "day": day,
@@ -1049,50 +1173,28 @@ def _backfill_music_art_classrooms_after_optimization(schedule_entries, classroo
     if not arts_entries:
         return
 
-    # 按 (day, period, week) 分組，逐組指派教室避免衝堂
+    # 按 (day, period) 分組，逐時段指派教室避免衝堂
     slot_groups = defaultdict(list)
     for item in arts_entries:
-        slot_key = (item["day"], item["period"], item["week"])
+        slot_key = (item["day"], item["period"])
         slot_groups[slot_key].append(item)
 
     # 記錄已佔用: (room_id, day, period, week) -> set
     occupied = set()
 
-    # [Candidate B FIX v2] 預先載入所有既有 schedule_entries 的有效 classroomId 佔用狀態。
-    # 目的：讓 backfill 階段知道哪些教室時段已被其他 entry（含非音樂/美勞的專科課）佔用，
-    # 避免將教室重複指派給不同班級。
-    #
-    # 自我封鎖防護（精確版）：
-    # backfill 會重新指派 arts_entries 中的 entry。若 entry 的舊 classroomId 被載入 occupied，
-    # 該 entry 在搜尋新教室時會被自己的舊佔用擋住（self-blocking）。
-    #
-    # v1 錯誤：無條件移除所有 arts_entries 的舊佔用，導致不同 slot_group 的 entry
-    # 互相看不到彼此的佔用，產生交叉衝堂。
-    #
-    # v2 修正：先載入所有佔用（含 arts_entries），然後在處理每個 entry 時，
-    # 才暫時移除該 entry 自己的舊佔用（避免 self-blocking），搜尋完成後再恢復。
-    # 這樣不同 entry 之間仍能互相看到彼此的佔用。
-
-    # 建立 entry -> old occupied slots 的對照表，用於 self-blocking 防護
-    arts_entry_old_slots = {}
+    # 音美 entry 進到這個 helper 時，既有 classroomId/classroomName 一律視為待重配。
+    # 若保留舊值，stale room id 會被誤當成當前 slot 的有效佔用，導致 self-blocking
+    # 或更糟的「衝突雙方一起保留同一個舊 room id」。
+    arts_entry_ids = set()
     for item in arts_entries:
         entry = item["entry"]
-        old_room_id = str(entry.get("classroomId", "") or "").strip()
-        if not old_room_id:
-            arts_entry_old_slots[id(entry)] = []
-            continue
-        e_day = int(entry.get("day", 0) or 0)
-        e_period = int(entry.get("period", 0) or 0)
-        if not e_day or not e_period:
-            arts_entry_old_slots[id(entry)] = []
-            continue
-        e_week = _normalize_week_tag(entry.get("week"))
-        arts_entry_old_slots[id(entry)] = [
-            (old_room_id, e_day, e_period, w)
-            for w in _expand_validation_weeks(e_week)
-        ]
+        arts_entry_ids.add(id(entry))
+        entry["classroomId"] = ""
+        entry["classroomName"] = ""
 
     for entry in schedule_entries:
+        if id(entry) in arts_entry_ids:
+            continue
         existing_room_id = str(entry.get("classroomId", "") or "").strip()
         if not existing_room_id:
             continue
@@ -1105,25 +1207,20 @@ def _backfill_music_art_classrooms_after_optimization(schedule_entries, classroo
             occupied.add((existing_room_id, e_day, e_period, w))
 
     for slot_key, items in slot_groups.items():
-        day, period, week = slot_key
+        day, period = slot_key
+
+        # 優先處理 week="both" (固定課)，避免被奇數/偶數單週交替課造成物理碎片化
+        items.sort(key=lambda x: 0 if x["week"] == "both" else 1)
 
         for item in items:
+            week = item["week"]
             subj = item["subject"]
             grade = item["grade"]
             entry = item["entry"]
 
-            # [Candidate B v2] Self-blocking protection:
-            # Temporarily remove this entry's OLD occupied slots so it doesn't block itself.
-            old_slots = arts_entry_old_slots.get(id(entry), [])
-            for slot in old_slots:
-                occupied.discard(slot)
-
             canonical_room_subj = _normalize_special_room_subject(subj)
             candidate_rooms = list(rooms_by_subject.get(canonical_room_subj, []))
             if not candidate_rooms:
-                # Restore old slots since no assignment will happen
-                for slot in old_slots:
-                    occupied.add(slot)
                 continue
 
             # 優先偏好年級，其次非偏好
@@ -1157,6 +1254,11 @@ def _backfill_music_art_classrooms_after_optimization(schedule_entries, classroo
                 # 所有教室都衝堂，清空以避免錯誤指派
                 entry["classroomId"] = ""
                 entry["classroomName"] = ""
+                print(f"[Diag] Backfill failed! day={day}, period={period}, subject={subj}, week={week}, className={entry.get('className')}")
+                for room in candidate_rooms:
+                    room_id = room["id"]
+                    conflicts = [w for w in weeks_to_occupy if (room_id, day, period, w) in occupied]
+                    print(f"       Room {room.get('name')} occupied in weeks: {conflicts}")
 
 
 def _backfill_other_special_room_classrooms(schedule_entries, classrooms, school_info):
@@ -1325,6 +1427,11 @@ def main():
         sys.exit(1)
 
     print("[PHASE] 載入 payload 完成", flush=True)
+    
+    # [P2] Phase-level observability initialized early
+    phase_history = []
+    phase_timings = {}
+    solver_start_time = time.time()
 
     job_id = data.get("jobId", "UNKNOWN")
     schoolInfo = data.get("schoolInfo", {})
@@ -1346,12 +1453,16 @@ def main():
     # ==========================================
     subject_grade_rules = schoolInfo.get("subjectGradeRules", {}) or {}
     
+    _t_pre_start = time.time()
     classes_data, _metadata = preprocess_classes(
         classes_data,
         ai_settings,
         standard_domain_settings=standard_domain_settings,
         subject_grade_rules=subject_grade_rules,
     )
+    _t_pre_end = time.time()
+    phase_timings["preprocess_seconds"] = round(_t_pre_end - _t_pre_start, 3)
+    
     data["preprocessMetadata"] = copy.deepcopy(_metadata)
     data["preprocessedClasses"] = copy.deepcopy(classes_data)
     print("[PHASE] preprocessing 完成", flush=True)
@@ -1553,8 +1664,8 @@ def main():
     # [Task 02] Two-pass solver: strict teaching-shape first, then feasibility recovery fallback
     from scheduler_policy import SolveMode, get_active_policy
 
-    def _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE):
-        print("[PHASE] model build 開始", flush=True)
+    def _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE, build_level="quality", hint_values=None, time_limit=None):
+        print(f"[PHASE] model build 開始 (build_level={build_level})", flush=True)
         policy = get_active_policy(solve_mode)
         model = cp_model.CpModel()
         schedule = {}
@@ -1575,7 +1686,8 @@ def main():
         ) = create_alternating_vars(model, classes_data)
 
         print("[LOCK] [建模] 掃描手動預排鎖定...")
-        locked_count, locked_vars, lock_audit_log = apply_preallocation_locks(model, classes_data, schedule)
+        movable_locks_policy = get_movable_lock_policy(data)
+        locked_count, locked_vars, lock_audit_log = apply_preallocation_locks(model, classes_data, schedule, movable_locks_policy=movable_locks_policy)
 
         # ============================================================
         # Phase 2: 教師維度約束
@@ -1601,7 +1713,8 @@ def main():
 
         print("[CONSTRAINT] [核心約束] 加入特殊課程鎖定...")
         apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings,
-                                   preprocess_metadata=data.get("preprocessMetadata"))
+                                   preprocess_metadata=data.get("preprocessMetadata"),
+                                   movable_locks_policy=movable_locks_policy)
 
         # ============================================================
         # Phase 3: 班級維度約束
@@ -1610,7 +1723,7 @@ def main():
         apply_daily_subject_limit(model, classes_data, schedule, locked_vars)
 
         print("[CONSTRAINT] [核心約束] 加入低年級下午禁排...")
-        apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=ai_settings)
+        apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=ai_settings, locked_vars=locked_vars)
 
         # [Task 07] Grade 1-2 Tuesday afternoon life-course placement (hard in strict, soft fallback)
         print("[CONSTRAINT] [核心約束] 加入 1-2 年級週二下午生活課...")
@@ -1667,7 +1780,11 @@ def main():
 
         # [Subject Day-Spread] 科任課日分散規則（英語/資訊/體育/健康/社會）
         print("[CONSTRAINT] [核心約束] 加入科任課日分散規則（英語/資訊/體育/健康/社會）...")
-        apply_subject_day_spread(model, classes_data, schedule, locked_vars=locked_vars)
+        apply_subject_day_spread(
+            model, classes_data, schedule,
+            locked_vars=locked_vars,
+            penalty_vars=None if solve_mode == SolveMode.STRICT_TEACHING_SHAPE else phase2_penalty_vars,
+        )
 
         # [Subject Day-Spread] 音樂固定課 vs 交替課不同日規則
         print("[CONSTRAINT] [核心約束] 加入音樂固定課 vs 交替課不同日規則...")
@@ -1771,6 +1888,9 @@ def main():
         )
         phase2_penalty_vars.extend(daily_min_penalties)
 
+        apply_movable_budgets(model, movable_locks_policy)
+        phase2_penalty_vars.extend(getattr(model, "movable_objective_terms", []))
+
         phase2_external_count = len(phase2_penalty_vars)
         engine = SchedulePhase2Engine(
             model, schedule, class_names, teacher_names,
@@ -1785,8 +1905,46 @@ def main():
             priority_placeholders=priority_placeholders,
             # [repair_03] Pass runtime policy adapter for weight resolution
             policy=policy,
+            build_level=build_level,
         )
         engine.build_soft_constraints()
+
+        # OPTION_B_DRYRUN
+        import os
+        dryrun_strategy = os.environ.get("OPTION_B_DRYRUN_STRATEGY")
+        if dryrun_strategy and build_level == "core":
+            from constraints.utils import grade_needs_special_room, _normalize_room_subject
+            classroom_grades_cfg = (schoolInfo or {}).get("subjectClassroomGrades", {}) or {}
+            class_grade_dict = {cls.get("name"): cls.get("grade") for cls in classes_data}
+            
+            english_pressure_vars = []
+            for (c_name, p, t_name, subject), var in schedule.items():
+                if _normalize_room_subject(subject) != "語文-英語":
+                    continue
+                grade = class_grade_dict.get(c_name)
+                if grade is None:
+                    continue
+                if not grade_needs_special_room(subject, grade, classroom_grades_cfg):
+                    continue
+                english_pressure_vars.append(var)
+            
+            print(f"[OPTION_B_DRYRUN] Collected {len(english_pressure_vars)} english pressure vars")
+            if english_pressure_vars:
+                val_strategy = cp_model.SELECT_MAX_VALUE if dryrun_strategy == "MAX" else cp_model.SELECT_MIN_VALUE
+                model.AddDecisionStrategy(
+                    english_pressure_vars,
+                    cp_model.CHOOSE_FIRST_UNBOUND,
+                    val_strategy
+                )
+
+        if hint_values:
+            print("[INFO] [建模] 注入前一階段的 Solution Hint...")
+            for key, val in hint_values.items():
+                if key in schedule:
+                    try:
+                        model.AddHint(schedule[key], int(val))
+                    except Exception:
+                        pass
 
         # [Task 3.8] Merge only penalties created inside the phase2 engine.
         # The engine starts by copying external_penalty_vars into self.penalty_vars,
@@ -1794,14 +1952,42 @@ def main():
         phase2_penalty_vars.extend(engine.penalty_vars[phase2_external_count:])
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 1740.0
-        solver.parameters.num_search_workers = 8
+        dryrun_workers = os.environ.get("OPTION_B_DRYRUN_WORKERS")
+        if dryrun_workers:
+            solver.parameters.num_search_workers = int(dryrun_workers)
+        else:
+            solver.parameters.num_search_workers = 8
 
-        print(f"[PHASE] model build 完成, solve 開始 (workers={solver.parameters.num_search_workers}, timeout={solver.parameters.max_time_in_seconds})", flush=True)
+        legacy_max_time = os.environ.get("SOLVER_MAX_TIME_SECONDS")
+        short_time_str = os.environ.get("SOLVER_SHORT_TIME_SECONDS")
+        long_time_str = os.environ.get("SOLVER_LONG_TIME_SECONDS")
+
+        if legacy_max_time and not short_time_str and not long_time_str:
+            short_time = float(legacy_max_time)
+            long_time = float(legacy_max_time)
+        else:
+            short_time = float(short_time_str or "20.0")
+            long_time = float(long_time_str or "60.0")
+
+        actual_time_limit = time_limit if time_limit is not None else short_time
+        print(f"[PHASE] model build 完成, solve 開始 (workers={solver.parameters.num_search_workers}, timeout={actual_time_limit})", flush=True)
+        solver.parameters.max_time_in_seconds = actual_time_limit
         status = solver.Solve(model)
-        _status_map = {cp_model.OPTIMAL: "OPTIMAL", cp_model.FEASIBLE: "FEASIBLE", cp_model.INFEASIBLE: "INFEASIBLE", cp_model.MODEL_INVALID: "MODEL_INVALID"}
-        print(f"[PHASE] solve 返回 status={status} ({_status_map.get(status, 'UNKNOWN/' + str(status))})", flush=True)
-        print(f"[DEBUG] [求解] solver.Solve() returned status={status} ({_status_map.get(status, 'UNKNOWN/' + str(status))})")
+
+        timeout_stage = "short"
+        if status == cp_model.UNKNOWN and time_limit is None and long_time > short_time:
+            print(f"[PHASE] Stage 1 未找到可行解，進入 Stage 2 延長求解 (timeout={long_time})", flush=True)
+            solver.parameters.max_time_in_seconds = long_time
+            status = solver.Solve(model)
+            timeout_stage = "long"
+
+        _status_map = {cp_model.OPTIMAL: "OPTIMAL", cp_model.FEASIBLE: "FEASIBLE", cp_model.INFEASIBLE: "INFEASIBLE", cp_model.MODEL_INVALID: "MODEL_INVALID", cp_model.UNKNOWN: "UNKNOWN"}
+        print(f"[PHASE] solve 返回 status={status} ({_status_map.get(status, 'UNKNOWN/' + str(status))}) stage={timeout_stage}", flush=True)
+        print(f"[DEBUG] [求解] solver.Solve() returned status={status} ({_status_map.get(status, 'UNKNOWN/' + str(status))}) stage={timeout_stage}")
+        try:
+            print(f"[OPTION_B_DRYRUN_STATS] status={_status_map.get(status, 'UNKNOWN')} branches={solver.NumBranches()} conflicts={solver.NumConflicts()} wall_time={round(solver.WallTime(), 3)}", flush=True)
+        except Exception as e:
+            print(f"[OPTION_B_DRYRUN_STATS_ERROR] {e}", flush=True)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             print(f"[WARN] [求解] Status is NOT OPTIMAL/FEASIBLE — schedule extraction will be blocked to prevent partial solution artifacts")
         return {
@@ -1815,6 +2001,9 @@ def main():
             "class_pair_group": class_pair_group,
             "class_teacher_pair": class_teacher_pair,
             "relax_room_capacity": relax_room_capacity,
+            "timeout_stage": timeout_stage,
+            # [P2] Phase-level wall time for observability
+            "wall_time": round(solver.WallTime(), 3) if hasattr(solver, "WallTime") else 0,
         }
 
     # [Task 02] Two-pass solver flow:
@@ -1828,24 +2017,150 @@ def main():
         degradation_reasons = []
         fallback_attempted = False  # [Task 02] Guard: fallback only once
 
-        strict_policy = get_active_policy(SolveMode.STRICT_TEACHING_SHAPE)
-        attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE)
+        # Read global time limits for two-pass propagation
+        legacy_max_time = os.environ.get("SOLVER_MAX_TIME_SECONDS")
+        short_time_str = os.environ.get("SOLVER_SHORT_TIME_SECONDS")
+        long_time_str = os.environ.get("SOLVER_LONG_TIME_SECONDS")
+        if legacy_max_time and not short_time_str and not long_time_str:
+            global_long_time = float(legacy_max_time)
+        else:
+            global_long_time = float(long_time_str or "60.0")
 
-        if attempt["status"] in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID):
+        strict_policy = get_active_policy(SolveMode.STRICT_TEACHING_SHAPE)
+        
+        print("[INFO] [求解] 啟動 Two-Pass Pass 1: Strict Teaching Shape (Core Level)")
+        _t0 = time.time()
+        attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE, build_level="core")
+        _t1 = time.time()
+        _total = _t1 - _t0
+        _solve = attempt.get("wall_time", 0)
+        _build = max(0, _total - _solve)
+        phase_timings["solve_core_strict_total_seconds"] = round(_total, 3)
+        phase_timings["solve_core_strict_build_seconds"] = round(_build, 3)
+        phase_timings["solve_core_strict_solve_seconds"] = round(_solve, 3)
+        phase_history.append({
+            "phase": "strict_core",
+            "buildLevel": "core",
+            "solveMode": "STRICT_TEACHING_SHAPE",
+            "status": attempt["solver"].StatusName(attempt["status"]) if attempt.get("solver") else "UNKNOWN",
+            "timeoutStage": attempt.get("timeout_stage", "short"),
+            "buildTimeSeconds": round(_build, 3),
+            "solveTimeSeconds": round(_solve, 3),
+            "totalTimeSeconds": round(_total, 3),
+        })
+
+        if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            print("[INFO] [求解] Strict pass 成功產出可行解，啟動 Two-Pass Pass 2: Quality 優化...")
+            hint_values = {}
+            for key, var in attempt["schedule"].items():
+                try:
+                    hint_values[key] = attempt["solver"].Value(var)
+                except Exception:
+                    pass
+
+            _t0 = time.time()
+            quality_attempt = _solve_attempt(
+                relax_room_capacity=False,
+                solve_mode=SolveMode.STRICT_TEACHING_SHAPE,
+                build_level="quality",
+                hint_values=hint_values,
+                time_limit=global_long_time
+            )
+            _t1 = time.time()
+            _total = _t1 - _t0
+            _solve = quality_attempt.get("wall_time", 0)
+            _build = max(0, _total - _solve)
+            phase_timings["solve_quality_strict_total_seconds"] = round(_total, 3)
+            phase_history.append({
+                "phase": "strict_quality",
+                "buildLevel": "quality",
+                "solveMode": "STRICT_TEACHING_SHAPE",
+                "status": quality_attempt["solver"].StatusName(quality_attempt["status"]) if quality_attempt.get("solver") else "UNKNOWN",
+                "timeoutStage": quality_attempt.get("timeout_stage", "short"),
+                "buildTimeSeconds": round(_build, 3),
+                "solveTimeSeconds": round(_solve, 3),
+                "totalTimeSeconds": round(_total, 3),
+            })
+            
+            if quality_attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                attempt = quality_attempt
+                solve_pass = "strict_teaching_shape_quality"
+                print("[INFO] [求解] Quality pass 優化成功！")
+            else:
+                print("[WARN] [求解] Quality pass 失敗，退回 Strict core pass 初解")
+
+        if attempt["status"] in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID, cp_model.UNKNOWN):
             strict_status = attempt["status"]
-            strict_status_name = solver.StatusName(strict_status) if "solver" in locals() else "UNKNOWN"
+            strict_status_name = attempt["solver"].StatusName(strict_status) if attempt.get("solver") else "UNKNOWN"
 
             # [Blocker 2] Only trigger fallback if fallback_enabled is True AND not already attempted
             if strict_policy.fallback_enabled and not fallback_attempted:
-                print("[WARN] [求解] Strict pass 無解或模型無效，啟動 Feasibility Recovery Fallback...")
+                print("[WARN] [求解] Strict pass 無解或模型無效，啟動 Feasibility Recovery Fallback (Core Level)...")
                 fallback_attempted = True
                 # Run fallback pass with FEASIBILITY_RECOVERY mode
-                attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.FEASIBILITY_RECOVERY)
+                _t0 = time.time()
+                attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.FEASIBILITY_RECOVERY, build_level="core")
+                _t1 = time.time()
+                _total = _t1 - _t0
+                _solve = attempt.get("wall_time", 0)
+                _build = max(0, _total - _solve)
+                phase_timings["solve_core_fallback_total_seconds"] = round(_total, 3)
+                phase_history.append({
+                    "phase": "fallback_core",
+                    "buildLevel": "core",
+                    "solveMode": "FEASIBILITY_RECOVERY",
+                    "status": attempt["solver"].StatusName(attempt["status"]) if attempt.get("solver") else "UNKNOWN",
+                    "timeoutStage": attempt.get("timeout_stage", "short"),
+                    "buildTimeSeconds": round(_build, 3),
+                    "solveTimeSeconds": round(_solve, 3),
+                    "totalTimeSeconds": round(_total, 3),
+                })
+                
+                if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    print("[INFO] [求解] Fallback pass 成功產出可行解，啟動 Quality 優化...")
+                    fb_hint_values = {}
+                    for key, var in attempt["schedule"].items():
+                        try:
+                            fb_hint_values[key] = attempt["solver"].Value(var)
+                        except Exception:
+                            pass
+                            
+                    _t0 = time.time()
+                    fb_quality_attempt = _solve_attempt(
+                        relax_room_capacity=False,
+                        solve_mode=SolveMode.FEASIBILITY_RECOVERY,
+                        build_level="quality",
+                        hint_values=fb_hint_values,
+                        time_limit=global_long_time
+                    )
+                    _t1 = time.time()
+                    _total = _t1 - _t0
+                    _solve = fb_quality_attempt.get("wall_time", 0)
+                    _build = max(0, _total - _solve)
+                    phase_timings["solve_quality_fallback_total_seconds"] = round(_total, 3)
+                    phase_history.append({
+                        "phase": "fallback_quality",
+                        "buildLevel": "quality",
+                        "solveMode": "FEASIBILITY_RECOVERY",
+                        "status": fb_quality_attempt["solver"].StatusName(fb_quality_attempt["status"]) if fb_quality_attempt.get("solver") else "UNKNOWN",
+                        "timeoutStage": fb_quality_attempt.get("timeout_stage", "short"),
+                        "buildTimeSeconds": round(_build, 3),
+                        "solveTimeSeconds": round(_solve, 3),
+                        "totalTimeSeconds": round(_total, 3),
+                    })
+                    if fb_quality_attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                        attempt = fb_quality_attempt
+                        solve_pass = "feasibility_recovery_quality"
+                        print("[INFO] [求解] Fallback Quality pass 優化成功！")
+                    else:
+                        solve_pass = "feasibility_recovery"
+                        print("[WARN] [求解] Fallback Quality pass 失敗，退回 Fallback core pass 初解")
+                
                 _fb_breakdown = {}
 
                 if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     # Fallback succeeded - mark as degraded
-                    solve_pass = "feasibility_recovery"
+                    # solve_pass is already set above
                     degraded = True
                     # [Task 02] Compute penaltyBreakdown early to build specific degradationReasons
                     for pv_entry in attempt["phase2_penalty_vars"] or []:
@@ -1878,9 +2193,25 @@ def main():
                 if "classroom_capacity_overload" in _fb_breakdown and _fb_breakdown["classroom_capacity_overload"] > 0:
                     degradation_reasons.append("specialty room capacity relaxed to soft penalty in fallback mode")
                 # else: Fallback also infeasible — try soft room capacity as last resort
-                if attempt["status"] in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID):
+                if attempt["status"] in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID, cp_model.UNKNOWN):
                     print("[WARN] [求解] FEASIBILITY_RECOVERY 仍無解，啟動 Soft Room Capacity 最終回退...")
-                    soft_room_attempt = _solve_attempt(relax_room_capacity=True, solve_mode=SolveMode.FEASIBILITY_RECOVERY)
+                    _t0 = time.time()
+                    soft_room_attempt = _solve_attempt(relax_room_capacity=True, solve_mode=SolveMode.FEASIBILITY_RECOVERY, build_level="core")
+                    _t1 = time.time()
+                    _total = _t1 - _t0
+                    _solve = soft_room_attempt.get("wall_time", 0)
+                    _build = max(0, _total - _solve)
+                    phase_timings["solve_core_soft_room_total_seconds"] = round(_total, 3)
+                    phase_history.append({
+                        "phase": "soft_room_capacity",
+                        "buildLevel": "core",
+                        "solveMode": "FEASIBILITY_RECOVERY",
+                        "status": soft_room_attempt["solver"].StatusName(soft_room_attempt["status"]) if soft_room_attempt.get("solver") else "UNKNOWN",
+                        "timeoutStage": soft_room_attempt.get("timeout_stage", "short"),
+                        "buildTimeSeconds": round(_build, 3),
+                        "solveTimeSeconds": round(_solve, 3),
+                        "totalTimeSeconds": round(_total, 3),
+                    })
                     if soft_room_attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                         attempt = soft_room_attempt
                         solve_pass = "soft_room_capacity_recovery"
@@ -1949,23 +2280,31 @@ def main():
                 if val > 0:
                     penalty_breakdown[rule_id] = penalty_breakdown.get(rule_id, 0) + (weight * val)
 
+        status_str = "UNKNOWN"
+        if status == cp_model.OPTIMAL: status_str = "OPTIMAL"
+        elif status == cp_model.FEASIBLE: status_str = "FEASIBLE"
+        elif status == cp_model.INFEASIBLE: status_str = "INFEASIBLE"
+        elif status == cp_model.MODEL_INVALID: status_str = "MODEL_INVALID"
+
         result = {
             "jobId": job_id,
-            "status": solver.StatusName(status),
-            "time_seconds": round(solver.WallTime(), 3),
+            "status": status_str,
+            "solverStatus": status_str,
+            "time_seconds": round(solver.WallTime(), 3) if hasattr(solver, "WallTime") else 0,
             "total_penalty": sum(penalty_breakdown.values()),
             "schedule": [],
-            "message": "",
+            "message": "求解失敗" if status_str not in ("OPTIMAL", "FEASIBLE") else "",
             # [Task 02] Two-pass metadata
             "solvePass": solve_pass,
             "degraded": degraded,
             "degradationReasons": degradation_reasons,
             "penaltyBreakdown": penalty_breakdown,
+            "timeoutStage": attempt.get("timeout_stage", "short"),
+            "hadFeasibleCandidate": status in (cp_model.OPTIMAL, cp_model.FEASIBLE),
         }
 
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             result["message"] = "成功產出課表"
-            result["solverStatus"] = result["status"]  # OPTIMAL 或 FEASIBLE
             if used_soft_capacity_fallback:
                 result["message"] = "成功產出課表（已啟用專科教室容量軟性降級）"
 
@@ -2031,6 +2370,8 @@ def main():
 
             # [NEW] 建立 (className, period_index, week) -> (roomId, roomName) 對照表
             assigned_rooms = {}
+            
+            print(f"\n[DIAG] === CP-SAT raw classroom_assignments ===", flush=True)
             if hasattr(model, "classroom_assignments"):
                 for item in model.classroom_assignments:
                     try:
@@ -2039,8 +2380,16 @@ def main():
                                 "classroomId": item.get("roomId", ""),
                                 "classroomName": item.get("roomName", ""),
                             }
+                            # Diagnostic check
+                            c_name = item["className"]
+                            p_idx = item["period"]
+                            day = (p_idx // PERIODS_PER_DAY) + 1
+                            period = (p_idx % PERIODS_PER_DAY) + 1
+                            if c_name in ["3年10班", "5年11班"] and day == 2 and period == 1:
+                                print(f"[DIAG] Class: {c_name}, Room: {item.get('roomName', '')}, Week: {item.get('week', 'both')}", flush=True)
                     except Exception:
                         pass
+            print(f"[DIAG] === END ===\n", flush=True)
 
             # -- 主輸出迴圈
             print("[PHASE] schedule extraction 開始", flush=True)
@@ -2128,6 +2477,7 @@ def main():
                     entry.update(pair_fields)
                     result["schedule"].append(entry)
 
+            _dump_diagnostics("After Schedule Extraction", result["schedule"])
             print("[PHASE] post-processing 開始", flush=True)
             optimized_schedule, music_art_optimization_skipped = _optimize_music_art_alternating_locally(
                 result["schedule"],
@@ -2165,6 +2515,34 @@ def main():
             )
             result["weekSpecificConflict"] = result_flags["weekSpecificConflict"]
             result["musicArtOptimizationSkipped"] = music_art_optimization_skipped
+            
+            # Movable Locks prototype output
+            moved_lessons = []
+            movable_decisions = getattr(model, "movable_lock_decisions", [])
+            for dec in movable_decisions:
+                is_moved_var = dec.get("is_moved")
+                if is_moved_var is not None and solver.Value(is_moved_var):
+                    orig_p = dec["from_period"]
+                    new_p = orig_p
+                    for p, cv, _, _ in dec.get("lock_choice_vars", []):
+                        if solver.Value(cv) == 1:
+                            new_p = p
+                            break
+                    moved_lessons.append({
+                        "className": dec["className"],
+                        "subject": dec["subject"],
+                        "type": dec["lockType"],
+                        "originalPeriod": {"day": (orig_p // PERIODS_PER_DAY) + 1, "period": (orig_p % PERIODS_PER_DAY) + 1},
+                        "newPeriod": {"day": (new_p // PERIODS_PER_DAY) + 1, "period": (new_p % PERIODS_PER_DAY) + 1}
+                    })
+                    
+            if moved_lessons:
+                result["movedLockedLessons"] = moved_lessons
+                result["movableLockSummary"] = {
+                    "totalMoved": len(moved_lessons)
+                }
+                result["requiresUserReview"] = True
+                
             # [Task 02] Do NOT overwrite result["degraded"] — it was set by two-pass flow
             # Only merge additional flags that don't conflict:
             if "degradeLevel" not in result:
@@ -2215,6 +2593,9 @@ def main():
                         "_effective_subjects": eff_subjs,
                     })
 
+            _dump_diagnostics("Before _validate_schedule_result", result["schedule"])
+            
+            _t_val_start = time.time()
             validation_report = _validate_schedule_result(
                 result["schedule"],
                 classes_data,
@@ -2228,6 +2609,9 @@ def main():
                 validation_report,
                 allow_room_overloads=used_soft_capacity_fallback,
             )
+            _t_val_end = time.time()
+            phase_timings["validation_seconds"] = round(_t_val_end - _t_val_start, 3)
+            
             with open("debug_schedule_validation_report.json", "w", encoding="utf-8") as vf:
                 json.dump(validation_report, vf, ensure_ascii=False, indent=2)
 
@@ -2237,6 +2621,7 @@ def main():
                 result["message"] = "求解結果未通過硬限制驗證，請檢查 debug_schedule_validation_report.json"
                 result["schedule"] = []
                 result["validationReport"] = validation_report
+                result["hadFeasibleCandidate"] = True
             elif used_soft_capacity_fallback and validation_report.get("room_overloads"):
                 overload_count = len(validation_report.get("room_overloads") or [])
                 result["message"] = f"成功產出課表（已啟用專科教室容量軟性降級；剩餘 {overload_count} 筆容量警告）"
@@ -2248,9 +2633,20 @@ def main():
             result["message"] = "無法產出符合條件的課表 (條件矛盾)"
             _write_infeasible_report(data, classes_data, teachers_data, schedule, subject_room_count, subject_demand_count)
         elif status == cp_model.UNKNOWN:
-            result["status"] = "UNKNOWN_TIMEOUT"
-            result["solverStatus"] = "UNKNOWN_TIMEOUT"
-            result["message"] = "求解逾時，未找到可接受的可行解"
+            result["status"] = "TIMEOUT_NO_SOLUTION"
+            result["solverStatus"] = "TIMEOUT_NO_SOLUTION"
+            result["message"] = "求解逾時，未找到任何可行解"
+        elif status == cp_model.MODEL_INVALID:
+            result["status"] = "MODEL_INVALID"
+            result["solverStatus"] = "MODEL_INVALID"
+            result["message"] = "模型構建錯誤"
+
+        # [P2] Attach phase-level observability metadata
+        total_solver_time = time.time() - solver_start_time
+        result["phaseTimings"] = phase_timings
+        result["phaseTimings"]["total_solver_seconds"] = round(total_solver_time, 3)
+        result["phaseHistory"] = phase_history
+        result["terminalReason"] = result.get("status", "UNKNOWN")
 
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)

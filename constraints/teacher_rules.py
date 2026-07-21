@@ -16,6 +16,7 @@ import logging
 from collections import defaultdict
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
 from utils import is_virtual_teacher
+from constraints.movable_locks import is_special_course_lock_movable, get_candidate_periods, apply_movable_lock
 
 
 def _build_class_map(classes_data):
@@ -63,14 +64,20 @@ def apply_anti_collision(model, schedule, class_names, teacher_names, classes_da
         classes_data: list of class dicts
         ai_settings: dict with artsClassEnabled flag
     """
+    # 建立 O(1) Indexing 字典以取代重複掃描 schedule.items()
+    from collections import defaultdict
+    schedule_by_class_period = defaultdict(list)
+    schedule_by_teacher_period = defaultdict(list)
+    
+    for (c, per, t, s), var in schedule.items():
+        schedule_by_class_period[(c, per)].append(var)
+        if t:
+            schedule_by_teacher_period[(t, per)].append(var)
+
     # 班級維度：同時段只能有一門課
     for p in range(TOTAL_PERIODS):
         for c_name in class_names:
-            slot_vars = list(set([
-                var
-                for (c, per, _t, _s), var in schedule.items()
-                if c == c_name and per == p
-            ]))
+            slot_vars = list(set(schedule_by_class_period.get((c_name, p), [])))
             if slot_vars:
                 model.AddAtMostOne(slot_vars)
 
@@ -87,7 +94,7 @@ def apply_anti_collision(model, schedule, class_names, teacher_names, classes_da
             if _teacher_is_collision_exempt(t_name, classes_data, ai_settings, schedule):
                 # 僅限純藝才班虛擬教師可豁免
                 continue
-            t_vars = [var for (c, per, t, s), var in schedule.items() if t == t_name and per == p]
+            t_vars = schedule_by_teacher_period.get((t_name, p), [])
             if t_vars:
                 model.Add(sum(t_vars) <= 1)
 
@@ -402,7 +409,7 @@ def classify_special_course_overlaps(resolved_special_courses):
 
 
 def apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings,
-                                preprocess_metadata=None):
+                                preprocess_metadata=None, movable_locks_policy=None):
     """
     [硬約束 5] 特殊專案與抽離課程建模（學習中心/抽離群組結構）
 
@@ -429,6 +436,13 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
     from collections import defaultdict
     import re
     from config import LUNCH_BOUNDARY
+
+    # [PERFORMANCE INDEXING]
+    schedule_by_c_p_s = defaultdict(list)
+    schedule_by_t_p = defaultdict(list)
+    for (sch_c, sch_p, sch_t, sch_s), var in schedule.items():
+        schedule_by_c_p_s[(sch_c, sch_p, sch_s)].append(var)
+        schedule_by_t_p[(sch_t, sch_p)].append(var)
 
     # 1. 預先建立班級與其年級的對照表
     class_grade_map = {}
@@ -576,7 +590,39 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
             # 3f. 應用 lockedSlots 約束
             if len(sub_allowed) == 1:
                 p_lock = next(iter(sub_allowed))
-                model.Add(sub_event_vars[p_lock] == 1)
+                sc_sample = sub_sc_list[0] if sub_sc_list else {}
+                is_movable = is_special_course_lock_movable(sc_sample, movable_locks_policy)
+                # [Semantic Fix] Explicitly skip multi-class movable special courses because P2 prototype
+                # lacks per-class accounting and exact-one slot release semantics for shared courses.
+                if is_movable and len(classes_in_pool) == 1:
+                    global_allowed = set()
+                    for p in range(TOTAL_PERIODS):
+                        is_allowed = True
+                        for c in classes_in_pool:
+                            grade = class_grade_map.get(c, 1)
+                            if not is_period_allowed_for_grade(grade, p):
+                                is_allowed = False
+                                break
+                        if is_allowed:
+                            global_allowed.add(p)
+                            
+                    candidates = get_candidate_periods(p_lock, movable_locks_policy, allowed_periods=global_allowed)
+                    def var_getter(p):
+                        return sub_event_vars[p]
+                        
+                    decision_meta = {
+                        "lockType": "special_course_lock",
+                        "className": ",".join(classes_in_pool),
+                        "subject": sc_sample.get("targetSubject", "未知"),
+                        "specialCourseType": sc_sample.get("name", ""),
+                        "from_period": p_lock,
+                    }
+                    apply_movable_lock(model, p_lock, candidates, var_getter, decision_meta)
+                    print(f"  [LOCK] [可遷移抽離鎖定] {sc_sample.get('name')} 第{p_lock//PERIODS_PER_DAY+1}天第{p_lock%PERIODS_PER_DAY+1}節")
+                else:
+                    if is_movable and len(classes_in_pool) > 1:
+                        print(f"  [LOCK] [Skip Movable] {sc_sample.get('name')} contains {len(classes_in_pool)} classes, fallback to hard lock.")
+                    model.Add(sub_event_vars[p_lock] == 1)
             elif len(sub_allowed) > 1:
                 for p in range(TOTAL_PERIODS):
                     if p not in sub_allowed:
@@ -624,10 +670,7 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                             effective_subj = resolve_effective_special_course_subject(
                                 sc, c, preprocess_metadata
                             )
-                            class_p_subj_vars = [
-                                var for (sch_c, sch_p, sch_t, sch_s), var in schedule.items()
-                                if sch_c == c and sch_p == p and sch_s == effective_subj
-                            ]
+                            class_p_subj_vars = schedule_by_c_p_s.get((c, p, effective_subj), [])
                             if not class_p_subj_vars:
                                 # ── 診斷：找不到對應變數，per (class, subject) 只警告一次 ──
                                 warn_key = (c, effective_subj)
@@ -651,10 +694,7 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
     # [SEMANTIC FIX] 因為 teacher_p_sc_vars 現在是事件層級，
     # 同一抽離事件只貢獻一個變數，不會被重複計算
     for (teacher, p), sc_vars_at_p in teacher_p_sc_vars.items():
-        regular_vars = [
-            var for (c, per, t, s), var in schedule.items()
-            if t == teacher and per == p
-        ]
+        regular_vars = schedule_by_t_p.get((teacher, p), [])
         model.Add(sum(regular_vars) + sum(sc_vars_at_p) <= 1)
 
     # 把 sc_decision_vars 暫存到 model 中，方便主程式存取

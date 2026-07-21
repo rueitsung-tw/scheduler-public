@@ -177,8 +177,6 @@ def apply_art_consecutive_constraint(
             continue  # 無交替課的班級不套用此規則
 
         # 2. 收集兩類變數 (period -> BoolVar)
-        # "美勞_固定" in "音樂美勞_交替" → False (後者不含 _固定)
-        # "音樂美勞_交替" in "美勞_固定" → False (前者不含 _交替)
         art_fixed_vars = {}
         alt_vars = {}
 
@@ -191,17 +189,26 @@ def apply_art_consecutive_constraint(
                 alt_vars[per] = var
 
         if not art_fixed_vars or not alt_vars:
-            continue  # 安全防護：變數未建立時跳過
+            continue
 
-        # 3. 建立每日的連堂配對 BoolVar
-        consecutive_patterns = []
+        # ================================================================
+        # 3. Block Variable 建模（取代事後偵測 OR 約束，所有模式統一使用）
+        #
+        # 舊做法（搜尋爆炸根因）：
+        #   建立 consecutive_patterns OR 約束，事後偵測兩節是否相鄰。
+        #   CP-SAT 對大型 OR 約束 Propagation 弱，教師密度高時爆炸。
+        #
+        # 新做法（Block Variable 模型）：
+        #   為每個合法 (day, start_p, direction) 建立 block BoolVar。
+        #   AddExactlyOne 讓 Solver 先決定「哪個 block」，再透過
+        #   OnlyEnforceIf 直接強制兩個 schedule vars = 1。
+        #   Anti-collision 可立即傳遞剪枝，大幅縮小搜尋空間。
+        # ================================================================
+        block_vars = []
 
         for d in range(DAYS):
             base = d * PERIODS_PER_DAY
-
-            for (p1, p2) in get_valid_consecutive_pairs(base):  # ← 統一用 helper
-
-                # 兩節次都必須有 art_fixed 和 alt 變數才構成配對
+            for (p1, p2) in get_valid_consecutive_pairs(base):
                 if p1 not in art_fixed_vars or p2 not in art_fixed_vars:
                     continue
                 if p1 not in alt_vars or p2 not in alt_vars:
@@ -212,54 +219,34 @@ def apply_art_consecutive_constraint(
                 alt_p1 = alt_vars[p1]
                 alt_p2 = alt_vars[p2]
 
-                # 模式 A (forward): 美勞_固定在 p1, 交替在 p2
-                fwd = model.NewBoolVar(f'art_fwd_{c_name}_d{d}_p{p1}')
-                model.Add(fwd >= art_p1 + alt_p2 - 1)
-                model.Add(fwd <= art_p1)
-                model.Add(fwd <= alt_p2)
+                # Block AF (art-first): 美勞_固定在 p1, 交替在 p2
+                b_af = model.NewBoolVar(f'art_block_{c_name}_d{d}_p{p1}_AF')
+                model.Add(art_p1 == 1).OnlyEnforceIf(b_af)
+                model.Add(alt_p2 == 1).OnlyEnforceIf(b_af)
+                block_vars.append(b_af)
 
-                # 模式 B (backward): 交替在 p1, 美勞_固定在 p2
-                bwd = model.NewBoolVar(f'art_bwd_{c_name}_d{d}_p{p1}')
-                model.Add(bwd >= alt_p1 + art_p2 - 1)
-                model.Add(bwd <= alt_p1)
-                model.Add(bwd <= art_p2)
+                # Block BF (alt-first): 交替在 p1, 美勞_固定在 p2
+                b_bf = model.NewBoolVar(f'art_block_{c_name}_d{d}_p{p1}_BF')
+                model.Add(alt_p1 == 1).OnlyEnforceIf(b_bf)
+                model.Add(art_p2 == 1).OnlyEnforceIf(b_bf)
+                block_vars.append(b_bf)
 
-                # 此配對成立 = 任一模式成立
-                pair_ok = model.NewBoolVar(f'art_pair_{c_name}_d{d}_p{p1}')
-                model.Add(pair_ok >= fwd)
-                model.Add(pair_ok >= bwd)
-                model.Add(pair_ok <= fwd + bwd)
-
-                consecutive_patterns.append(pair_ok)
-
-        # 4. [Task 02] strict/fallback 區分 art/music shape
-        if consecutive_patterns:
-            has_art_consec = model.NewBoolVar(f'art_consec_ok_{c_name}')
-            model.Add(sum(consecutive_patterns) >= 1).OnlyEnforceIf(has_art_consec)
-
-            if solve_mode == SolveMode.STRICT_TEACHING_SHAPE:
-                # STRICT mode: art/music shape = hard constraint
-                model.Add(has_art_consec == 1)
-                print(f"  [HARD] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對)")
-            else:
-                # FALLBACK or legacy mode: near-hard soft penalty
-                if solve_mode == SolveMode.FEASIBILITY_RECOVERY:
-                    policy = get_active_policy(solve_mode)
-                    weight = policy.get_weight("art_music_shape_fallback", default=16000)
-                else:
-                    # Legacy call without solve_mode — use fallback weight as safe default
-                    weight = 16000
-
-                if penalty_vars is not None:
-                    # [Task 02] Use dict metadata format for penaltyBreakdown compatibility
-                    no_art = model.NewIntVar(0, 1, f"no_art_consec_{c_name.replace(' ','_')}")
-                    model.Add(no_art == 1 - has_art_consec)
-                    penalty_vars.append({
-                        "rule_id": "art_music_shape_fallback",
-                        "weight": weight,
-                        "var": no_art,
-                    })
-                print(f"  [SOFT] [連堂約束] {c_name}: 美勞_固定 + 交替課連堂 (共 {len(consecutive_patterns)} 個可能配對, 權重={weight})")
+        if block_vars:
+            # 恰好選中一個 block（連堂位置與方向同時確定）
+            model.AddExactlyOne(block_vars)
+            print(
+                f"  [HARD] [BLOCK] {c_name}: 美勞_固定 + 交替課連堂 "
+                f"(共 {len(block_vars)} 個 block 候選, ExactlyOne)"
+            )
+        else:
+            # 無合法 block（通常是被 locked 全數排除），強制 INFEASIBLE
+            print(
+                f"  [ERROR] [BLOCK] {c_name}: 無可行連堂 block 候選，"
+                "此班無法滿足美勞連堂要求"
+            )
+            impossible = model.NewBoolVar(f'art_block_impossible_{c_name}')
+            model.Add(impossible == 1)
+            model.Add(impossible == 0)  # 恆 INFEASIBLE
 
 
 def apply_alternating_perfect_pairing(

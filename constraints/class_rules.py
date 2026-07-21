@@ -156,20 +156,23 @@ def apply_daily_subject_limit(model, classes_data, schedule, locked_vars=None):
                 model.Add(sum(subject_vars) <= daily_limit)
 
 
-def apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=None):
+def apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=None, locked_vars=None):
     """
-    [硬約束 7] 低年級下午禁排
-
-    1-2年級：週一至週五的下午全禁
-    3-4年級：週三、週五的下午禁
-    5-6年級：週三的下午禁
+    [硬約束 07] 低年級下午禁排
+    1-2年級：週一、週三、週四、週五
+    3-4年級：週三、週五
+    5-6年級：週三
 
     Args:
         model: CpModel
         schedule: dict (c, p, t, s) -> BoolVar
         classes_data: list of class dicts
+        locked_vars: set of locked BoolVars
     """
-    # 預先建立 (c, per) -> list of (t, s, var) 索引
+    if locked_vars is None:
+        locked_vars = set()
+
+    # 預建表 (c, per) -> list of (t, s, var) 索引
     from collections import defaultdict
     schedule_by_class_period = defaultdict(list)
     for (sch_c, sch_per, sch_t, sch_s), var in schedule.items():
@@ -260,6 +263,7 @@ _TARGET_SPREAD_SUBJECTS = {
     "體育": {"體育", "健康與體育"},
     "健康": {"健康"},
     "社會": {"社會"},
+    "本土語": {"本土語", "本土語言", "語文-本土語", "閩南語", "客語"},
 }
 
 
@@ -277,14 +281,18 @@ def _resolve_spread_canonical(subj_raw):
     return None
 
 
-def apply_subject_day_spread(model, classes_data, schedule, locked_vars=None):
+def apply_subject_day_spread(model, classes_data, schedule, locked_vars=None, penalty_vars=None, adjacent_weight=None):
     """
-    [硬約束] 科任課日分散規則
+    科任課日分散規則
 
     目標科目：語文-英語、資訊、體育、健康、社會
     規則：
-      1. 同班同科同日最多 1 堂（sum <= 1）
-      2. 相鄰兩天至多出現一天（has_on_day[d] + has_on_day[d+1] <= 1）
+      1. [HARD] 同班同科同日最多 1 堂（sum <= 1）
+      2. [SOFT] 相鄰兩天至多出現一天 → soft penalty (weight=800)
+
+    產品決策 (2026-07-15):
+      - Rule A 保留為 hard constraint（合法性規則）
+      - Rule B 改為 soft penalty（課表品質偏好，不應讓整份課表 INFEASIBLE）
 
     豁免：
       - 藝才班 + 虛擬教師的課程跳過
@@ -295,6 +303,8 @@ def apply_subject_day_spread(model, classes_data, schedule, locked_vars=None):
         classes_data: list of class dicts
         schedule: dict (c, p, t, s) -> BoolVar
         locked_vars: set of locked BoolVars (from apply_preallocation_locks)
+        penalty_vars: list for soft penalty vars (optional, for Rule B)
+        adjacent_weight: weight for Rule B soft penalty (default: from WEIGHT_REGISTRY)
     """
     if locked_vars is None:
         locked_vars = set()
@@ -359,19 +369,36 @@ def apply_subject_day_spread(model, classes_data, schedule, locked_vars=None):
                 model.Add(sum(vars_list) <= upper_bound)
 
             # 2. 相鄰兩天至多出現一天（day-level presence）
-            # [Task B] day_present 必須由包含 locked 的 all_day_vars 建出來
-            has_on_day = {}
-            for d, vars_list in active_days.items():
-                h = model.NewBoolVar(
-                    f"spread_has_{c_name}_{canonical_key}_d{d}".replace(" ", "_").replace("-", "_")
-                )
-                model.AddMaxEquality(h, vars_list)
-                has_on_day[d] = h
+            # Rule B: 相鄰兩天至多出現一天 → soft penalty (2026-07-15 產品決策)
+            # 原因: Rule A (同日最多1堂) 是合法性規則，保留 hard;
+            # Rule B 是課表品質偏好，不應讓整份課表 INFEASIBLE
+            if penalty_vars is not None:
+                if adjacent_weight is None:
+                    from scheduler_policy import WEIGHT_REGISTRY
+                    adjacent_weight = WEIGHT_REGISTRY.get("subject_day_spread_adjacent", 800)
 
-            for d in range(DAYS - 1):
-                d_next = d + 1
-                if d in has_on_day and d_next in has_on_day:
-                    model.Add(has_on_day[d] + has_on_day[d_next] <= 1)
+                # [Task B] day_present 必須由包含 locked 的 all_day_vars 建出來
+                has_on_day = {}
+                for d, vars_list in active_days.items():
+                    h = model.NewBoolVar(
+                        f"spread_has_{c_name}_{canonical_key}_d{d}".replace(" ", "_").replace("-", "_")
+                    )
+                    model.AddMaxEquality(h, vars_list)
+                    has_on_day[d] = h
+
+                for d in range(DAYS - 1):
+                    d_next = d + 1
+                    if d in has_on_day and d_next in has_on_day:
+                        # Soft penalty: violation when both adjacent days have the subject
+                        viol = model.NewBoolVar(
+                            f"subject_day_spread_adjacent_violation_{c_name}_{canonical_key}_d{d}".replace(" ", "_").replace("-", "_")
+                        )
+                        model.Add(viol >= has_on_day[d] + has_on_day[d_next] - 1)
+                        penalty_vars.append({
+                            "rule_id": "subject_day_spread_adjacent",
+                            "weight": adjacent_weight,
+                            "var": viol,
+                        })
 
 
 def apply_music_fixed_vs_alternating_day_spread(
@@ -657,6 +684,7 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                                      science_consec_map=None, penalty_vars=None,
                                      classroom_limits=None, school_info=None,
                                      relax_to_soft=False,
+                                     english_slack_enabled=False,
                                      alternating_class_is_music_odd=None,
                                      class_teacher_pair=None,
                                      # [Task 04] Classroom preference soft objective weights
@@ -789,19 +817,43 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
 
             if usage_terms:
                 usage_sum = sum(usage_terms)
-                if not relax_to_soft:
+                
+                # === C1 PROTOTYPE START ===
+                is_english_slack_target = (
+                    english_slack_enabled
+                    and subj == "語文-英語"
+                )
+
+                if not relax_to_soft and not is_english_slack_target:
                     model.Add(usage_sum <= capacity_units)
                 else:
                     overload_upper_bound = max(0, len(usage_terms) * 2)
-                    overload_var = model.NewIntVar(0, overload_upper_bound, f"room_overload_{subj}_{p}")
-                    model.Add(usage_sum <= capacity_units + overload_var)
-                    # [Task 02] Use WEIGHT_REGISTRY key for classroom capacity overload
-                    room_cap_weight = WEIGHT_REGISTRY.get("classroom_capacity_overload", 5000)
-                    penalty_vars.append({
-                        "rule_id": "classroom_capacity_overload",
-                        "weight": room_cap_weight,
-                        "var": overload_var,
-                    })
+                    
+                    if is_english_slack_target:
+                        overload_var = model.NewIntVar(0, overload_upper_bound, f"english_room_slack_{subj}_{p}")
+                        model.Add(usage_sum <= capacity_units + overload_var)
+                        english_slack_weight = WEIGHT_REGISTRY.get("english_room_slack_fallback", 8000)
+                        penalty_vars.append({
+                            "rule_id": "english_room_slack_fallback",
+                            "weight": english_slack_weight,
+                            "var": overload_var,
+                            "subject": subj,
+                            "period": p,
+                            "capacity": capacity_units,
+                            "actual_usage_terms": len(usage_terms),
+                            "requiresUserReview": True,
+                        })
+                    else:
+                        overload_var = model.NewIntVar(0, overload_upper_bound, f"room_overload_{subj}_{p}")
+                        model.Add(usage_sum <= capacity_units + overload_var)
+                        # [Task 02] Use WEIGHT_REGISTRY key for classroom capacity overload
+                        room_cap_weight = WEIGHT_REGISTRY.get("classroom_capacity_overload", 5000)
+                        penalty_vars.append({
+                            "rule_id": "classroom_capacity_overload",
+                            "weight": room_cap_weight,
+                            "var": overload_var,
+                        })
+                # === C1 PROTOTYPE END ===
 
     for (class_name, period_idx, teacher_name, raw_subject), active_var in schedule.items():
         canonical_room_subject = _canonical_schedule_subject_for_room(raw_subject)
@@ -1065,6 +1117,7 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
     4. 午休邊界統一使用 LUNCH_BOUNDARY，不再硬編碼
     5. 教師不跨半天規則保留（總節數 <= 2 時）
     6. 「每日結構上限」與「不可跨午休」仍為硬限制
+    7. 同一天的自然課若形成 2+1（總數剛好 3 節）視為硬違規
 
     Args:
         model: CpModel
@@ -1140,6 +1193,15 @@ def apply_science_habits(model, classes_data, schedule, ai_settings=None, penalt
 
         if not sci_vars:
             continue
+
+        # 2+1 代表同一天有連堂自然再外掛一節單堂，屬於明確違規。
+        for d in range(DAYS):
+            base = d * PERIODS_PER_DAY
+            day_vars = []
+            for p in range(base, min(base + PERIODS_PER_DAY, TOTAL_PERIODS)):
+                day_vars.extend(sci_vars.get(p, []))
+            if day_vars:
+                model.Add(sum(day_vars) != 3)
 
         # ---- 建立連堂 BoolVar ----
         consec_vars = {}  # (d, pair_idx) -> BoolVar
@@ -1401,8 +1463,7 @@ def apply_week_specific_art_capacity_model(
                 art_odd_total_vars.append(var)
                 art_even_total_vars.append(var)
 
-        # [Task 02] 容量約束（preferred，使用 WEIGHT_REGISTRY）
-        room_weight = WEIGHT_REGISTRY.get("art_music_week_specific_room_overload", 10000)
+        # [Task 02] 容量約束（改為 Hard Constraint，消除物理碎片化斷層）
         for label, demand_vars, capacity in [
             ("music_odd", music_odd_vars, music_cap),
             ("music_even", music_even_vars, music_cap),
@@ -1411,17 +1472,9 @@ def apply_week_specific_art_capacity_model(
         ]:
             if not demand_vars:
                 continue
-            ov = model.NewIntVar(0, len(demand_vars), f"ws_overload_{label}_p{p}")
-            model.Add(ov >= sum(demand_vars) - capacity)
-            # [Task 02] Use dict metadata format for penaltyBreakdown compatibility
-            penalty_vars.append({
-                "rule_id": "art_music_week_specific_room_overload",
-                "weight": room_weight,
-                "var": ov,
-            })
-            ws_overload_vars[(label, p)] = ov
+            model.Add(sum(demand_vars) <= capacity)
 
-    return ws_overload_vars
+    return {}
 
 
 def apply_week_specific_art_capacity(
@@ -1787,6 +1840,7 @@ def build_grade_morning_first_period_homeroom_penalty(
         if not class_names:
             continue
 
+        grade_has_any_hr = False
         day_satisfied_vars = []
         for day in range(DAYS):
             class_has_hr_list = []
@@ -1801,6 +1855,7 @@ def build_grade_morning_first_period_homeroom_penalty(
 
                 has_hr = model.NewBoolVar(f"grade{grade}_day{day+1}_{c_name}_has_hr_p1")
                 if is_hr_vars:
+                    grade_has_any_hr = True
                     slot_sum = model.NewIntVar(0, len(is_hr_vars), f"grade{grade}_day{day+1}_{c_name}_hr_sum")
                     model.Add(slot_sum == sum(is_hr_vars))
                     model.Add(slot_sum >= 1).OnlyEnforceIf(has_hr)
@@ -1815,7 +1870,7 @@ def build_grade_morning_first_period_homeroom_penalty(
             model.AddBoolOr([has_hr.Not() for has_hr in class_has_hr_list] + [day_satisfied])
             day_satisfied_vars.append(day_satisfied)
 
-        if day_satisfied_vars:
+        if grade_has_any_hr and day_satisfied_vars:
             any_day_satisfied = model.NewBoolVar(f"grade{grade}_any_day_homeroom_p1")
             model.AddMaxEquality(any_day_satisfied, day_satisfied_vars)
             violation = model.NewIntVar(0, 1, f"grade{grade}_no_homeroom_p1_day_violation")
