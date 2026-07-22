@@ -78,7 +78,14 @@ def _normalize_subject_grade_rules(subject_grade_rules):
 
 def build_effective_grade_rules(standard_domain_settings=None, subject_grade_rules=None):
     effective_rules = {subject: set(grades) for subject, grades in _DEFAULT_GRADE_RULES.items()}
-    effective_rules.update(_build_grade_rules_from_standard_domain_settings(standard_domain_settings))
+
+    standard_rules = _build_grade_rules_from_standard_domain_settings(standard_domain_settings)
+    for subject, grades in standard_rules.items():
+        if subject in effective_rules:
+            effective_rules[subject] = effective_rules[subject].union(grades)
+        else:
+            effective_rules[subject] = grades
+
     effective_rules.update(_normalize_subject_grade_rules(subject_grade_rules))
     return effective_rules
 
