@@ -96,22 +96,22 @@
     <div class="shortcut-section">
       <h3>常用功能入口</h3>
       <div class="shortcut-grid">
-        <div class="shortcut-card">
+        <router-link class="shortcut-card" to="/teachers">
           <h4>教師管理</h4>
           <p>新增或檢查教師資料。</p>
-        </div>
-        <div class="shortcut-card">
+        </router-link>
+        <router-link class="shortcut-card" to="/classes">
           <h4>班級與課程</h4>
           <p>確認班級、課程與需求設定。</p>
-        </div>
-        <div class="shortcut-card">
+        </router-link>
+        <router-link class="shortcut-card" to="/schedule">
           <h4>開始排課</h4>
           <p>啟動排課並查看結果。</p>
-        </div>
-        <div class="shortcut-card">
+        </router-link>
+        <router-link class="shortcut-card" to="/editor">
           <h4>課表編輯與匯出</h4>
-          <p>微調課表並輸出正式版本。</p>
-        </div>
+          <p>可進行人工微調課表再輸出正式版本。</p>
+        </router-link>
         <a class="shortcut-card manual-card" :href="operatorManualUrl" target="_blank" rel="noopener noreferrer">
           <h4>使用者操作手冊</h4>
           <p>開啟含圖片標註的 PDF 手冊，依步驟完成排課作業。</p>

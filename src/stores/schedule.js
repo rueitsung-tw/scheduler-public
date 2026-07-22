@@ -194,7 +194,20 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     swimmingCapEnabled: true,
     artsClassEnabled: false,  // 藝才班特規排課模組開關
     grade12TuesdayAfternoonHomeroom: false,  // 1-2年級週二下午排導師課
-    homeroomBlockizationEnabled: true  // 導師科目自動區塊化
+    homeroomBlockizationEnabled: true,  // 導師科目自動區塊化
+    slotRules: [],
+    qualityRules: {
+      teacherDailyLoadSmoothing: { enabled: true, weight: 'low' },
+      sameTeacherGradeConsistency: { enabled: true, weight: 'low' },
+      period7FlexiblePreference: {
+        enabled: true,
+        weight: 'lowest',
+        preferCourseCategories: ['校本', '彈性'],
+        includeSubjects: ['資訊'],
+        excludeSubjectNames: ['本土語言', '社會', '體育', '健康'],
+      },
+      peAvoidPeriod45: { enabled: true, weight: 'lowest' },
+    }
   });
 
   const standardDomainSettings = ref([
@@ -235,6 +248,17 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   ));
 
   // --- 🆕 Movable Locks Policy ---
+  // --- 🆕 Slot Rules Engine (Phase 3) ---
+  const getDefaultSlotRules = () => ({
+    slotRules: []
+  });
+
+  function generateRuleId() {
+    return 'rule_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  }
+
+  const defaultSlotRules = getDefaultSlotRules();
+
   const getDefaultMovableLocksPolicy = () => ({
     movableLocksEnabled: false,
     movableSubjects: [],
@@ -1716,6 +1740,64 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     markScheduleDirty();
   };
 
+  const normalizeSlotRule = (input = {}) => {
+    const validOwnerTypes = new Set(['teacher', 'admin_role', 'team_instructor', 'class'])
+    const validModes = new Set(['hard', 'soft'])
+    const normalizeDay = (day) => {
+      if (day === 'all') return 'all'
+      const d = Number(day)
+      return d >= 1 && d <= 5 ? d : 1
+    }
+    const normalizePeriod = (period) => {
+      if (period === 'all') return 'all'
+      if (Array.isArray(period)) {
+        const valid = period.map((p) => Number(p)).filter((p) => p >= 1 && p <= 7)
+        return valid.length > 0 ? valid : 1
+      }
+      const p = Number(period)
+      return p >= 1 && p <= 7 ? p : 1
+    }
+
+    return {
+      id: input.id || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      enabled: input.enabled !== false,
+      name: String(input.name || '').trim(),
+      ownerType: validOwnerTypes.has(input.ownerType) ? input.ownerType : 'teacher',
+      ownerId: String(input.ownerId || '').trim(),
+      day: normalizeDay(input.day),
+      period: normalizePeriod(input.period),
+      mode: validModes.has(input.mode) ? input.mode : 'soft',
+      action: 'avoid',
+      weight: Math.min(10, Math.max(1, Number(input.weight) || 3)),
+      note: String(input.note || '').trim(),
+    }
+  }
+
+  const addSlotRule = (rule) => {
+    const normalized = normalizeSlotRule(rule)
+    aiSettings.value.slotRules = [
+      ...(Array.isArray(aiSettings.value.slotRules) ? aiSettings.value.slotRules : []),
+      normalized,
+    ]
+    markScheduleDirty()
+    return normalized
+  }
+
+  const updateSlotRule = (id, updates) => {
+    const rules = Array.isArray(aiSettings.value.slotRules) ? aiSettings.value.slotRules : []
+    aiSettings.value.slotRules = rules.map((rule) =>
+      rule.id === id ? normalizeSlotRule({ ...rule, ...updates, id }) : rule,
+    )
+    markScheduleDirty()
+  }
+
+  const deleteSlotRule = (id) => {
+    aiSettings.value.slotRules = (
+      Array.isArray(aiSettings.value.slotRules) ? aiSettings.value.slotRules : []
+    ).filter((rule) => rule.id !== id)
+    markScheduleDirty()
+  }
+
   return {
     isInitialized,
     schoolInfo, syncStatus, lastSavedTime, teachers, classes, specialCourses, classrooms, standardDomainSettings, allAvailableSubjects,
@@ -1729,6 +1811,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     editingTeacherId, setEditingTeacherId, addTeacher, deleteTeacher, updateTeacher,
     checkQuotaExceed, countUsedPeriodsInternal,
     aiSettings,
+    normalizeSlotRule, addSlotRule, updateSlotRule, deleteSlotRule,
     buildHomeroomBlockMap,
     loadFromDB,
     syncToCloud,

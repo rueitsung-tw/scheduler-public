@@ -39,7 +39,7 @@ from ortools.sat.python import cp_model
 
 from phase2_engine import SchedulePhase2Engine
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS, LUNCH_BOUNDARY, CLASSROOM_LIMITS_FALLBACK
-from scheduler_policy import SolveMode, get_active_policy
+from scheduler_policy import SolveMode, get_active_policy, parse_slot_rules, build_hard_slot_mask
 from utils import (
     parse_grade,
     is_virtual_teacher,
@@ -57,6 +57,7 @@ from constraints.base_rules import (
     create_schedule_vars_and_course_demands,
     create_alternating_vars,
     apply_preallocation_locks,
+    apply_hard_slot_constraints,
 )
 from constraints.movable_locks import (
     get_movable_lock_policy,
@@ -368,13 +369,130 @@ def _configured_special_room_subjects(classrooms, classroom_limits, school_info,
         if subj:
             subjects.add(subj)
 
-    # fallback_limits provides capacity defaults only and must not activate
-    # special-room validation for subjects the fixture did not explicitly configure.
-    # If a subject appears only in fallback_limits (no classrooms, no classroomLimits,
-    # no subjectClassroomGrades), the solver skips room assignment for that subject;
-    # the validator should not then require a room that was never modelled.
-
     return subjects
+
+
+def _collect_co_planning_diagnostics(schedule_entries, classes_data, school_info, classrooms, ai_settings=None):
+    """
+    Diagnose Grade Co-Planning block subject teacher lesson fulfillment.
+    Produces detailed diagnostic breakdown for unfulfilled slots.
+    """
+    co_planning = (school_info or {}).get("coPlanningSettings", {})
+    if not co_planning or not isinstance(co_planning, dict) or not co_planning.get("enabled"):
+        ai_cfg = ai_settings if isinstance(ai_settings, dict) else ((school_info or {}).get("aiSettings", {}) or {})
+        if isinstance(ai_cfg, dict):
+            co_planning = ai_cfg.get("__schoolInfoCoPlanningSettings", {}) or ai_cfg.get("coPlanningSettings", {})
+
+    if not isinstance(co_planning, dict) or not co_planning.get("enabled"):
+        return {"enabled": False, "message": "共備功能未啟用"}
+
+    manual_blocks = co_planning.get("manualBlocks", {}) or {}
+    mode = co_planning.get("mode", "manual")
+    if not manual_blocks and mode != "manual":
+        return {"enabled": True, "mode": mode, "message": "無設定手動共備區塊"}
+
+    scheduled_map = {}
+    teacher_busy = defaultdict(set)
+    for entry in schedule_entries or []:
+        c_name = str(entry.get("className", "")).strip()
+        t_name = str(entry.get("teacherName", "")).strip()
+        day = int(entry.get("day", 0) or 0)
+        period = int(entry.get("period", 0) or 0)
+        scheduled_map[(c_name, day, period)] = entry
+        if t_name:
+            teacher_busy[t_name].add((day, period))
+
+    total_slots = 0
+    fulfilled_slots = 0
+    unfulfilled_details = []
+
+    for grade_str, block in manual_blocks.items():
+        if not block or not isinstance(block, dict):
+            continue
+        try:
+            grade_num = int(grade_str)
+        except ValueError:
+            continue
+
+        day = int(block.get("day", 0) or 0)
+        start_p = int(block.get("startPeriod", 0) or 0)
+        length = int(block.get("length", 2) or 2)
+
+        grade_classes = [
+            c for c in classes_data or []
+            if c.get("grade") == grade_num or str(c.get("name", "")).startswith(f"{grade_num}年")
+        ]
+
+        for p in range(start_p, start_p + length):
+            for cls in grade_classes:
+                c_name = str(cls.get("name", "")).strip()
+                total_slots += 1
+                entry = scheduled_map.get((c_name, day, p))
+                
+                is_subject = False
+                t_name = entry.get("teacherName", "") if entry else ""
+                subj = entry.get("subject", "") if entry else ""
+                
+                reqs = cls.get("course_requirements", []) or []
+                subj_req = next((r for r in reqs if r.get("subject") == subj), None)
+                if subj_req:
+                    if subj_req.get("defaultTeacher") == "subject":
+                        is_subject = True
+                    elif subj_req.get("defaultTeacher") == "homeroom":
+                        is_subject = False
+                    elif cls.get("homeroom_teacher") and t_name != cls.get("homeroom_teacher"):
+                        is_subject = True
+                elif t_name and cls.get("homeroom_teacher") and t_name != cls.get("homeroom_teacher"):
+                    is_subject = True
+
+                if is_subject:
+                    fulfilled_slots += 1
+                else:
+                    subj_reqs = [r for r in reqs if r.get("defaultTeacher") == "subject"]
+                    cand_count = len(subj_reqs)
+                    
+                    busy_teachers = []
+                    free_teachers = []
+                    for r in subj_reqs:
+                        rt_name = r.get("teacher_name") or r.get("teacher")
+                        if rt_name:
+                            if (day, p) in teacher_busy[rt_name]:
+                                busy_teachers.append(rt_name)
+                            else:
+                                free_teachers.append(rt_name)
+
+                    if cand_count == 0 or (busy_teachers and not free_teachers):
+                        reason = "TEACHER_BUSY_OR_NO_DIRECT_CANDIDATE"
+                        reason_text = "該班可授科任教師於該時段皆處於排課衝堂或無直接科任候選師資"
+                    elif free_teachers:
+                        reason = "POSSIBLE_SOLVER_TRADE_OFF"
+                        reason_text = "科任教師尚有空檔，求解器為極小化其他軟限制懲罰而選擇排入導師課"
+                    else:
+                        reason = "UNKNOWN_NEEDS_FEASIBILITY_PROBE"
+                        reason_text = "尚須結合教室容量與剩餘節數深入探針分析"
+
+                    unfulfilled_details.append({
+                        "className": c_name,
+                        "grade": grade_num,
+                        "day": day,
+                        "period": p,
+                        "scheduledSubject": subj,
+                        "scheduledTeacher": t_name,
+                        "candidateSubjectCount": cand_count,
+                        "reason": reason,
+                        "reasonText": reason_text
+                    })
+
+    rate = round(fulfilled_slots / max(total_slots, 1), 3)
+    return {
+        "enabled": True,
+        "mode": mode,
+        "total_slots": total_slots,
+        "fulfilled_slots": fulfilled_slots,
+        "unfulfilled_slots": total_slots - fulfilled_slots,
+        "fulfillment_rate": rate,
+        "unfulfilled_details": unfulfilled_details
+    }
 
 
 def _validate_schedule_result(
@@ -586,6 +704,8 @@ def _validate_schedule_result(
         special_course_overlap_conflicts = overlap_analysis.get("conflicts", [])
         special_course_allowed_overlaps = overlap_analysis.get("allowed_overlaps", [])
 
+    co_planning_diag = _collect_co_planning_diagnostics(schedule_entries, classes_data, school_info, classrooms, ai_settings)
+
     return {
         "class_slot_conflicts": class_slot_issues,
         "teacher_conflicts": teacher_issues,
@@ -598,6 +718,7 @@ def _validate_schedule_result(
         "science_same_day_shape_issues": science_same_day_shape_issues,
         "special_course_overlap_conflicts": special_course_overlap_conflicts,
         "special_course_allowed_overlaps": special_course_allowed_overlaps,
+        "co_planning_diagnostics": co_planning_diag,
     }
 
 
@@ -1448,6 +1569,15 @@ def main():
     # 讀取 aiSettings
     ai_settings = data.get("aiSettings", {})
 
+    # 補齊 schoolInfo.coPlanningSettings 備援 (避免僅存在於 aiSettings.__schoolInfoCoPlanningSettings 時求解器建模階段未載入)
+    fallback_co = (ai_settings or {}).get("__schoolInfoCoPlanningSettings") or (ai_settings or {}).get("coPlanningSettings")
+    current_co = (schoolInfo or {}).get("coPlanningSettings")
+    if fallback_co and isinstance(fallback_co, dict) and fallback_co.get("enabled"):
+        if not isinstance(current_co, dict) or not current_co.get("enabled"):
+            if schoolInfo is None:
+                schoolInfo = {}
+            schoolInfo["coPlanningSettings"] = copy.deepcopy(fallback_co)
+
     # ==========================================
     # 前處理（grade修正 / ghost art清理 / homeroom合併 / arts拆分）
     # ==========================================
@@ -1710,6 +1840,13 @@ def main():
 
         print("[CONSTRAINT] [核心約束] 加入不排課時段限制...")
         apply_teacher_unavailable_slots(model, schedule, teachers_data)
+
+        print("[CONSTRAINT] [核心約束] 加入 operator 硬性時段規則 (hard_slot_mask)...")
+        slot_rules = parse_slot_rules((ai_settings or {}).get("slotRules", []))
+        hard_slot_mask = build_hard_slot_mask(slot_rules)
+        if hard_slot_mask:
+            applied_hard_slots = apply_hard_slot_constraints(model, schedule, hard_slot_mask)
+            print(f"[CONSTRAINT] [核心約束] 套用 {applied_hard_slots} 個硬性時段限制 (hard_slot_mask)")
 
         print("[CONSTRAINT] [核心約束] 加入特殊課程鎖定...")
         apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings,
@@ -2249,6 +2386,7 @@ def main():
             "morning_two_homeroom_periods_per_day": 0,
             "grade_co_planning_afternoon_block": 0,
             "co_planning_subject_teacher_lesson": 0,
+            "manual_co_planning_subject_teacher_lesson": 0,
             # [Task 07] New penalty keys for grade1-2 Tuesday life-course and daily subject-teacher minimum
             "grade12_tuesday_afternoon_life_course_fallback": 0,
             "daily_subject_teacher_minimum": 0,

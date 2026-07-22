@@ -146,7 +146,28 @@ WEIGHT_REGISTRY: Dict[str, int] = {
         # constraints/class_rules.py — subject_day_spread Rule B (相鄰兩天至多出現一天)
         # 產品決策: Rule A (同日最多1堂) 保留 hard; Rule B 改為 soft penalty
         # 原因: Rule A 接近合法性規則; Rule B 是課表品質偏好，不應讓整份課表 INFEASIBLE
+
+    # --- [2026-07-21] 排課品質 soft rules (本次新增) ---
+    "teacher_daily_load_smoothing": 50,
+        # 教師日負載平滑: 偏好每日負載更平均，不破壞基本可排性
+
+    "same_teacher_grade_consistency": 80,
+        # 同師年段一致性: 降低同一天跨不同年段授課的切換成本
+
+    "period7_flexible_preference": 20,
+        # 第七節優先安排【校本/彈性】與資訊課（最低權重）
+
+    "pe_avoid_period_45": 20,
+        # 體育課避開第 4、5 節（最低權重，僅偏好非硬禁排）
+
+    # --- [2026-07-21] 通用時段規則引擎 soft penalties ---
+    "slot_rule_soft_avoid": 500,
+    "soft_slot_rule_avoid": 30,
+        # 通用時段規則引擎: soft mode 的 avoid penalty
+        # 可被 AI 設定頁的 weight (low/medium/high) 覆蓋
 }
+
+POLICY_WEIGHTS = WEIGHT_REGISTRY
 
 # Fallback default: 當 key 不存在時使用的預設權重
 # 對應 YAML scale.low 下限 (§389)
@@ -250,6 +271,13 @@ class SolvePolicy:
         # [2026-06-28] 五六年級共備 + 導師每日四節上限
         "homeroom_daily_max_periods",
         "manual_co_planning_subject_teacher_lesson",
+        # [2026-07-21] 排課品質 soft rules
+        "teacher_daily_load_smoothing",
+        "same_teacher_grade_consistency",
+        "period7_flexible_preference",
+        "pe_avoid_period_45",
+        # [2026-07-21] 通用時段規則引擎
+        "slot_rule_soft_avoid",
     ])
 
     # --- Helper methods ---
@@ -396,6 +424,60 @@ def get_active_policy(
     )
 
 
+@dataclass(frozen=True)
+class SlotRule:
+    id: str
+    enabled: bool
+    owner_type: str
+    owner_id: str
+    day: int | str
+    periods: tuple[int, ...]
+    mode: str
+    action: str
+    weight: int
+    note: str = ""
+
+
+def _normalize_periods(value):
+    if value == "all":
+        return tuple(range(1, 8))
+    if isinstance(value, list):
+        return tuple(sorted({max(1, min(7, int(period))) for period in value}))
+    return (max(1, min(7, int(value or 1))),)
+
+
+def parse_slot_rules(raw_rules):
+    parsed = []
+    for index, raw in enumerate(raw_rules or []):
+        if not isinstance(raw, dict) or raw.get("enabled") is False:
+            continue
+        mode = raw.get("mode") if raw.get("mode") in {"hard", "soft"} else "soft"
+        owner_type = raw.get("ownerType") if raw.get("ownerType") in {"teacher", "admin_role", "team_instructor", "class"} else "teacher"
+        parsed.append(SlotRule(
+            id=str(raw.get("id") or f"slot-rule-{index}"),
+            enabled=True,
+            owner_type=owner_type,
+            owner_id=str(raw.get("ownerId") or ""),
+            day=raw.get("day") if raw.get("day") == "all" else max(1, min(5, int(raw.get("day") or 1))),
+            periods=_normalize_periods(raw.get("period") or 1),
+            mode=mode,
+            action="avoid",
+            weight=max(1, min(10, int(raw.get("weight") or 3))),
+            note=str(raw.get("note") or ""),
+        ))
+    return parsed
+
+
+def build_hard_slot_mask(slot_rules):
+    mask = {}
+    for rule in slot_rules or []:
+        if not rule.enabled or rule.mode != "hard" or rule.owner_type != "teacher" or not rule.owner_id:
+            continue
+        days = range(1, 6) if rule.day == "all" else (int(rule.day),)
+        mask.setdefault(rule.owner_id, set()).update((day, period) for day in days for period in rule.periods)
+    return mask
+
+
 # ============================================================================
 # 5. Convenience Exports
 # ============================================================================
@@ -406,5 +488,9 @@ __all__ = [
     "SolvePolicy",
     "WEIGHT_REGISTRY",
     "WEIGHT_FALLBACK_DEFAULT",
+    "POLICY_WEIGHTS",
     "get_active_policy",
+    "SlotRule",
+    "parse_slot_rules",
+    "build_hard_slot_mask",
 ]

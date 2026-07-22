@@ -26,7 +26,12 @@
           <tbody>
             <tr v-for="(t, idx) in parsedData" :key="idx">
               <td>{{ t.name }}</td>
-              <td>{{ t.type === 'homeroom' ? '導師' : (t.type === 'admin' ? '行政' : '科任') }}</td>
+                <td>{{ 
+                  t.type === 'homeroom' ? '導師' : 
+                  t.type === 'special_ed_resource' ? '特教資源' : 
+                  t.type === 'admin' ? '行政' : 
+                  '科任' 
+                }}</td>
               <td>{{ t.max_periods }}</td>
               <td>{{ t.assignedClass || '-' }}</td>
               <td>{{ getExpertiseDisplay(t) }}</td>
@@ -42,6 +47,25 @@
     </div>
   </div>
 </template>
+
+<script>
+export const normalizeTeacherTypeLabel = (value) => {
+  const label = String(value || '').trim()
+  const typeMap = {
+    '導師': 'homeroom',
+    '行政': 'admin',
+    '科任': 'subject',
+    '專任': 'subject',
+    '專科': 'subject',
+    '特殊': 'subject',
+    'special': 'subject',
+    '特教': 'special_ed_resource',
+    '特教老師': 'special_ed_resource',
+    '特教資源': 'special_ed_resource'
+  }
+  return typeMap[label] || 'subject'
+}
+</script>
 
 <script setup>
 import { ref } from 'vue'
@@ -248,7 +272,6 @@ const handleFileUpload = (e) => {
 
         // 🚀 BugFix: 職務別只讀取一次，並補上特教映射
         const jobType = getValByHeader(cols, headerMap, '職務別')
-        const typeMap = { '導師': 'homeroom', '行政': 'admin', '科任': 'subject', '特教': 'special' }
 
         // 🚀 V2 志願欄位：透過精確標頭名稱取值
         const pref_grade1Raw = getValByHeader(cols, headerMap, '志願1 (年級)', '志願1年級', '志願1')
@@ -261,7 +284,7 @@ const handleFileUpload = (e) => {
 
         rawData.push({
           name,
-          type: typeMap[jobType] || 'subject',
+          type: normalizeTeacherTypeLabel(jobType),
           max_periods: maxPeriods,
           jobTitle: getValByHeader(cols, headerMap, '職位'),
           assignedClass: normalizeClassName(getValByHeader(cols, headerMap, '帶領班級')),
@@ -304,11 +327,10 @@ const handleFileUpload = (e) => {
 
         // 🚀 BugFix: 職務別只讀取一次，並補上特教映射
         const jobTypeV1 = getValByHeader(cols, headerMap, '職務別')
-        const typeMapV1 = { '導師': 'homeroom', '行政': 'admin', '科任': 'subject', '特教': 'special' }
 
         rawData.push({
           name,
-          type: typeMapV1[jobTypeV1] || 'subject',
+          type: normalizeTeacherTypeLabel(jobTypeV1),
           max_periods: parseInt(cols[2]?.trim()) || 20,
           jobTitle: getValByHeader(cols, headerMap, '職位') || cols[3]?.trim(),
           assignedClass: normalizeClassName(getValByHeader(cols, headerMap, '帶領班級') || cols[4]?.trim()),

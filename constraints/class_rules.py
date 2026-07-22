@@ -2028,6 +2028,7 @@ def build_manual_co_planning_penalty(
         p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
         block_periods = [p_start_idx, p_start_idx + 1]
 
+        grade_has_subject_vars = []
         for c_name in class_names:
             for p_index in block_periods:
                 if p_index >= TOTAL_PERIODS:
@@ -2047,6 +2048,8 @@ def build_manual_co_planning_penalty(
                 else:
                     model.Add(has_subject == 0)
 
+                grade_has_subject_vars.append(has_subject)
+
                 penalty_var = model.NewBoolVar(
                     f"manual_co_plan_penalty_{grade}_{c_name}_p{p_index}"
                 )
@@ -2054,9 +2057,24 @@ def build_manual_co_planning_penalty(
 
                 penalty_vars.append({
                     "rule_id": "manual_co_planning_subject_teacher_lesson",
-                    "weight": weight // max(len(classes_data), 1),
+                    "weight": weight,
                     "var": penalty_var,
                 })
+
+        # Apply cardinality threshold if configured (strict_100 / tolerant_90)
+        threshold_mode = (
+            co_settings.get("coPlanningThresholdMode")
+            or (school_info.get("aiSettings", {}) or {}).get("coPlanningThresholdMode")
+            or "soft_only"
+        )
+        if grade_has_subject_vars and threshold_mode in ("strict_100", "tolerant_90"):
+            import math
+            tot = len(grade_has_subject_vars)
+            if threshold_mode == "strict_100":
+                model.Add(sum(grade_has_subject_vars) == tot)
+            elif threshold_mode == "tolerant_90":
+                min_req = math.ceil(tot * 0.9)
+                model.Add(sum(grade_has_subject_vars) >= min_req)
 
     return penalty_vars
 
@@ -2357,6 +2375,13 @@ def _parse_co_planning_settings(school_info):
         return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
 
     co_planning = school_info.get("coPlanningSettings", {})
+    if not isinstance(co_planning, dict) or not co_planning.get("enabled"):
+        ai_cfg = school_info.get("aiSettings", {}) if isinstance(school_info, dict) else {}
+        if isinstance(ai_cfg, dict):
+            fallback = ai_cfg.get("__schoolInfoCoPlanningSettings", {}) or ai_cfg.get("coPlanningSettings", {})
+            if isinstance(fallback, dict) and fallback.get("enabled"):
+                co_planning = fallback
+
     if not co_planning or not isinstance(co_planning, dict):
         return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
 
@@ -2367,6 +2392,9 @@ def _parse_co_planning_settings(school_info):
     mode = co_planning.get("mode", "auto")
     if mode not in ("auto", "manual"):
         mode = "auto"
+    threshold_mode = co_planning.get("coPlanningThresholdMode", "soft_only")
+    if threshold_mode not in ("soft_only", "tolerant_90", "strict_100"):
+        threshold_mode = "soft_only"
     candidate_blocks = co_planning.get("candidateBlocks", []) or []
     manual_blocks_raw = co_planning.get("manualBlocks", {}) or {}
 
@@ -2423,6 +2451,7 @@ def _parse_co_planning_settings(school_info):
         "mode": mode,
         "candidateBlocks": valid_blocks,
         "manualBlocks": manual_blocks,
+        "coPlanningThresholdMode": threshold_mode,
     }
 
 

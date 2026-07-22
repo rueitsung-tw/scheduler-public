@@ -34,6 +34,7 @@ class SchedulePhase2Engine:
         classes_data: Optional[List[Dict]] = None,
         # [Task 3.5] coPlanningSettings 資料契約
         school_info: Optional[Dict] = None,
+        ai_settings: Optional[Dict] = None,
         # [Task 08] Priority teacher placeholders for solver-driven assignment
         priority_placeholders: Optional[List[Dict]] = None,
         # [repair_03] Runtime policy adapter for weight resolution
@@ -58,6 +59,7 @@ class SchedulePhase2Engine:
 
         # [Task 3.5] Store school_info for co-planning rules
         self.school_info = school_info or {}
+        self.ai_settings = ai_settings or {}
 
         # [Task 08] Store priority teacher placeholders
         self.priority_placeholders = priority_placeholders or []
@@ -563,6 +565,11 @@ class SchedulePhase2Engine:
         # ==========================================
         if build_level == "quality":
             self._build_priority_placeholder_objective()
+            self.penalty_vars.extend(self._build_soft_slot_rule_penalty())
+            self.penalty_vars.extend(self._build_teacher_daily_load_smoothing())
+            self.penalty_vars.extend(self._build_grade_consistency_penalty())
+            self.penalty_vars.extend(self._build_period7_flexible_preference())
+            self.penalty_vars.extend(self._build_pe_avoid_45())
         else:
             print("  [SKIP] [Priority Placeholder] build_level=core，跳過 quality-only 約束")
 
@@ -575,6 +582,111 @@ class SchedulePhase2Engine:
             self.model.Minimize(sum(penalty_exprs))
         else:
             self.model.Minimize(0)
+
+    def _build_soft_slot_rule_penalty(self):
+        """Build soft penalty for operator slot rules with mode == 'soft'."""
+        penalties = []
+        slot_rules = []
+        if hasattr(self, 'ai_settings') and isinstance(self.ai_settings, dict):
+            slot_rules = self.ai_settings.get("slotRules", [])
+        elif hasattr(self, 'school_info') and isinstance(self.school_info, dict):
+            slot_rules = self.school_info.get("slotRules", [])
+
+        from scheduler_policy import parse_slot_rules, WEIGHT_REGISTRY
+        parsed = [r for r in parse_slot_rules(slot_rules) if r.enabled and r.mode == "soft"]
+        base_weight = WEIGHT_REGISTRY.get("soft_slot_rule_avoid", 30)
+
+        for rule in parsed:
+            weight = base_weight * rule.weight
+            owner_id = rule.owner_id
+            days = range(1, 6) if rule.day == "all" else (int(rule.day),)
+            periods = rule.periods
+
+            for (c, p, t, s), var in self.schedule.items():
+                day = (p // self.periods_per_day) + 1
+                period = (p % self.periods_per_day) + 1
+                if day in days and period in periods:
+                    if rule.owner_type == "teacher" and t == owner_id:
+                        penalties.append(weight * var)
+                    elif rule.owner_type == "class" and c == owner_id:
+                        penalties.append(weight * var)
+        return penalties
+
+    def _build_teacher_daily_load_smoothing(self):
+        """Build soft penalty for smoothing teacher daily load across the week."""
+        penalties = []
+        weight = WEIGHT_REGISTRY.get("teacher_daily_load_smoothing", 50)
+        for t_name in self.teachers:
+            daily_vars = defaultdict(list)
+            for (c, p, t, s), var in self.schedule.items():
+                if t == t_name:
+                    d = p // self.periods_per_day
+                    daily_vars[d].append(var)
+
+            if not daily_vars:
+                continue
+
+            for d in range(self.days):
+                d_vars = daily_vars.get(d, [])
+                if d_vars:
+                    excess = self.model.NewIntVar(0, self.periods_per_day, f"load_smooth_{t_name}_d{d}")
+                    self.model.Add(excess >= sum(d_vars) - 5)
+                    penalties.append(weight * excess)
+        return penalties
+
+    def _build_grade_consistency_penalty(self):
+        """Build soft penalty for teaching across multiple different grades in the same day."""
+        penalties = []
+        weight = WEIGHT_REGISTRY.get("same_teacher_grade_consistency", 80)
+        for t_name in self.teachers:
+            for d in range(self.days):
+                day_vars = []
+                for (c, p, t, s), var in self.schedule.items():
+                    if t == t_name and (p // self.periods_per_day) == d:
+                        grade = self.class_grade_map.get(c, 1)
+                        day_vars.append((grade, var))
+
+                grade_groups = defaultdict(list)
+                for g, v in day_vars:
+                    grade_groups[g].append(v)
+
+                if len(grade_groups) > 1:
+                    active_grades = []
+                    for g, g_vars in grade_groups.items():
+                        g_act = self.model.NewBoolVar(f"t_g_act_{t_name}_d{d}_g{g}")
+                        self.model.Add(sum(g_vars) >= 1).OnlyEnforceIf(g_act)
+                        self.model.Add(sum(g_vars) == 0).OnlyEnforceIf(g_act.Not())
+                        active_grades.append(g_act)
+
+                    grade_count = self.model.NewIntVar(0, 6, f"t_g_count_{t_name}_d{d}")
+                    self.model.Add(grade_count == sum(active_grades))
+                    penalty_var = self.model.NewIntVar(0, 6, f"t_g_pen_{t_name}_d{d}")
+                    self.model.Add(penalty_var >= grade_count - 1)
+                    penalties.append(weight * penalty_var)
+        return penalties
+
+    def _build_period7_flexible_preference(self):
+        """Build preference penalty for period 7 (prefer flexible/校本/資訊, avoid core academic)."""
+        penalties = []
+        weight = WEIGHT_REGISTRY.get("period7_flexible_preference", 20)
+        avoid_subjects = {"語文-國語", "國語", "數學", "自然科學", "社會"}
+
+        for (c, p, t, s), var in self.schedule.items():
+            period = (p % self.periods_per_day) + 1
+            if period == 7 and any(avoid in s for avoid in avoid_subjects):
+                penalties.append(weight * var)
+        return penalties
+
+    def _build_pe_avoid_45(self):
+        """Build preference penalty for PE/體育 lessons in period 4 & 5 (noon heat & digestion)."""
+        penalties = []
+        weight = WEIGHT_REGISTRY.get("pe_avoid_period_45", 20)
+
+        for (c, p, t, s), var in self.schedule.items():
+            period = (p % self.periods_per_day) + 1
+            if ("體育" in s or "健康與體育" in s) and period in (4, 5):
+                penalties.append(weight * var)
+        return penalties
 
     def _build_priority_placeholder_objective(self):
         """[Task 08 / repair_03] Priority teacher placeholder reservation model.

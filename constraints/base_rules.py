@@ -361,3 +361,34 @@ def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock
 def _count_valid_locks(lock_audit_log):
     """計算有效鎖的數量"""
     return sum(1 for e in lock_audit_log if e["verdict"] == "VALID_LOCK")
+
+
+def apply_hard_slot_constraints(model, lesson_vars, hard_slot_mask, lesson_teacher_lookup=None):
+    """Force lesson variables to 0 when their teacher is blocked by a hard slot rule."""
+    applied = 0
+    if not hard_slot_mask:
+        return 0
+
+    for key, var in lesson_vars.items():
+        if isinstance(key, tuple) and len(key) == 4:
+            # Format: (class_name, abs_period, teacher_name, subject)
+            _, abs_p, teacher_id, _ = key
+            day = (abs_p // PERIODS_PER_DAY) + 1
+            period = (abs_p % PERIODS_PER_DAY) + 1
+        elif isinstance(key, tuple) and len(key) >= 3:
+            # Format: (lesson, day, period) or similar
+            day = key[1]
+            period = key[2]
+            teacher_id = (lesson_teacher_lookup or {}).get(key)
+        else:
+            continue
+
+        if not teacher_id:
+            continue
+
+        if (day, period) in hard_slot_mask.get(teacher_id, set()):
+            model.Add(var == 0)
+            applied += 1
+
+    return applied
+

@@ -119,7 +119,7 @@ const saveData = async () => {
         <select v-model="teacher.type">
           <option value="homeroom">班導師</option>
           <option value="subject">專任教師</option>
-          <option value="special">特教/其他</option>
+          <option value="special_ed_resource">特教資源</option>
           <option value="admin">行政</option>
         </select>
       </div>

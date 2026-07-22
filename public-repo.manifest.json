@@ -38,6 +38,7 @@
     "constraints/__init__.py",
     "constraints/base_rules.py",
     "constraints/class_rules.py",
+    "constraints/movable_locks.py",
     "constraints/special_rules.py",
     "constraints/teacher_rules.py",
     "constraints/utils.py"

@@ -212,6 +212,61 @@
         </div>
       </div>
 
+      <!-- 時段規則編輯器 (Slot Rule Editor) -->
+      <div class="settings-card">
+        <SlotRuleEditor />
+      </div>
+
+      <!-- 排課品質軟約束控制 (Quality Rules) -->
+      <div class="settings-card quality-rules-controls">
+        <h3>排課品質軟約束設定</h3>
+        <p class="desc">控制排課最佳化的品質權重與偏好規則。</p>
+
+        <div class="control-item" v-if="scheduleStore.aiSettings.qualityRules?.teacherDailyLoadSmoothing">
+          <label class="switch">
+            <input type="checkbox" v-model="scheduleStore.aiSettings.qualityRules.teacherDailyLoadSmoothing.enabled" />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">教師每日授課負擔平滑化</span>
+            <span class="sub">盡量平攤教師每日授課節數，避免單日負擔過重。</span>
+          </div>
+        </div>
+
+        <div class="control-item" v-if="scheduleStore.aiSettings.qualityRules?.sameTeacherGradeConsistency">
+          <label class="switch">
+            <input type="checkbox" v-model="scheduleStore.aiSettings.qualityRules.sameTeacherGradeConsistency.enabled" />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">跨班同教師授課進度一致性</span>
+            <span class="sub">盡量將同教師跨班授課安排在相近節次。</span>
+          </div>
+        </div>
+
+        <div class="control-item" v-if="scheduleStore.aiSettings.qualityRules?.period7FlexiblePreference">
+          <label class="switch">
+            <input type="checkbox" v-model="scheduleStore.aiSettings.qualityRules.period7FlexiblePreference.enabled" />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">第 7 節優先安排彈性/校本課程</span>
+            <span class="sub">第 7 節優先安排彈性與資訊等課程，避開主科。</span>
+          </div>
+        </div>
+
+        <div class="control-item" v-if="scheduleStore.aiSettings.qualityRules?.peAvoidPeriod45">
+          <label class="switch">
+            <input type="checkbox" v-model="scheduleStore.aiSettings.qualityRules.peAvoidPeriod45.enabled" />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">體育課避開第 4、5 節</span>
+            <span class="sub">避開午休前後的高溫與消化時段排體育課。</span>
+          </div>
+        </div>
+      </div>
+
       <!-- [2026-06-28] 五六年級共備設定 -->
       <div class="settings-card co-planning-controls">
         <h3>五六年級共備設定 (Co-Planning)</h3>
@@ -517,6 +572,7 @@ import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
 import { useAiStore } from '../stores/aiSettings'
 import { useScheduleStore } from '../stores/schedule'
+import SlotRuleEditor from '../components/SlotRuleEditor.vue'
 
 const aiStore = useAiStore()
 const scheduleStore = useScheduleStore()

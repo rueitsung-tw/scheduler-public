@@ -24,7 +24,7 @@
           <label>3. 特教/負責教師：</label>
           <select v-model="pulloutForm.teacher">
             <option disabled value="">請選擇教師</option>
-            <option v-for="t in scheduleStore.teachers" :key="t.name" :value="t.name">{{ t.name }}</option>
+            <option v-for="t in specialEdTeachers" :key="t.name" :value="t.name">{{ t.name }}</option>
           </select>
         </div>
       </div>
@@ -175,6 +175,11 @@ const getClassesByGrade = (grade) => {
 const availableSubjects = computed(() => {
   if (!scheduleStore.standardDomainSettings) return ['國語文', '數學', '健康與體育', '藝術']
   return scheduleStore.standardDomainSettings.map(s => s.name)
+})
+
+// 只顯示正式特教資源身份，避免舊 special 專科教師誤進抽離課選單。
+const specialEdTeachers = computed(() => {
+  return scheduleStore.teachers.filter(t => t.type === 'special_ed_resource')
 })
 
 const handleAutoAI = () => {
