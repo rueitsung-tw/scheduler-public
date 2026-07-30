@@ -327,6 +327,11 @@ def apply_subject_day_spread(model, classes_data, schedule, locked_vars=None, pe
             if canonical_key is None:
                 continue
 
+            # 豁免一：週節數 > 5（不可能每天最多1節）
+            periods_val = req.get("periods", 0)
+            if isinstance(periods_val, (int, float)) and periods_val > 5:
+                continue
+
             # 豁免二：藝才班 + 虛擬教師
             teacher_name = req.get("teacher_name") or req.get("teacher", "")
             if is_arts_class and is_virtual_teacher(teacher_name):
@@ -1744,10 +1749,7 @@ __all__ = [
     "is_subject_teacher_lesson",
     "build_grade_morning_first_period_homeroom_penalty",
     "build_morning_two_homeroom_periods_penalty",
-    "build_co_planning_afternoon_block_penalty",
-    "build_co_planning_subject_lesson_penalty",
     "build_homeroom_daily_max_periods_penalty",
-    "build_manual_co_planning_penalty",
     # Task 07: grade1-2 Tuesday life-course & daily subject-teacher minimum
     "apply_grade12_tuesday_life_course",
     "build_daily_subject_teacher_minimum_penalty",
@@ -1965,118 +1967,6 @@ def build_homeroom_daily_max_periods_penalty(
 # ============================================================
 # Task 3.9: Manual Co-Planning Block Penalty (near-hard soft)
 # ============================================================
-
-def build_manual_co_planning_penalty(
-    model,
-    schedule,
-    classes_data,
-    school_info=None,
-):
-    """
-    當 coPlanningSettings.mode == "manual" 時，對 manualBlocks 指定的區塊
-    施加 near-hard soft penalty：該年級所有班級在該時段內偏好排入科任課。
-
-    Args:
-        model: ortools CpModel
-        schedule: dict[(c,p,t,s), BoolVar]
-        classes_data: list of class dicts
-        school_info: dict with coPlanningSettings
-
-    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
-    """
-    co_settings = _parse_co_planning_settings(school_info)
-
-    if not co_settings["enabled"]:
-        return []
-
-    if co_settings["mode"] != "manual":
-        return []
-
-    manual_blocks = co_settings.get("manualBlocks", {})
-    if not manual_blocks:
-        return []
-
-    weight = WEIGHT_REGISTRY.get("manual_co_planning_subject_teacher_lesson", 9000)
-    penalty_vars = []
-
-    grade_classes = defaultdict(list)
-    for cls in classes_data:
-        g = resolve_class_grade(cls)
-        grade_classes[g].append(cls.get("name", ""))
-
-    subject_teacher_subjects = set()
-    for cls in classes_data:
-        for req in cls.get("course_requirements", []):
-            if is_subject_teacher_lesson(req):
-                subject_teacher_subjects.add(req.get("subject", ""))
-
-    for grade, block in manual_blocks.items():
-        if block is None:
-            continue
-
-        class_names = grade_classes.get(grade, [])
-        if not class_names:
-            continue
-
-        day_1based = block["day"]
-        start_p_1based = block["startPeriod"]
-
-        day_idx = day_1based - 1 if 1 <= day_1based <= DAYS else None
-        if day_idx is None:
-            continue
-
-        p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
-        block_periods = [p_start_idx, p_start_idx + 1]
-
-        grade_has_subject_vars = []
-        for c_name in class_names:
-            for p_index in block_periods:
-                if p_index >= TOTAL_PERIODS:
-                    continue
-
-                subject_vars = [
-                    var for (c, p, t, s), var in schedule.items()
-                    if c == c_name and p == p_index and s in subject_teacher_subjects
-                ]
-
-                has_subject = model.NewBoolVar(f"manual_co_plan_subject_{grade}_{c_name}_p{p_index}")
-                if subject_vars:
-                    subject_sum = model.NewIntVar(0, len(subject_vars), f"manual_co_plan_subjectSum_{grade}_{c_name}_p{p_index}")
-                    model.Add(subject_sum == sum(subject_vars))
-                    model.Add(subject_sum >= 1).OnlyEnforceIf(has_subject)
-                    model.Add(subject_sum == 0).OnlyEnforceIf(has_subject.Not())
-                else:
-                    model.Add(has_subject == 0)
-
-                grade_has_subject_vars.append(has_subject)
-
-                penalty_var = model.NewBoolVar(
-                    f"manual_co_plan_penalty_{grade}_{c_name}_p{p_index}"
-                )
-                model.Add(penalty_var == 1 - has_subject)
-
-                penalty_vars.append({
-                    "rule_id": "manual_co_planning_subject_teacher_lesson",
-                    "weight": weight,
-                    "var": penalty_var,
-                })
-
-        # Apply cardinality threshold if configured (strict_100 / tolerant_90)
-        threshold_mode = (
-            co_settings.get("coPlanningThresholdMode")
-            or (school_info.get("aiSettings", {}) or {}).get("coPlanningThresholdMode")
-            or "soft_only"
-        )
-        if grade_has_subject_vars and threshold_mode in ("strict_100", "tolerant_90"):
-            import math
-            tot = len(grade_has_subject_vars)
-            if threshold_mode == "strict_100":
-                model.Add(sum(grade_has_subject_vars) == tot)
-            elif threshold_mode == "tolerant_90":
-                min_req = math.ceil(tot * 0.9)
-                model.Add(sum(grade_has_subject_vars) >= min_req)
-
-    return penalty_vars
 
 
 # ============================================================
@@ -2359,319 +2249,487 @@ def build_daily_subject_teacher_minimum_penalty(
 # Task 3.6: 共備候選區塊軟目標 (soft)
 # ============================================================
 
-def _parse_co_planning_settings(school_info):
-    """
-    Parse coPlanningSettings from schoolInfo with backward compatibility.
-
-    Supports two modes:
-    - "auto": solver picks one block from candidateBlocks per grade (soft preference)
-    - "manual": user specifies exact block per grade via manualBlocks; treated as near-hard
-
-    Returns dict with keys:
-      enabled, grades, mode, candidateBlocks, manualBlocks
-    Missing/None/disabled -> returns safe defaults that skip all rules.
-    """
-    if not school_info or not isinstance(school_info, dict):
-        return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
-
-    co_planning = school_info.get("coPlanningSettings", {})
-    if not isinstance(co_planning, dict) or not co_planning.get("enabled"):
-        ai_cfg = school_info.get("aiSettings", {}) if isinstance(school_info, dict) else {}
-        if isinstance(ai_cfg, dict):
-            fallback = ai_cfg.get("__schoolInfoCoPlanningSettings", {}) or ai_cfg.get("coPlanningSettings", {})
-            if isinstance(fallback, dict) and fallback.get("enabled"):
-                co_planning = fallback
-
-    if not co_planning or not isinstance(co_planning, dict):
-        return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
-
-    if not co_planning.get("enabled"):
-        return {"enabled": False, "grades": [], "mode": "auto", "candidateBlocks": [], "manualBlocks": {}}
-
-    grades = co_planning.get("grades", []) or []
-    mode = co_planning.get("mode", "auto")
-    if mode not in ("auto", "manual"):
-        mode = "auto"
-    threshold_mode = co_planning.get("coPlanningThresholdMode", "soft_only")
-    if threshold_mode not in ("soft_only", "tolerant_90", "strict_100"):
-        threshold_mode = "soft_only"
-    candidate_blocks = co_planning.get("candidateBlocks", []) or []
-    manual_blocks_raw = co_planning.get("manualBlocks", {}) or {}
-
-    # Filter: keep only valid afternoon blocks with length == 2
-    valid_blocks = []
-    for block in candidate_blocks:
-        if not isinstance(block, dict):
-            continue
-        day = block.get("day")
-        start_period = block.get("startPeriod")
-        length = block.get("length", 0)
-
-        # Must have length == 2
-        if length != 2:
-            continue
-
-        # Must be afternoon (1-based period > LUNCH_BOUNDARY)
-        if start_period is None or start_period <= LUNCH_BOUNDARY:
-            continue
-
-        valid_blocks.append({
-            "day": day,
-            "startPeriod": start_period,
-            "length": length,
-        })
-
-    # Parse manualBlocks: { "5": {day, startPeriod, length}, "6": null }
-    # null means no manual block for that grade (fall back to auto or skip)
-    manual_blocks = {}
-    if isinstance(manual_blocks_raw, dict):
-        for grade_key, block_val in manual_blocks_raw.items():
-            try:
-                g = int(grade_key)
-            except (ValueError, TypeError):
-                continue
-            if block_val is None:
-                manual_blocks[g] = None
-            elif isinstance(block_val, dict):
-                d = block_val.get("day")
-                sp = block_val.get("startPeriod")
-                ln = block_val.get("length", 2)
-                if d is not None and sp is not None and ln == 2:
-                    # Validate afternoon
-                    if sp > LUNCH_BOUNDARY:
-                        manual_blocks[g] = {
-                            "day": d,
-                            "startPeriod": sp,
-                            "length": ln,
-                        }
-
-    return {
-        "enabled": True,
-        "grades": grades if isinstance(grades, list) else [],
-        "mode": mode,
-        "candidateBlocks": valid_blocks,
-        "manualBlocks": manual_blocks,
-        "coPlanningThresholdMode": threshold_mode,
-    }
-
-
-def build_co_planning_afternoon_block_penalty(
-    model,
-    schedule,
-    classes_data,
-    school_info=None,
-):
-    """
-    對每個配置的 grade，在 candidateBlocks 中偏好選擇一個合法的 afternoon 2-period 區塊。
-
-    Returns: (penalty_vars, indicator_map)
-      penalty_vars: list of {"rule_id": str, "weight": int, "var": IntVar}
-      indicator_map: dict[(grade, day, startPeriod)] -> BoolVar (indicator for block selected)
-    """
-    co_settings = _parse_co_planning_settings(school_info)
-
-    # Guard clause: skip if not enabled, no blocks/grades, or mode is manual
-    # (manual mode uses build_manual_co_planning_penalty instead)
-    if not co_settings["enabled"] or not co_settings["grades"] or not co_settings["candidateBlocks"]:
-        return [], {}
-    if co_settings["mode"] == "manual":
-        return [], {}
-
-    weight = WEIGHT_REGISTRY.get("grade_co_planning_afternoon_block", 2500)
-    penalty_vars = []
-    indicator_map = {}
-
-    grades = set(co_settings["grades"])
-    candidate_blocks = co_settings["candidateBlocks"]
-
-    # Build grade -> classes mapping
-    grade_classes = defaultdict(list)
-    for cls in classes_data:
-        g = resolve_class_grade(cls)
-        if g in grades:
-            grade_classes[g].append(cls.get("name", ""))
-
-    subject_teacher_subjects = set()
-    for cls in classes_data:
-        for req in cls.get("course_requirements", []):
-            if is_subject_teacher_lesson(req):
-                subject_teacher_subjects.add(req.get("subject", ""))
-
-    for grade, class_names in grade_classes.items():
-        if not class_names:
-            continue
-
-        # Create indicator variables for each candidate block
-        block_indicators = []
-        block_satisfied_vars = []
-        for block in candidate_blocks:
-            day_1based = block["day"]  # 1-based day
-            start_p_1based = block["startPeriod"]  # 1-based period
-
-            # Convert to 0-based indices
-            day_idx = day_1based - 1 if 1 <= day_1based <= DAYS else None
-            if day_idx is None:
-                continue
-            p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
-
-            indicator = model.NewBoolVar(
-                f"co_plan_grade{grade}_day{day_1based}_p{start_p_1based}"
-            )
-            block_indicators.append(indicator)
-            indicator_map[(grade, day_1based, start_p_1based)] = indicator
-
-            slot_subject_flags = []
-            for c_name in class_names:
-                for offset in range(2):
-                    p_index = p_start_idx + offset
-                    if p_index >= TOTAL_PERIODS:
-                        continue
-                    subject_vars = [
-                        var
-                        for (c, p, t, s), var in schedule.items()
-                        if c == c_name and p == p_index and s in subject_teacher_subjects
-                    ]
-                    has_subject = model.NewBoolVar(
-                        f"co_plan_blockSubject_{grade}_{day_1based}_{start_p_1based}_{c_name}_{offset}"
-                    )
-                    if subject_vars:
-                        subject_sum = model.NewIntVar(
-                            0,
-                            len(subject_vars),
-                            f"co_plan_blockSubjectSum_{grade}_{day_1based}_{start_p_1based}_{c_name}_{offset}",
-                        )
-                        model.Add(subject_sum == sum(subject_vars))
-                        model.Add(subject_sum >= 1).OnlyEnforceIf(has_subject)
-                        model.Add(subject_sum == 0).OnlyEnforceIf(has_subject.Not())
-                    else:
-                        model.Add(has_subject == 0)
-                    slot_subject_flags.append(has_subject)
-
-            block_satisfied = model.NewBoolVar(
-                f"co_plan_grade{grade}_day{day_1based}_p{start_p_1based}_fully_subject"
-            )
-            if slot_subject_flags:
-                for has_subject in slot_subject_flags:
-                    model.AddImplication(block_satisfied, has_subject)
-                model.AddBoolOr([has_subject.Not() for has_subject in slot_subject_flags] + [block_satisfied])
-            else:
-                model.Add(block_satisfied == 0)
-            block_satisfied_vars.append(block_satisfied)
-
-        # Soft preference: exactly one block selected per grade
-        if block_indicators:
-            sum_indicators = model.NewIntVar(0, len(block_indicators), f"co_plan_sumInd_{grade}")
-            model.Add(sum_indicators == sum(block_indicators))
-
-            # Penalty for deviation from 1
-            slack_pos = model.NewIntVar(0, 1, f"co_plan_slackPos_{grade}")
-            slack_neg = model.NewIntVar(0, len(block_indicators), f"co_plan_slackNeg_{grade}")
-            model.Add(slack_pos - slack_neg == sum_indicators - 1)
-            abs_dev = model.NewIntVar(0, max(len(block_indicators), 1), f"co_plan_absdev_{grade}")
-            model.Add(abs_dev == slack_pos + slack_neg)
-
-            penalty_vars.append({
-                "rule_id": "grade_co_planning_afternoon_block",
-                "weight": weight // max(len(grades), 1),
-                "var": abs_dev,
-            })
-
-        if block_satisfied_vars:
-            any_block_satisfied = model.NewBoolVar(f"co_plan_grade{grade}_any_fully_subject_block")
-            model.AddMaxEquality(any_block_satisfied, block_satisfied_vars)
-            no_satisfied_block = model.NewIntVar(0, 1, f"co_plan_grade{grade}_no_fully_subject_block")
-            model.Add(no_satisfied_block == 1 - any_block_satisfied)
-            penalty_vars.append({
-                "rule_id": "grade_co_planning_afternoon_block",
-                "weight": max(weight // max(len(grades), 1), 1),
-                "var": no_satisfied_block,
-            })
-
-    return penalty_vars, indicator_map
 
 
 # ============================================================
 # Task 3.7: 共備期間科任課偏好 (soft)
 # ============================================================
 
-def build_co_planning_subject_lesson_penalty(
+
+def apply_grade_time_hard_constraints(
     model,
     schedule,
     classes_data,
-    indicator_map,
-):
+    grade_time_rules,
+    teacher_type_lookup=None,
+    subject_category_lookup=None,
+) -> list:
     """
-    當某年級的共備區塊被選中後，該年級所有班級在該時段內
-    偏好排入 subject-teacher lesson（而非 homeroom lesson）。
+    [硬約束 Grade Time Rules] 依據 grade_time_rules 設置 Hard 時段約束與 cardinality。
+
+    只處理 active (enabled=True) 且 enforcement_mode == "hard" 的規則。
+    不建立任何 penalty 變數、不進 objective。
 
     Args:
-        indicator_map: dict[(grade, day, startPeriod)] -> BoolVar from Task 3.6
+        model: ortools.sat.python.cp_model.CpModel
+        schedule: dict mapping (c_name, p_idx, t_name, s_name) -> BoolVar
+        classes_data: list of class dicts
+        grade_time_rules: tuple/list of GradeTimeRule instances (or raw dicts)
+        teacher_type_lookup: optional dict or callable (teacher_name, class_name) -> str
+        subject_category_lookup: optional dict or callable (subject_name, class_name) -> str
 
-    Returns: list of {"rule_id": str, "weight": int, "var": IntVar}
+    Returns:
+        list[dict] of metadata records for applied rules
     """
-    if not indicator_map:
+    if not grade_time_rules:
         return []
 
-    weight = WEIGHT_REGISTRY.get("co_planning_subject_teacher_lesson", 2000)
-    penalty_vars = []
+    from grade_time_rules import GradeTimeRule, parse_grade_time_rules, required_count_for_threshold
 
-    # Build grade -> classes mapping
-    grade_classes = defaultdict(list)
+    rules = []
+    for r in grade_time_rules:
+        if isinstance(r, dict):
+            parsed = parse_grade_time_rules({"enabled": True, "rules": [r]})
+            if parsed:
+                rules.extend(parsed)
+        elif isinstance(r, GradeTimeRule):
+            rules.append(r)
+
+    applied_metadata = []
+
+    classes_by_grade = defaultdict(list)
     for cls in classes_data:
         g = resolve_class_grade(cls)
-        grade_classes[g].append(cls.get("name", ""))
+        classes_by_grade[g].append(cls)
 
-    # Collect subject-teacher subjects
-    subject_teacher_subjects = set()
-    for cls in classes_data:
-        for req in cls.get("course_requirements", []):
-            if is_subject_teacher_lesson(req):
-                subject_teacher_subjects.add(req.get("subject", ""))
+    def get_teacher_type(t_name, c_name, cls_obj):
+        if callable(teacher_type_lookup):
+            try:
+                tt = teacher_type_lookup(t_name, c_name)
+                if tt:
+                    return tt
+            except TypeError:
+                tt = teacher_type_lookup(t_name)
+                if tt:
+                    return tt
+        elif isinstance(teacher_type_lookup, dict):
+            if (c_name, t_name) in teacher_type_lookup:
+                return teacher_type_lookup[(c_name, t_name)]
+            if t_name in teacher_type_lookup:
+                return teacher_type_lookup[t_name]
 
-    # For each selected (grade, block), penalize slots that are not subject-teacher lessons.
-    for (grade, day_1based, start_p_1based), indicator in indicator_map.items():
-        class_names = grade_classes.get(grade, [])
-        if not class_names:
+        if cls_obj and cls_obj.get("homeroom_teacher") == t_name:
+            return "homeroom"
+        if "導師" in t_name or "homeroom" in t_name.lower():
+            return "homeroom"
+        return "subject"
+
+    def get_subject_category(s_name, c_name, cls_obj):
+        if callable(subject_category_lookup):
+            try:
+                sc = subject_category_lookup(s_name, c_name)
+                if sc:
+                    return sc
+            except TypeError:
+                sc = subject_category_lookup(s_name)
+                if sc:
+                    return sc
+        elif isinstance(subject_category_lookup, dict):
+            if (c_name, s_name) in subject_category_lookup:
+                return subject_category_lookup[(c_name, s_name)]
+            if s_name in subject_category_lookup:
+                return subject_category_lookup[s_name]
+
+        if cls_obj:
+            for req in cls_obj.get("course_requirements", []):
+                if req.get("subject") == s_name and req.get("category"):
+                    return req.get("category")
+        return ""
+
+    for rule in rules:
+        if not rule.enabled:
             continue
 
-        day_idx = day_1based - 1
-        p_start_idx = day_idx * PERIODS_PER_DAY + (start_p_1based - 1)
-        # Block covers 2 periods
-        block_periods = [p_start_idx, p_start_idx + 1]
+        target_class_names = []
+        for g in rule.grades:
+            for cls in classes_by_grade.get(g, []):
+                c_name = cls.get("name")
+                if c_name and c_name not in target_class_names:
+                    target_class_names.append(c_name)
 
-        for c_name in class_names:
-            for p_index in block_periods:
-                if p_index >= TOTAL_PERIODS:
-                    continue
+        if not target_class_names:
+            continue
 
-                # Find subject-teacher vars at this (class, period)
-                subject_vars = []
-                for (c, p, t, s), var in schedule.items():
-                    if c == c_name and p == p_index and s in subject_teacher_subjects:
-                        subject_vars.append(var)
+        constraint_count = 0
+        target_periods_desc = []
 
-                has_subject = model.NewBoolVar(f"co_plan_subject_{grade}_{c_name}_p{p_index}")
-                if subject_vars:
-                    subject_sum = model.NewIntVar(0, len(subject_vars), f"co_plan_subjectSum_{grade}_{c_name}_p{p_index}")
-                    model.Add(subject_sum == sum(subject_vars))
-                    model.Add(subject_sum >= 1).OnlyEnforceIf(has_subject)
-                    model.Add(subject_sum == 0).OnlyEnforceIf(has_subject.Not())
-                else:
-                    model.Add(has_subject == 0)
+        if rule.time_selection_mode == "fixed":
+            day = rule.day
+            periods = rule.periods or ()
 
-                penalty_var = model.NewBoolVar(
-                    f"co_plan_penalty_{grade}_{c_name}_p{p_index}"
-                )
-                # penalty_var == indicator AND NOT has_subject
-                model.Add(penalty_var >= indicator - has_subject)
-                model.Add(penalty_var <= indicator)
-                model.Add(penalty_var <= 1 - has_subject)
+            for p_1based in periods:
+                p_idx = (day - 1) * 7 + (p_1based - 1)
+                target_periods_desc.append(f"W{day}P{p_1based}")
 
-                num_grades = max(len(set(k[0] for k in indicator_map.keys())), 1)
-                penalty_vars.append({
-                    "rule_id": "co_planning_subject_teacher_lesson",
-                    "weight": max(weight // num_grades, 1),
-                    "var": penalty_var,
+                # General Hard Rules per-variable filtering (requires enforcement_mode == "hard" AND not co_planning)
+                if rule.enforcement_mode == "hard" and rule.purpose != "co_planning":
+                    for (c_name, p, t_name, s_name), var in schedule.items():
+                        if c_name not in target_class_names or p != p_idx:
+                            continue
+
+                        cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                        violates = False
+
+                        if rule.rule_type == "require_subject":
+                            if rule.subject_name and s_name != rule.subject_name:
+                                violates = True
+                        elif rule.rule_type == "require_subject_category":
+                            cat = get_subject_category(s_name, c_name, cls_obj)
+                            if rule.subject_category and cat != rule.subject_category:
+                                violates = True
+                        elif rule.rule_type == "forbid_teacher_type":
+                            tt = get_teacher_type(t_name, c_name, cls_obj)
+                            if rule.teacher_type and tt == rule.teacher_type:
+                                violates = True
+                        elif rule.rule_type == "require_teacher_type":
+                            tt = get_teacher_type(t_name, c_name, cls_obj)
+                            if rule.teacher_type and tt != rule.teacher_type:
+                                violates = True
+
+                        if violates:
+                            model.Add(var == 0)
+                            constraint_count += 1
+
+                # Fixed Co-planning Hard Cardinality Threshold Check
+                # Applies to fixed co-planning rules with threshold "all" or "at_least_90"
+                if rule.purpose == "co_planning" and rule.fulfillment_threshold in ("all", "at_least_90"):
+                    req_count = required_count_for_threshold(len(target_class_names), rule.fulfillment_threshold)
+                    if req_count > 0:
+                        class_has_coplan_vars = []
+                        for c_name in target_class_names:
+                            cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                            c_vars = [
+                                var for (c, p, t, s), var in schedule.items()
+                                if c == c_name and p == p_idx and get_teacher_type(t, c_name, cls_obj) == "subject"
+                            ]
+                            if c_vars:
+                                class_has_coplan_vars.append(sum(c_vars))
+                        if class_has_coplan_vars:
+                            model.Add(sum(class_has_coplan_vars) >= req_count)
+                            constraint_count += 1
+
+        if constraint_count > 0 or (rule.purpose == "co_planning" and rule.fulfillment_threshold in ("all", "at_least_90")):
+            applied_metadata.append({
+                "ruleId": rule.id,
+                "targetClasses": target_class_names,
+                "targetPeriods": target_periods_desc,
+                "constraintCount": constraint_count,
+            })
+
+    return applied_metadata
+
+
+def apply_grade_time_soft_rules(
+    model,
+    schedule,
+    classes_data,
+    grade_time_rules,
+    teacher_type_lookup=None,
+    subject_category_lookup=None,
+    policy=None,
+) -> tuple:
+    """
+    [軟與近硬約束 Grade Time Rules] 依據 grade_time_rules 建立 soft、near-hard 懲罰與 candidate 選擇器。
+
+    只處理 active (enabled=True) 且非硬約束（或含近硬/軟懲罰）的規則。
+    不影響 Task 5 的 Hard 約束與 Hard cardinality。
+
+    Returns:
+        tuple[list[dict], list[dict]]: (penalties, selector_metadata)
+    """
+    if not grade_time_rules:
+        return [], []
+
+    from grade_time_rules import GradeTimeRule, parse_grade_time_rules, required_count_for_threshold
+
+    rules = []
+    for r in grade_time_rules:
+        if isinstance(r, dict):
+            parsed = parse_grade_time_rules({"enabled": True, "rules": [r]})
+            if parsed:
+                rules.extend(parsed)
+        elif isinstance(r, GradeTimeRule):
+            rules.append(r)
+
+    penalties = []
+    selector_metadata = []
+
+    classes_by_grade = defaultdict(list)
+    for cls in classes_data:
+        g = resolve_class_grade(cls)
+        classes_by_grade[g].append(cls)
+
+    def get_teacher_type(t_name, c_name, cls_obj):
+        if callable(teacher_type_lookup):
+            try:
+                tt = teacher_type_lookup(t_name, c_name)
+                if tt:
+                    return tt
+            except TypeError:
+                tt = teacher_type_lookup(t_name)
+                if tt:
+                    return tt
+        elif isinstance(teacher_type_lookup, dict):
+            if (c_name, t_name) in teacher_type_lookup:
+                return teacher_type_lookup[(c_name, t_name)]
+            if t_name in teacher_type_lookup:
+                return teacher_type_lookup[t_name]
+
+        if cls_obj and cls_obj.get("homeroom_teacher") == t_name:
+            return "homeroom"
+        if "導師" in t_name or "homeroom" in t_name.lower():
+            return "homeroom"
+        return "subject"
+
+    def get_subject_category(s_name, c_name, cls_obj):
+        if callable(subject_category_lookup):
+            try:
+                sc = subject_category_lookup(s_name, c_name)
+                if sc:
+                    return sc
+            except TypeError:
+                sc = subject_category_lookup(s_name)
+                if sc:
+                    return sc
+        elif isinstance(subject_category_lookup, dict):
+            if (c_name, s_name) in subject_category_lookup:
+                return subject_category_lookup[(c_name, s_name)]
+            if s_name in subject_category_lookup:
+                return subject_category_lookup[s_name]
+
+        if cls_obj:
+            for req in cls_obj.get("course_requirements", []):
+                if req.get("subject") == s_name and req.get("category"):
+                    return req.get("category")
+        return ""
+
+    for rule in rules:
+        if not rule.enabled:
+            continue
+
+        target_class_names = []
+        for g in rule.grades:
+            for cls in classes_by_grade.get(g, []):
+                c_name = cls.get("name")
+                if c_name and c_name not in target_class_names:
+                    target_class_names.append(c_name)
+
+        if not target_class_names:
+            continue
+
+        # --- Candidate Mode ---
+        if rule.time_selection_mode == "candidate":
+            candidate_blocks = rule.candidate_blocks or ()
+            if not candidate_blocks:
+                continue
+
+            selectors = [
+                model.NewBoolVar(f"gtr_cand_sel_{rule.id}_b{idx}")
+                for idx in range(len(candidate_blocks))
+            ]
+            model.AddExactlyOne(selectors)
+
+            for idx, b in enumerate(candidate_blocks):
+                sel_b = selectors[idx]
+                selector_metadata.append({
+                    "rule_id": rule.id,
+                    "block": b,
+                    "selector": sel_b,
                 })
 
-    return penalty_vars
+                if isinstance(b, dict):
+                    day = int(b.get("day", 1))
+                    if "periods" in b:
+                        periods = tuple(int(p) for p in b["periods"])
+                    elif "startPeriod" in b and "length" in b:
+                        start_p = int(b["startPeriod"])
+                        length = int(b["length"])
+                        periods = tuple(range(start_p, start_p + length))
+                    else:
+                        periods = ()
+                else:
+                    day = int(getattr(b, "day", 1))
+                    periods = tuple(int(p) for p in getattr(b, "periods", ()))
+
+                for p_1based in periods:
+                    p_idx = (day - 1) * 7 + (p_1based - 1)
+
+                    if rule.purpose == "co_planning":
+                        if rule.fulfillment_threshold in ("all", "at_least_90"):
+                            req_count = required_count_for_threshold(
+                                len(target_class_names), rule.fulfillment_threshold
+                            )
+                            class_has_coplan_vars = []
+                            for c_name in target_class_names:
+                                cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                                c_vars = [
+                                    var for (c, p, t, s), var in schedule.items()
+                                    if c == c_name and p == p_idx and get_teacher_type(t, c_name, cls_obj) == "subject"
+                                ]
+                                if c_vars:
+                                    class_has_coplan_vars.append(sum(c_vars))
+                            if class_has_coplan_vars and req_count > 0:
+                                model.Add(sum(class_has_coplan_vars) >= req_count).OnlyEnforceIf(sel_b)
+
+                            if rule.fulfillment_threshold == "at_least_90":
+                                weight = max(rule.weight, 9000)
+                                for c_name in target_class_names:
+                                    cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                                    c_vars = [
+                                        var for (c, p, t, s), var in schedule.items()
+                                        if c == c_name and p == p_idx and get_teacher_type(t, c_name, cls_obj) == "subject"
+                                    ]
+                                    v_var = model.NewBoolVar(f"gtr_cand_viol_{rule.id}_{c_name}_d{day}_p{p_1based}")
+                                    if c_vars:
+                                        model.Add(v_var >= 1 - sum(c_vars)).OnlyEnforceIf(sel_b)
+                                        model.Add(v_var == 0).OnlyEnforceIf(sel_b.Not())
+                                    else:
+                                        model.Add(v_var == 1).OnlyEnforceIf(sel_b)
+                                        model.Add(v_var == 0).OnlyEnforceIf(sel_b.Not())
+                                    penalties.append({
+                                        "rule_id": rule.id,
+                                        "penalty_key": "grade_time_require_teacher_type",
+                                        "weight": weight,
+                                        "var": v_var,
+                                    })
+
+                        elif rule.fulfillment_threshold == "prefer":
+                            for c_name in target_class_names:
+                                cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                                c_vars = [
+                                    var for (c, p, t, s), var in schedule.items()
+                                    if c == c_name and p == p_idx and get_teacher_type(t, c_name, cls_obj) == "subject"
+                                ]
+                                v_var = model.NewBoolVar(f"gtr_cand_pref_{rule.id}_{c_name}_d{day}_p{p_1based}")
+                                if c_vars:
+                                    model.Add(v_var >= 1 - sum(c_vars)).OnlyEnforceIf(sel_b)
+                                    model.Add(v_var == 0).OnlyEnforceIf(sel_b.Not())
+                                else:
+                                    model.Add(v_var == 1).OnlyEnforceIf(sel_b)
+                                    model.Add(v_var == 0).OnlyEnforceIf(sel_b.Not())
+                                penalties.append({
+                                    "rule_id": rule.id,
+                                    "penalty_key": "grade_time_co_planning_prefer",
+                                    "weight": 9000,
+                                    "var": v_var,
+                                })
+
+        # --- Fixed Mode ---
+        elif rule.time_selection_mode == "fixed":
+            day = rule.day
+            periods = rule.periods or ()
+
+            if rule.purpose == "co_planning":
+                if rule.fulfillment_threshold == "all":
+                    continue  # Hard rule, handled in Task 5
+                elif rule.fulfillment_threshold == "at_least_90":
+                    weight = max(rule.weight, 9000)
+                    for p_1based in periods:
+                        p_idx = (day - 1) * 7 + (p_1based - 1)
+                        for c_name in target_class_names:
+                            cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                            c_vars = [
+                                var for (c, p, t, s), var in schedule.items()
+                                if c == c_name and p == p_idx and get_teacher_type(t, c_name, cls_obj) == "subject"
+                            ]
+                            v_var = model.NewBoolVar(f"gtr_fix_viol_{rule.id}_{c_name}_d{day}_p{p_1based}")
+                            if c_vars:
+                                model.Add(v_var >= 1 - sum(c_vars))
+                            else:
+                                model.Add(v_var == 1)
+                            penalties.append({
+                                "rule_id": rule.id,
+                                "penalty_key": "grade_time_require_teacher_type",
+                                "weight": weight,
+                                "var": v_var,
+                            })
+                elif rule.fulfillment_threshold == "prefer":
+                    for p_1based in periods:
+                        p_idx = (day - 1) * 7 + (p_1based - 1)
+                        for c_name in target_class_names:
+                            cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                            c_vars = [
+                                var for (c, p, t, s), var in schedule.items()
+                                if c == c_name and p == p_idx and get_teacher_type(t, c_name, cls_obj) == "subject"
+                            ]
+                            v_var = model.NewBoolVar(f"gtr_fix_pref_{rule.id}_{c_name}_d{day}_p{p_1based}")
+                            if c_vars:
+                                model.Add(v_var >= 1 - sum(c_vars))
+                            else:
+                                model.Add(v_var == 1)
+                            penalties.append({
+                                "rule_id": rule.id,
+                                "penalty_key": "grade_time_co_planning_prefer",
+                                "weight": 9000,
+                                "var": v_var,
+                            })
+
+            elif rule.purpose == "general":
+                if rule.enforcement_mode == "hard":
+                    continue  # Hard rule, handled in Task 5
+
+                penalty_key = f"grade_time_{rule.rule_type}"
+                weight = max(rule.weight, 9000)
+
+                for p_1based in periods:
+                    p_idx = (day - 1) * 7 + (p_1based - 1)
+                    for c_name in target_class_names:
+                        cls_obj = next((c for c in classes_data if c.get("name") == c_name), None)
+                        slot_items = [
+                            (t, s, var) for (c, p, t, s), var in schedule.items()
+                            if c == c_name and p == p_idx
+                        ]
+                        v_var = model.NewBoolVar(f"gtr_gen_viol_{rule.id}_{c_name}_d{day}_p{p_1based}")
+
+                        if rule.rule_type == "require_subject":
+                            match_vars = [var for (t, s, var) in slot_items if rule.subject_name and s == rule.subject_name]
+                            if match_vars:
+                                model.Add(v_var >= 1 - sum(match_vars))
+                            else:
+                                model.Add(v_var == 1)
+                        elif rule.rule_type == "require_subject_category":
+                            match_vars = [
+                                var for (t, s, var) in slot_items
+                                if rule.subject_category and get_subject_category(s, c_name, cls_obj) == rule.subject_category
+                            ]
+                            if match_vars:
+                                model.Add(v_var >= 1 - sum(match_vars))
+                            else:
+                                model.Add(v_var == 1)
+                        elif rule.rule_type == "forbid_teacher_type":
+                            forbid_vars = [
+                                var for (t, s, var) in slot_items
+                                if rule.teacher_type and get_teacher_type(t, c_name, cls_obj) == rule.teacher_type
+                            ]
+                            if forbid_vars:
+                                model.Add(v_var >= sum(forbid_vars))
+                            else:
+                                model.Add(v_var == 0)
+                        elif rule.rule_type == "require_teacher_type":
+                            req_vars = [
+                                var for (t, s, var) in slot_items
+                                if rule.teacher_type and get_teacher_type(t, c_name, cls_obj) == rule.teacher_type
+                            ]
+                            if req_vars:
+                                model.Add(v_var >= 1 - sum(req_vars))
+                            else:
+                                model.Add(v_var == 1)
+
+                        penalties.append({
+                            "rule_id": rule.id,
+                            "penalty_key": penalty_key,
+                            "weight": weight,
+                            "var": v_var,
+                        })
+
+    return penalties, selector_metadata

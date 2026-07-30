@@ -33,9 +33,6 @@ def test_class_rules_exports_new_functions():
         # Special room capacity
         "apply_special_classroom_capacity",
         # Co-planning
-        "build_manual_co_planning_penalty",
-        "build_co_planning_subject_lesson_penalty",
-        "build_co_planning_afternoon_block_penalty",
         # Homeroom daily cap
         "build_homeroom_daily_max_periods_penalty",
     ]
@@ -74,7 +71,6 @@ def test_weight_registry_has_new_keys():
     # These are the ACTUAL key names used in the codebase
     required_keys = [
         "classroom_capacity_overload",
-        "manual_co_planning_subject_teacher_lesson",
         "homeroom_daily_max_periods",
     ]
 
@@ -122,21 +118,23 @@ def test_solver_wires_special_room_capacity():
     print("[PASS] solver.py wires special_classroom_capacity")
 
 
-def test_phase2_wires_co_planning():
-    """Verify phase2_engine.py uses the co-planning constraint."""
+def test_phase2_wires_grade_time_rules():
+    """Verify phase2_engine.py wires Grade Time Rules constraints."""
     phase2_path = os.path.join(SCRIPT_DIR, "phase2_engine.py")
     with open(phase2_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    assert "build_manual_co_planning_penalty" in content or "manual_co_planning" in content, (
-        "phase2_engine.py must reference manual_co_planning_penalty"
+    assert "apply_grade_time_soft_rules" in content, (
+        "phase2_engine.py must reference apply_grade_time_soft_rules"
+    )
+    assert "parse_grade_time_rules" in content, (
+        "phase2_engine.py must reference parse_grade_time_rules"
+    )
+    assert "gradeTimeRulesSettings" in content, (
+        "phase2_engine.py must handle gradeTimeRulesSettings from payload"
     )
 
-    assert "coPlanningSettings" in content or "co_planning" in content, (
-        "phase2_engine.py must handle coPlanningSettings from payload"
-    )
-
-    print("[PASS] phase2_engine wires co_planning constraint")
+    print("[PASS] phase2_engine wires grade_time_rules constraint")
 
 
 def test_phase2_wires_homeroom_daily_cap():
@@ -223,20 +221,6 @@ def test_apply_special_classroom_capacity_signature():
     print(f"[PASS] apply_special_classroom_capacity signature: {params}")
 
 
-def test_build_manual_co_planning_penalty_signature():
-    """Verify the manual co-planning function is callable."""
-    from constraints.class_rules import build_manual_co_planning_penalty
-    import inspect
-
-    sig = inspect.signature(build_manual_co_planning_penalty)
-    params = list(sig.parameters.keys())
-
-    assert len(params) >= 2, (
-        f"build_manual_co_planning_penalty should have >= 2 parameters, got {params}"
-    )
-
-    print(f"[PASS] build_manual_co_planning_penalty signature: {params}")
-
 
 def test_build_homeroom_daily_max_periods_penalty_signature():
     """Verify the homeroom daily cap function is callable."""
@@ -271,7 +255,6 @@ if __name__ == "__main__":
         ("No hard-coded co-planning weight", test_no_hardcoded_co_planning_weight),
         ("No hard-coded homeroom cap weight", test_no_hardcoded_homeroom_cap_weight),
         ("special_classroom_capacity signature", test_apply_special_classroom_capacity_signature),
-        ("manual_co_planning signature", test_build_manual_co_planning_penalty_signature),
         ("homeroom_daily_max_periods signature", test_build_homeroom_daily_max_periods_penalty_signature),
     ]
 

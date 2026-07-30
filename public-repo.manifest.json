@@ -1,13 +1,7 @@
 {
   "version": 1,
   "targetDir": "F:/scheduler-public",
-  "includeRoots": [
-    "src",
-    "constraints",
-    "prisma",
-    "public",
-    "tests"
-  ],
+  "includeRoots": ["src", "constraints", "prisma", "public", "tests"],
   "includeFiles": [
     ".editorconfig",
     ".gitattributes",
@@ -41,16 +35,13 @@
     "constraints/movable_locks.py",
     "constraints/special_rules.py",
     "constraints/teacher_rules.py",
-    "constraints/utils.py"
+    "constraints/utils.py",
+    "grade_time_rules.py",
+    "grade_time_rule_diagnostics.py",
+    "contracts/grade_time_rule_issue_codes.json"
   ],
   "includeDocFiles": [],
-  "targetOnlyRoots": [
-    "tests",
-    "docs",
-    "node_modules",
-    ".pytest_cache",
-    "__pycache__"
-  ],
+  "targetOnlyRoots": ["tests", "docs", "node_modules", ".pytest_cache", "__pycache__"],
   "targetOnlyFiles": [
     "LICENSE.md",
     "README.md",
@@ -85,7 +76,9 @@
     "venv",
     ".clinerules",
     ".codebase-memory",
-    ".githooks"
+    ".githooks",
+    ".worktrees",
+    "%TEMP%"
   ],
   "ignoredPatterns": [
     ".env",
@@ -145,8 +138,5 @@
     "tmp_diag_*",
     "tmp_diag_*/**"
   ],
-  "ignoredPaths": [
-    "prisma/cleanup_db.cjs",
-    "src/generated/prisma/**"
-  ]
+  "ignoredPaths": ["prisma/cleanup_db.cjs", "src/generated/prisma/**"]
 }

@@ -496,66 +496,63 @@ class SchedulePhase2Engine:
             print(f"  - {subj}: 需求點數 {demand}, 負荷率 {ratio:.2%} ({status})")
 
         # ==========================================
-        # [SOFT] Task 3.3~3.9: 導師時段與共備軟規則
+        # [SOFT] Task 3.3~3.8: 導師時段軟規則
         # ==========================================
-        print("[SOFT] 啟動第 3 階段軟規則 (導師時段 + 共備)...")
+        print("[SOFT] 啟動第 3 階段軟規則 (導師時段)...")
         try:
             from constraints.class_rules import (
                 build_grade_morning_first_period_homeroom_penalty,
                 build_morning_two_homeroom_periods_penalty,
-                build_co_planning_afternoon_block_penalty,
-                build_co_planning_subject_lesson_penalty,
                 build_homeroom_daily_max_periods_penalty,
-                build_manual_co_planning_penalty,
             )
 
-            # Task 3.3: 3-6 年級每週一天第一節導師課偏好
+            # Task 3.3: 3-6 年級每週至少一天第一節導師課軟懲罰
             hr_penalty = build_grade_morning_first_period_homeroom_penalty(
                 self.model, self.schedule, self.classes_data
             )
             self.penalty_vars.extend(hr_penalty)
             print(f"  [Task 3.3] grade_morning_first_period_homeroom_day: {len(hr_penalty)} penalty terms")
 
-            # Task 3.4: 每班每日早上兩節導師型課程偏好
+            # Task 3.4: 每班每日上午兩節導師課軟懲罰
             morning_hr_penalty = build_morning_two_homeroom_periods_penalty(
                 self.model, self.schedule, self.classes_data
             )
             self.penalty_vars.extend(morning_hr_penalty)
             print(f"  [Task 3.4] morning_two_homeroom_periods_per_day: {len(morning_hr_penalty)} penalty terms")
 
-            # Task 3.6: 共備候選區塊軟目標
-            co_plan_penalty, indicator_map = build_co_planning_afternoon_block_penalty(
-                self.model, self.schedule, self.classes_data,
-                school_info=getattr(self, 'school_info', None)
-            )
-            self.penalty_vars.extend(co_plan_penalty)
-            print(f"  [Task 3.6] grade_co_planning_afternoon_block: {len(co_plan_penalty)} penalty terms")
-
-            # Task 3.7: 共備期間科任課偏好 (依賴 3.6 的 indicator_map)
-            co_plan_subject_penalty = build_co_planning_subject_lesson_penalty(
-                self.model, self.schedule, self.classes_data,
-                indicator_map=indicator_map
-            )
-            self.penalty_vars.extend(co_plan_subject_penalty)
-            print(f"  [Task 3.7] co_planning_subject_teacher_lesson: {len(co_plan_subject_penalty)} penalty terms")
-
-            # Task 3.8: 導師每日最大節次軟懲罰 (soft)
+            # Task 3.8: 導師每日最大節次超額懲罰 (soft)
             hr_daily_max_penalty = build_homeroom_daily_max_periods_penalty(
                 self.model, self.schedule, self.classes_data
             )
             self.penalty_vars.extend(hr_daily_max_penalty)
             print(f"  [Task 3.8] homeroom_daily_max_periods: {len(hr_daily_max_penalty)} penalty terms")
 
-            # Task 3.9: Manual Co-Planning Block Penalty (near-hard soft)
-            manual_co_plan_penalty = build_manual_co_planning_penalty(
-                self.model, self.schedule, self.classes_data,
-                school_info=getattr(self, 'school_info', None)
-            )
-            self.penalty_vars.extend(manual_co_plan_penalty)
-            print(f"  [Task 3.9] manual_co_planning_subject_teacher_lesson: {len(manual_co_plan_penalty)} penalty terms")
-
         except Exception as e:
             print(f"  [WARN] 第 3 階段軟規則建立失敗 (不影響主流程): {e}")
+
+        # ==========================================
+        # [Task 6] Grade Time Rules Soft / Near-Hard & Candidate Selectors
+        # ==========================================
+        try:
+            from constraints.class_rules import apply_grade_time_soft_rules
+            from grade_time_rules import parse_grade_time_rules
+            gtr_settings = None
+            if hasattr(self, 'school_info') and isinstance(self.school_info, dict):
+                gtr_settings = self.school_info.get("gradeTimeRulesSettings")
+            if not gtr_settings and hasattr(self, 'ai_settings') and isinstance(self.ai_settings, dict):
+                gtr_settings = self.ai_settings.get("gradeTimeRulesSettings")
+
+            gtr_rules = parse_grade_time_rules(gtr_settings) if gtr_settings else []
+
+            if gtr_rules:
+                gtr_penalties, gtr_selectors = apply_grade_time_soft_rules(
+                    self.model, self.schedule, self.classes_data, gtr_rules, policy=self.policy
+                )
+                self.penalty_vars.extend(gtr_penalties)
+                self.gtr_selector_metadata = gtr_selectors
+                print(f"  [Task 6] Grade Time Rules: {len(gtr_penalties)} penalty terms, {len(gtr_selectors)} candidate selectors")
+        except Exception as e:
+            print(f"  [WARN] Grade Time Rules soft constraints build failed: {e}")
 
         # ==========================================
         # [Task 08] Priority Teacher Placeholder Reservation Objective

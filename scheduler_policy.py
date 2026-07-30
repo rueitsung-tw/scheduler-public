@@ -88,10 +88,8 @@ WEIGHT_REGISTRY: Dict[str, int] = {
     "classroom_primary_teacher_affinity": 2500,
         # 教室與主要導師親和度偏好
 
-    "grade_co_planning_afternoon_block": 2500,
         # 5-6 年級下午共備區塊偏好
 
-    "co_planning_subject_teacher_lesson": 2000,
         # 共備期間科任課偏好
 
     # --- low (10-100) ---
@@ -138,7 +136,6 @@ WEIGHT_REGISTRY: Dict[str, int] = {
         # phase2_engine.py — 導師每日超過 4 節的 soft penalty
         # 政策檔: docs/2026-06-28_co_planning_manual_block_and_homeroom_daily_cap_policy.yaml
 
-    "manual_co_planning_subject_teacher_lesson": 9000,
         # constraints/class_rules.py — manual 共備區塊內未安排科任課的 near-hard penalty
         # 政策檔: docs/2026-06-28_co_planning_manual_block_and_homeroom_daily_cap_policy.yaml
 
@@ -165,6 +162,13 @@ WEIGHT_REGISTRY: Dict[str, int] = {
     "soft_slot_rule_avoid": 30,
         # 通用時段規則引擎: soft mode 的 avoid penalty
         # 可被 AI 設定頁的 weight (low/medium/high) 覆蓋
+
+    # --- [2026-07-28] Grade Time Rules soft & near-hard penalty keys ---
+    "grade_time_require_subject": 9000,
+    "grade_time_require_subject_category": 9000,
+    "grade_time_forbid_teacher_type": 9000,
+    "grade_time_require_teacher_type": 9000,
+    "grade_time_co_planning_prefer": 9000,
 }
 
 POLICY_WEIGHTS = WEIGHT_REGISTRY
@@ -259,8 +263,6 @@ class SolvePolicy:
         "cross_expertise",
         "grade_morning_first_period_homeroom_day",
         "morning_two_homeroom_periods_per_day",
-        "grade_co_planning_afternoon_block",
-        "co_planning_subject_teacher_lesson",
         "grade12_tuesday_afternoon_life_course_fallback",
         "daily_subject_teacher_minimum",
         "specialty_room_non_preferred_grade",
@@ -270,7 +272,6 @@ class SolvePolicy:
         "art_music_week_specific_room_overload",
         # [2026-06-28] 五六年級共備 + 導師每日四節上限
         "homeroom_daily_max_periods",
-        "manual_co_planning_subject_teacher_lesson",
         # [2026-07-21] 排課品質 soft rules
         "teacher_daily_load_smoothing",
         "same_teacher_grade_consistency",

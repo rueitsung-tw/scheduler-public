@@ -86,8 +86,17 @@ from constraints.class_rules import (
     build_daily_subject_teacher_minimum_penalty,
     apply_subject_day_spread,
     apply_music_fixed_vs_alternating_day_spread,
+    apply_grade_time_hard_constraints,
 )
 from constraints.utils import grade_needs_special_room
+from grade_time_rules import (
+    parse_grade_time_rules,
+    validate_grade_time_rules,
+)
+from grade_time_rule_diagnostics import (
+    compute_grade_time_rule_diagnostics,
+    extract_selector_values_from_metadata,
+)
 from constraints.special_rules import (
     apply_no_consecutive_pe,
     apply_art_consecutive_constraint,
@@ -372,128 +381,6 @@ def _configured_special_room_subjects(classrooms, classroom_limits, school_info,
     return subjects
 
 
-def _collect_co_planning_diagnostics(schedule_entries, classes_data, school_info, classrooms, ai_settings=None):
-    """
-    Diagnose Grade Co-Planning block subject teacher lesson fulfillment.
-    Produces detailed diagnostic breakdown for unfulfilled slots.
-    """
-    co_planning = (school_info or {}).get("coPlanningSettings", {})
-    if not co_planning or not isinstance(co_planning, dict) or not co_planning.get("enabled"):
-        ai_cfg = ai_settings if isinstance(ai_settings, dict) else ((school_info or {}).get("aiSettings", {}) or {})
-        if isinstance(ai_cfg, dict):
-            co_planning = ai_cfg.get("__schoolInfoCoPlanningSettings", {}) or ai_cfg.get("coPlanningSettings", {})
-
-    if not isinstance(co_planning, dict) or not co_planning.get("enabled"):
-        return {"enabled": False, "message": "共備功能未啟用"}
-
-    manual_blocks = co_planning.get("manualBlocks", {}) or {}
-    mode = co_planning.get("mode", "manual")
-    if not manual_blocks and mode != "manual":
-        return {"enabled": True, "mode": mode, "message": "無設定手動共備區塊"}
-
-    scheduled_map = {}
-    teacher_busy = defaultdict(set)
-    for entry in schedule_entries or []:
-        c_name = str(entry.get("className", "")).strip()
-        t_name = str(entry.get("teacherName", "")).strip()
-        day = int(entry.get("day", 0) or 0)
-        period = int(entry.get("period", 0) or 0)
-        scheduled_map[(c_name, day, period)] = entry
-        if t_name:
-            teacher_busy[t_name].add((day, period))
-
-    total_slots = 0
-    fulfilled_slots = 0
-    unfulfilled_details = []
-
-    for grade_str, block in manual_blocks.items():
-        if not block or not isinstance(block, dict):
-            continue
-        try:
-            grade_num = int(grade_str)
-        except ValueError:
-            continue
-
-        day = int(block.get("day", 0) or 0)
-        start_p = int(block.get("startPeriod", 0) or 0)
-        length = int(block.get("length", 2) or 2)
-
-        grade_classes = [
-            c for c in classes_data or []
-            if c.get("grade") == grade_num or str(c.get("name", "")).startswith(f"{grade_num}年")
-        ]
-
-        for p in range(start_p, start_p + length):
-            for cls in grade_classes:
-                c_name = str(cls.get("name", "")).strip()
-                total_slots += 1
-                entry = scheduled_map.get((c_name, day, p))
-                
-                is_subject = False
-                t_name = entry.get("teacherName", "") if entry else ""
-                subj = entry.get("subject", "") if entry else ""
-                
-                reqs = cls.get("course_requirements", []) or []
-                subj_req = next((r for r in reqs if r.get("subject") == subj), None)
-                if subj_req:
-                    if subj_req.get("defaultTeacher") == "subject":
-                        is_subject = True
-                    elif subj_req.get("defaultTeacher") == "homeroom":
-                        is_subject = False
-                    elif cls.get("homeroom_teacher") and t_name != cls.get("homeroom_teacher"):
-                        is_subject = True
-                elif t_name and cls.get("homeroom_teacher") and t_name != cls.get("homeroom_teacher"):
-                    is_subject = True
-
-                if is_subject:
-                    fulfilled_slots += 1
-                else:
-                    subj_reqs = [r for r in reqs if r.get("defaultTeacher") == "subject"]
-                    cand_count = len(subj_reqs)
-                    
-                    busy_teachers = []
-                    free_teachers = []
-                    for r in subj_reqs:
-                        rt_name = r.get("teacher_name") or r.get("teacher")
-                        if rt_name:
-                            if (day, p) in teacher_busy[rt_name]:
-                                busy_teachers.append(rt_name)
-                            else:
-                                free_teachers.append(rt_name)
-
-                    if cand_count == 0 or (busy_teachers and not free_teachers):
-                        reason = "TEACHER_BUSY_OR_NO_DIRECT_CANDIDATE"
-                        reason_text = "該班可授科任教師於該時段皆處於排課衝堂或無直接科任候選師資"
-                    elif free_teachers:
-                        reason = "POSSIBLE_SOLVER_TRADE_OFF"
-                        reason_text = "科任教師尚有空檔，求解器為極小化其他軟限制懲罰而選擇排入導師課"
-                    else:
-                        reason = "UNKNOWN_NEEDS_FEASIBILITY_PROBE"
-                        reason_text = "尚須結合教室容量與剩餘節數深入探針分析"
-
-                    unfulfilled_details.append({
-                        "className": c_name,
-                        "grade": grade_num,
-                        "day": day,
-                        "period": p,
-                        "scheduledSubject": subj,
-                        "scheduledTeacher": t_name,
-                        "candidateSubjectCount": cand_count,
-                        "reason": reason,
-                        "reasonText": reason_text
-                    })
-
-    rate = round(fulfilled_slots / max(total_slots, 1), 3)
-    return {
-        "enabled": True,
-        "mode": mode,
-        "total_slots": total_slots,
-        "fulfilled_slots": fulfilled_slots,
-        "unfulfilled_slots": total_slots - fulfilled_slots,
-        "fulfillment_rate": rate,
-        "unfulfilled_details": unfulfilled_details
-    }
-
 
 def _validate_schedule_result(
     schedule_entries,
@@ -704,7 +591,7 @@ def _validate_schedule_result(
         special_course_overlap_conflicts = overlap_analysis.get("conflicts", [])
         special_course_allowed_overlaps = overlap_analysis.get("allowed_overlaps", [])
 
-    co_planning_diag = _collect_co_planning_diagnostics(schedule_entries, classes_data, school_info, classrooms, ai_settings)
+
 
     return {
         "class_slot_conflicts": class_slot_issues,
@@ -718,19 +605,18 @@ def _validate_schedule_result(
         "science_same_day_shape_issues": science_same_day_shape_issues,
         "special_course_overlap_conflicts": special_course_overlap_conflicts,
         "special_course_allowed_overlaps": special_course_allowed_overlaps,
-        "co_planning_diagnostics": co_planning_diag,
     }
 
 
 def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
     """Return True when hard errors exist.
-    
+
     unassigned_special_rooms is always a hard error because:
     - PE (體育) is already excluded in _validate_schedule_result (capacity-type space)
     - Other subjects with physical classrooms MUST have classroomId assigned
-    - If a subject has no physical classrooms but only classroomLimits, it should not 
+    - If a subject has no physical classrooms but only classroomLimits, it should not
       appear in unassigned_special_rooms (handled by _validate_schedule_result filtering)
-    
+
     special_course_overlap_conflicts is a hard error:
     - Same class, same period, different effective subjects = real conflict
     """
@@ -1530,6 +1416,60 @@ def _get_class_grade_from_name(class_name, school_info):
     return 1
 
 
+def run_grade_time_rules_preflight(data: dict) -> dict:
+    """
+    Authoritative Preflight for Grade Time Rules.
+    Executes BEFORE any CpModel() construction.
+    If there are blocking issues, returns result dict with status INVALID_GRADE_TIME_RULE_CONFIGURATION.
+    Otherwise returns None.
+    """
+    if not isinstance(data, dict):
+        return None
+
+    school_info = data.get("schoolInfo", {})
+    if not isinstance(school_info, dict):
+        school_info = {}
+
+    raw_settings = school_info.get("gradeTimeRulesSettings")
+    if not raw_settings:
+        ai_settings = data.get("aiSettings", {})
+        if isinstance(ai_settings, dict):
+            raw_settings = ai_settings.get("gradeTimeRulesSettings")
+
+    rules = parse_grade_time_rules(raw_settings)
+    if not rules:
+        return None
+
+    context = {
+        "classes": data.get("classes", []),
+        "teachers": data.get("teachers", []),
+        "classrooms": data.get("classrooms", []),
+    }
+
+    res = validate_grade_time_rules(rules, context)
+    if not res.is_valid and res.blocking_issues:
+        issues_payload = [
+            {
+                "code": issue.code,
+                "severity": issue.severity,
+                "message": issue.message,
+                "ruleIds": list(issue.rule_ids),
+                "grade": issue.grade,
+                "day": issue.day,
+                "period": issue.period,
+            }
+            for issue in res.blocking_issues
+        ]
+        return {
+            "status": "INVALID_GRADE_TIME_RULE_CONFIGURATION",
+            "solverStatus": "INVALID_GRADE_TIME_RULE_CONFIGURATION",
+            "error": f"Grade time rule configuration has {len(res.blocking_issues)} blocking issue(s)",
+            "gradeTimeRuleIssues": issues_payload,
+        }
+
+    return None
+
+
 def main():
     import faulthandler; faulthandler.enable()
     print("[PHASE] main 開始執行, 已掛載 faulthandler", flush=True)
@@ -1548,7 +1488,7 @@ def main():
         sys.exit(1)
 
     print("[PHASE] 載入 payload 完成", flush=True)
-    
+
     # [P2] Phase-level observability initialized early
     phase_history = []
     phase_timings = {}
@@ -1569,20 +1509,12 @@ def main():
     # 讀取 aiSettings
     ai_settings = data.get("aiSettings", {})
 
-    # 補齊 schoolInfo.coPlanningSettings 備援 (避免僅存在於 aiSettings.__schoolInfoCoPlanningSettings 時求解器建模階段未載入)
-    fallback_co = (ai_settings or {}).get("__schoolInfoCoPlanningSettings") or (ai_settings or {}).get("coPlanningSettings")
-    current_co = (schoolInfo or {}).get("coPlanningSettings")
-    if fallback_co and isinstance(fallback_co, dict) and fallback_co.get("enabled"):
-        if not isinstance(current_co, dict) or not current_co.get("enabled"):
-            if schoolInfo is None:
-                schoolInfo = {}
-            schoolInfo["coPlanningSettings"] = copy.deepcopy(fallback_co)
 
     # ==========================================
     # 前處理（grade修正 / ghost art清理 / homeroom合併 / arts拆分）
     # ==========================================
     subject_grade_rules = schoolInfo.get("subjectGradeRules", {}) or {}
-    
+
     _t_pre_start = time.time()
     classes_data, _metadata = preprocess_classes(
         classes_data,
@@ -1592,10 +1524,20 @@ def main():
     )
     _t_pre_end = time.time()
     phase_timings["preprocess_seconds"] = round(_t_pre_end - _t_pre_start, 3)
-    
+
     data["preprocessMetadata"] = copy.deepcopy(_metadata)
     data["preprocessedClasses"] = copy.deepcopy(classes_data)
     print("[PHASE] preprocessing 完成", flush=True)
+
+    # ==========================================
+    # 🛡️ Authoritative Preflight for Grade Time Rules (runs BEFORE any CpModel() construction)
+    # ==========================================
+    gtr_preflight_result = run_grade_time_rules_preflight(data)
+    if gtr_preflight_result is not None:
+        print(f"\n[ERROR] [Preflight] Grade time rules validation failed: {gtr_preflight_result['error']}")
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(gtr_preflight_result, f, ensure_ascii=False, indent=2)
+        sys.exit(0)
 
     # ==========================================
     # 🛡️ Preflight：求解前檢查輸入是否超載
@@ -1636,7 +1578,7 @@ def main():
                             s = cell.get("subject")
                             if s:
                                 lock_counts_by_subj[s] = lock_counts_by_subj.get(s, 0) + 1
-                        
+
         reqs_dict = {r.get("subject", ""): int(r.get("periods", 0)) for r in reqs}
         trace_item = {
             "className": cls.get("name", ""),
@@ -1674,7 +1616,7 @@ def main():
 
     # 將 classLoadTrace 寫入 metadata，供後端分析使用
     _metadata["classLoadTrace"] = class_load_trace
-    
+
     if invalid_classes:
         # 輸入超載：不進 solver，直接回傳 INVALID_INPUT
         # 🔧 修復 B (RC-CONF-01 輔因)：附加 gradeCapacityMap 過渡方案
@@ -1701,7 +1643,7 @@ def main():
                 print(f"  - {ic['className']}: 總節數 {ic['totalPeriods']} > 容量 {ic['capacity']} (超限 {ic['periodExcess']})")
             elif ic.get("validationError") == "INVALID_INPUT_LOCK_CONSERVATION":
                 print(f"  - {ic['className']}: {ic['conservationError']}")
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         sys.exit(0)
@@ -1858,6 +1800,18 @@ def main():
         # ============================================================
         print("[CONSTRAINT] [核心約束] 加入每日科任課上限...")
         apply_daily_subject_limit(model, classes_data, schedule, locked_vars)
+
+        print("[CONSTRAINT] [核心約束] 加入年級時段硬約束 (Grade Time Hard Constraints)...")
+        gtr_parsed = parse_grade_time_rules(schoolInfo.get("gradeTimeRulesSettings"))
+        if gtr_parsed:
+            apply_grade_time_hard_constraints(
+                model,
+                schedule,
+                classes_data,
+                gtr_parsed,
+                teacher_type_lookup=None,
+                subject_category_lookup=None,
+            )
 
         print("[CONSTRAINT] [核心約束] 加入低年級下午禁排...")
         apply_afternoon_prohibition(model, classes_data, schedule, ai_settings=ai_settings, locked_vars=locked_vars)
@@ -2053,7 +2007,7 @@ def main():
             from constraints.utils import grade_needs_special_room, _normalize_room_subject
             classroom_grades_cfg = (schoolInfo or {}).get("subjectClassroomGrades", {}) or {}
             class_grade_dict = {cls.get("name"): cls.get("grade") for cls in classes_data}
-            
+
             english_pressure_vars = []
             for (c_name, p, t_name, subject), var in schedule.items():
                 if _normalize_room_subject(subject) != "語文-英語":
@@ -2064,7 +2018,7 @@ def main():
                 if not grade_needs_special_room(subject, grade, classroom_grades_cfg):
                     continue
                 english_pressure_vars.append(var)
-            
+
             print(f"[OPTION_B_DRYRUN] Collected {len(english_pressure_vars)} english pressure vars")
             if english_pressure_vars:
                 val_strategy = cp_model.SELECT_MAX_VALUE if dryrun_strategy == "MAX" else cp_model.SELECT_MIN_VALUE
@@ -2141,6 +2095,12 @@ def main():
             "timeout_stage": timeout_stage,
             # [P2] Phase-level wall time for observability
             "wall_time": round(solver.WallTime(), 3) if hasattr(solver, "WallTime") else 0,
+            # [Task 7-A] Grade Time Rules candidate selector metadata.
+            # apply_grade_time_soft_rules() is called by engine.build_soft_constraints();
+            # the resulting selector_metadata is stored on engine.gtr_selector_metadata.
+            # We must carry it in the attempt dict so the correct solver.Value can be used
+            # after the winning attempt is selected (two-pass flow).
+            "gtr_selector_metadata": getattr(engine, "gtr_selector_metadata", []),
         }
 
     # [Task 02] Two-pass solver flow:
@@ -2164,7 +2124,7 @@ def main():
             global_long_time = float(long_time_str or "60.0")
 
         strict_policy = get_active_policy(SolveMode.STRICT_TEACHING_SHAPE)
-        
+
         print("[INFO] [求解] 啟動 Two-Pass Pass 1: Strict Teaching Shape (Core Level)")
         _t0 = time.time()
         attempt = _solve_attempt(relax_room_capacity=False, solve_mode=SolveMode.STRICT_TEACHING_SHAPE, build_level="core")
@@ -2218,7 +2178,7 @@ def main():
                 "solveTimeSeconds": round(_solve, 3),
                 "totalTimeSeconds": round(_total, 3),
             })
-            
+
             if quality_attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                 attempt = quality_attempt
                 solve_pass = "strict_teaching_shape_quality"
@@ -2252,7 +2212,7 @@ def main():
                     "solveTimeSeconds": round(_solve, 3),
                     "totalTimeSeconds": round(_total, 3),
                 })
-                
+
                 if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     print("[INFO] [求解] Fallback pass 成功產出可行解，啟動 Quality 優化...")
                     fb_hint_values = {}
@@ -2261,7 +2221,7 @@ def main():
                             fb_hint_values[key] = attempt["solver"].Value(var)
                         except Exception:
                             pass
-                            
+
                     _t0 = time.time()
                     fb_quality_attempt = _solve_attempt(
                         relax_room_capacity=False,
@@ -2292,7 +2252,7 @@ def main():
                     else:
                         solve_pass = "feasibility_recovery"
                         print("[WARN] [求解] Fallback Quality pass 失敗，退回 Fallback core pass 初解")
-                
+
                 _fb_breakdown = {}
 
                 if attempt["status"] in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -2384,9 +2344,6 @@ def main():
             "classroom_primary_teacher_affinity": 0,
             "grade_morning_first_period_homeroom_day": 0,
             "morning_two_homeroom_periods_per_day": 0,
-            "grade_co_planning_afternoon_block": 0,
-            "co_planning_subject_teacher_lesson": 0,
-            "manual_co_planning_subject_teacher_lesson": 0,
             # [Task 07] New penalty keys for grade1-2 Tuesday life-course and daily subject-teacher minimum
             "grade12_tuesday_afternoon_life_course_fallback": 0,
             "daily_subject_teacher_minimum": 0,
@@ -2508,7 +2465,7 @@ def main():
 
             # [NEW] 建立 (className, period_index, week) -> (roomId, roomName) 對照表
             assigned_rooms = {}
-            
+
             print(f"\n[DIAG] === CP-SAT raw classroom_assignments ===", flush=True)
             if hasattr(model, "classroom_assignments"):
                 for item in model.classroom_assignments:
@@ -2653,7 +2610,7 @@ def main():
             )
             result["weekSpecificConflict"] = result_flags["weekSpecificConflict"]
             result["musicArtOptimizationSkipped"] = music_art_optimization_skipped
-            
+
             # Movable Locks prototype output
             moved_lessons = []
             movable_decisions = getattr(model, "movable_lock_decisions", [])
@@ -2673,14 +2630,14 @@ def main():
                         "originalPeriod": {"day": (orig_p // PERIODS_PER_DAY) + 1, "period": (orig_p % PERIODS_PER_DAY) + 1},
                         "newPeriod": {"day": (new_p // PERIODS_PER_DAY) + 1, "period": (new_p % PERIODS_PER_DAY) + 1}
                     })
-                    
+
             if moved_lessons:
                 result["movedLockedLessons"] = moved_lessons
                 result["movableLockSummary"] = {
                     "totalMoved": len(moved_lessons)
                 }
                 result["requiresUserReview"] = True
-                
+
             # [Task 02] Do NOT overwrite result["degraded"] — it was set by two-pass flow
             # Only merge additional flags that don't conflict:
             if "degradeLevel" not in result:
@@ -2732,7 +2689,7 @@ def main():
                     })
 
             _dump_diagnostics("Before _validate_schedule_result", result["schedule"])
-            
+
             _t_val_start = time.time()
             validation_report = _validate_schedule_result(
                 result["schedule"],
@@ -2749,9 +2706,37 @@ def main():
             )
             _t_val_end = time.time()
             phase_timings["validation_seconds"] = round(_t_val_end - _t_val_start, 3)
-            
+
+            # [Task 7-A] Grade Time Rules diagnostics contract.
+            # apply_grade_time_soft_rules() is called by engine.build_soft_constraints() and
+            # stores selector metadata on engine.gtr_selector_metadata. That metadata is
+            # carried in attempt["gtr_selector_metadata"] so we can use attempt["solver"].Value
+            # on the correct (winning) attempt's BoolVars.
+            _gtr_selector_meta = attempt.get("gtr_selector_metadata", [])
+            if _gtr_selector_meta and status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                _gtr_selector_values = extract_selector_values_from_metadata(
+                    _gtr_selector_meta, attempt["solver"].Value
+                )
+            else:
+                _gtr_selector_values = {}
+            _raw_gtr_settings = (
+                schoolInfo.get("gradeTimeRulesSettings")
+                if isinstance(schoolInfo, dict)
+                else None
+            )
+            if not _raw_gtr_settings:
+                _ai_s = ai_settings if isinstance(ai_settings, dict) else {}
+                _raw_gtr_settings = _ai_s.get("gradeTimeRulesSettings")
+            validation_report["grade_time_rule_diagnostics"] = compute_grade_time_rule_diagnostics(
+                raw_settings=_raw_gtr_settings,
+                selector_values=_gtr_selector_values,
+                solution_entries=result["schedule"],
+            )
+
             with open("debug_schedule_validation_report.json", "w", encoding="utf-8") as vf:
                 json.dump(validation_report, vf, ensure_ascii=False, indent=2)
+
+            result["validationReport"] = validation_report
 
             if has_validation_errors:
                 result["status"] = "INVALID_VALIDATION"

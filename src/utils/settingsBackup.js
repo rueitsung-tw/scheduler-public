@@ -1,4 +1,6 @@
 import { useScheduleStore } from '../stores/schedule'
+import { createDefaultGradeTimeRulesSettings } from './gradeTimeRules.js'
+import { prepareGradeTimeRulesPersistence } from './gradeTimeRulesPersistence.js'
 
 const SCHEMA_VERSION = '1.1.0'
 
@@ -67,6 +69,7 @@ export function buildExportPayload() {
       classExceptions: cloneDeep(store.schoolInfo.classExceptions) || [],
       classroomLimits,
       subjectClassroomGrades: cloneDeep(store.schoolInfo.subjectClassroomGrades) || {},
+      gradeTimeRulesSettings: cloneDeep(store.schoolInfo.gradeTimeRulesSettings || createDefaultGradeTimeRulesSettings()),
     },
     standardDomainSettings: store.standardDomainSettings.map((s) => ({
       id: s.id,
@@ -75,7 +78,12 @@ export function buildExportPayload() {
       periods: { ...s.periods },
       defaultTeacher: s.defaultTeacher || 'homeroom',
     })),
-    aiSettings: cloneDeep(store.aiSettings) || { ...DEFAULT_AI_SETTINGS },
+    aiSettings: (() => {
+      const cleaned = cloneDeep(store.aiSettings) || { ...DEFAULT_AI_SETTINGS }
+      delete cleaned.coPlanningSettings
+      delete cleaned.__schoolInfoCoPlanningSettings
+      return cleaned
+    })(),
     // 🔒 完整匯出教師資料（包含志願序、專長、不可用時段等）
     teachers: store.teachers.map((t) => ({
       name: t.name,
@@ -131,11 +139,17 @@ export function parseImportFile(text) {
     throw new Error('缺少 schemaVersion，非有效設定備份檔')
   }
 
+  const prepared = prepareGradeTimeRulesPersistence({
+    gradeTimeRulesSettings: payload.schoolInfo?.gradeTimeRulesSettings,
+    schoolInfo: payload.schoolInfo,
+    aiSettings: payload.aiSettings,
+  })
+
   // Normalize with defaults for missing fields
   return {
-    schoolInfo: normalizeSchoolInfo(payload.schoolInfo),
+    schoolInfo: normalizeSchoolInfo(payload.schoolInfo, prepared.gradeTimeRulesSettings),
     standardDomainSettings: payload.standardDomainSettings || [],
-    aiSettings: normalizeAiSettings(payload.aiSettings),
+    aiSettings: normalizeAiSettings(prepared.cleanedAiSettings),
     teachers: Array.isArray(payload.teachers) ? payload.teachers : [],
     // 🔒 解析班級資料
     classes: Array.isArray(payload.classes) ? payload.classes : [],
@@ -155,6 +169,8 @@ export function applyImport(data) {
   store.schoolInfo.classExceptions = data.schoolInfo.classExceptions
   store.schoolInfo.classroomLimits = data.schoolInfo.classroomLimits
   store.schoolInfo.subjectClassroomGrades = data.schoolInfo.subjectClassroomGrades || {}
+  store.schoolInfo.gradeTimeRulesSettings = cloneDeep(data.schoolInfo.gradeTimeRulesSettings || createDefaultGradeTimeRulesSettings())
+  delete store.schoolInfo.coPlanningSettings
 
   // --- standardDomainSettings ---
   if (data.standardDomainSettings.length > 0) {
@@ -259,9 +275,9 @@ function normalizeGradeSettings(gs) {
   return result
 }
 
-function normalizeSchoolInfo(si) {
-  if (!si || typeof si !== 'object') return buildDefaultSchoolInfo()
-  return {
+function normalizeSchoolInfo(si, gradeTimeRulesSettings) {
+  if (!si || typeof si !== 'object') return buildDefaultSchoolInfo(gradeTimeRulesSettings)
+  const base = {
     academic_year: Number(si.academic_year) || 0,
     semester: ['上學期', '下學期'].includes(si.semester) ? si.semester : '上學期',
     gradeSettings: normalizeGradeSettings(si.gradeSettings),
@@ -269,10 +285,13 @@ function normalizeSchoolInfo(si) {
     classExceptions: cloneDeep(si.classExceptions) || [],
     classroomLimits: normalizeClassroomLimits(si.classroomLimits),
     subjectClassroomGrades: cloneDeep(si.subjectClassroomGrades) || {},
+    gradeTimeRulesSettings: gradeTimeRulesSettings || createDefaultGradeTimeRulesSettings(),
   }
+  delete base.coPlanningSettings
+  return base
 }
 
-function buildDefaultSchoolInfo() {
+function buildDefaultSchoolInfo(gradeTimeRulesSettings) {
   return {
     academic_year: 0,
     semester: '上學期',
@@ -281,6 +300,7 @@ function buildDefaultSchoolInfo() {
     classExceptions: [],
     classroomLimits: { ...DEFAULT_CLASSROOM_LIMITS },
     subjectClassroomGrades: {},
+    gradeTimeRulesSettings: gradeTimeRulesSettings || createDefaultGradeTimeRulesSettings(),
   }
 }
 
@@ -296,12 +316,10 @@ function normalizeClassroomLimits(cl) {
 
 function normalizeAiSettings(ai) {
   const defaults = { ...DEFAULT_AI_SETTINGS }
-  if (!ai || typeof ai !== 'object') return defaults
-  return {
-    ...defaults,
-    ...ai,
-    grade12AfternoonOff: true,
-  }
+  const cleaned = !ai || typeof ai !== 'object' ? defaults : { ...defaults, ...ai, grade12AfternoonOff: true }
+  delete cleaned.coPlanningSettings
+  delete cleaned.__schoolInfoCoPlanningSettings
+  return cleaned
 }
 
 function cloneDeep(v) {

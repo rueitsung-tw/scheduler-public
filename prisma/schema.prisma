@@ -101,6 +101,8 @@ model SystemSetting {
   subjectClassroomGrades String @default("{}")
   // [Phase 1] 新增：科目可排年級規則 — 控制哪些科目可以排在哪些年級
   subjectGradeRules String @default("{}")
+  // [Grade Time Rules] 新增：年級時段規則設定（JSON 字串）
+  gradeTimeRulesSettings String @default("{}")
 }
 
 // 8. 管理員使用者 (Setup Wizard 專用)

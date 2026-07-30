@@ -29,9 +29,15 @@ import {
     validateCandidatePoolConsistency,
 } from './src/services/aiTuningResponseValidation.js';
 import {
-    buildPersistedAiSettings,
-    extractPersistedScheduleSettings,
-} from './src/utils/coPlanningPersistence.js';
+    prepareGradeTimeRulesPersistence,
+    parseGradeTimeRulesSettings,
+    resolveGradeTimeRulesServerLoad,
+    cleanLegacyCoPlanningKeys,
+} from './src/utils/gradeTimeRulesPersistence.js';
+import {
+    normalizeGradeTimeRulesSettings,
+    createDefaultGradeTimeRulesSettings,
+} from './src/utils/gradeTimeRules.js';
 
 /**
  * Runtime contract:
@@ -247,7 +253,9 @@ function spawnPython(scriptName, args = [], label = 'Python Script') {
 
 // 👇 使用 Adapter 來初始化 Prisma
 
-const adapter = new PrismaBetterSqlite3({ url: 'file:./dev.db' });
+const adapter = new PrismaBetterSqlite3({
+    url: process.env.DATABASE_URL || 'file:./dev.db',
+});
 const prisma = new PrismaClient({ adapter });
 
 const __filename = fileURLToPath(import.meta.url);
@@ -288,10 +296,23 @@ app.patch('/api/teachers/:name', async (req, res) => {
 app.post('/api/save-all', async (req, res) => {
     try {
         const { teachers, classes, schoolInfo, specialCourses, classrooms, aiSettings } = req.body;
-        const persistedAiSettings = buildPersistedAiSettings(aiSettings, schoolInfo);
 
         if (!teachers || !classes) {
             return res.status(400).json({ error: '缺少必要資料 (teachers 或 classes)' });
+        }
+
+        const prepared = prepareGradeTimeRulesPersistence({
+            gradeTimeRulesSettings: schoolInfo?.gradeTimeRulesSettings,
+            schoolInfo,
+            aiSettings,
+        });
+
+        const blockingIssue = (prepared.migrationIssues || []).find(i => i.severity === 'blocking');
+        if (blockingIssue) {
+            return res.status(400).json({
+                error: 'GRADE_TIME_RULE_MIGRATION_FAILED',
+                issues: prepared.migrationIssues
+            });
         }
 
         // 1. 老師資料儲存 (加上數字防呆)
@@ -440,7 +461,8 @@ app.post('/api/save-all', async (req, res) => {
                      alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
                      standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
                      class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
-                    ai_settings: JSON.stringify(persistedAiSettings),
+                     ai_settings: JSON.stringify(prepared.cleanedAiSettings),
+                     gradeTimeRulesSettings: JSON.stringify(prepared.gradeTimeRulesSettings),
                      classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
                      subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
                      subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
@@ -455,7 +477,8 @@ app.post('/api/save-all', async (req, res) => {
                      alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
                      standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
                      class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
-                    ai_settings: JSON.stringify(persistedAiSettings),
+                     ai_settings: JSON.stringify(prepared.cleanedAiSettings),
+                     gradeTimeRulesSettings: JSON.stringify(prepared.gradeTimeRulesSettings),
                      classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
                      subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
                      subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
@@ -563,7 +586,22 @@ app.get('/api/schedule', async (req, res) => {
         const persistedAiSettings = systemSetting?.ai_settings
             ? JSON.parse(systemSetting.ai_settings || '{}')
             : {};
-        const { aiSettings: publicAiSettings, coPlanningSettings } = extractPersistedScheduleSettings(persistedAiSettings);
+        const publicAiSettings = cleanLegacyCoPlanningKeys(persistedAiSettings);
+        const resolved = resolveGradeTimeRulesServerLoad({
+            gradeTimeRulesSettings: systemSetting?.gradeTimeRulesSettings,
+            aiSettings: persistedAiSettings,
+        });
+        const gradeTimeRulesSettings = resolved.gradeTimeRulesSettings;
+
+        if (resolved.source === 'migrated_legacy' && systemSetting) {
+            await prisma.systemSetting.update({
+                where: { id: systemSetting.id },
+                data: {
+                    gradeTimeRulesSettings: JSON.stringify(resolved.gradeTimeRulesSettings),
+                    ai_settings: JSON.stringify(publicAiSettings),
+                },
+            });
+        }
 
         // 將資料庫格式還原回前端需要的 JSON 格式
         res.json({
@@ -575,7 +613,7 @@ app.get('/api/schedule', async (req, res) => {
                 periodDefaults: JSON.parse(systemSetting.period_defaults || '{}'),
                 alternativeMatrix: JSON.parse(systemSetting.alternative_matrix || '{}'),
                 classExceptions: JSON.parse(systemSetting.class_exceptions || '[]'),
-                coPlanningSettings: coPlanningSettings || undefined,
+                gradeTimeRulesSettings,
                 classroomLimits: {
                     ...DEFAULT_CLASSROOM_LIMITS,
                     ...JSON.parse(systemSetting.classroom_limits || '{}')

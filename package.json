@@ -14,6 +14,8 @@
     "docs:quality": "node scripts/hooks/run-docs-quality.mjs --write",
     "hooks:install": "node scripts/hooks/install-hooks.mjs",
     "hooks:pre-commit": "node scripts/hooks/pre-commit.mjs",
+    "hooks:cline:test": "vitest run tests/clineHarnessProtocol.test.js tests/clineHarnessState.test.js tests/clineHarnessPolicy.test.js tests/clineHarnessGates.test.js tests/clineHarnessLifecycle.test.js tests/clineHarnessPerformance.test.js tests/clineHarnessDocs.test.js",
+    "hooks:cline:benchmark": "node scripts/hooks/benchmark-cline-harness.mjs",
     "lint": "run-s lint:*",
     "lint:oxlint": "oxlint . --fix",
     "lint:eslint": "eslint . --fix --cache",

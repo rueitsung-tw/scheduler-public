@@ -3,7 +3,10 @@ import { ref, computed } from 'vue'
 import { computeExpectedClassNames, computeClassDiff, checkClassHasData, createMinimalClass } from '../composables/useClassSync'
 import { buildScheduleAiReport, flattenClassTimetablesToEntries } from '../utils/scheduleAiReport'
 import { sanitizeRequirementsByGrade } from '../utils/gradeSubjectUtils'
-import { normalizeCoPlanningSettings } from '../utils/coPlanningSettings'
+import {
+  createDefaultGradeTimeRulesSettings,
+  normalizeGradeTimeRulesSettings,
+} from '../utils/gradeTimeRules'
 
 export const useScheduleStore = defineStore('simpleSchedule', () => {
 
@@ -171,15 +174,19 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       '科技-資訊': [3, 4, 5, 6],
       '語文-英語': [1, 2, 3, 4, 5, 6]
     },
-    // 🆕 [2026-06-28] 五六年級共備設定
-    coPlanningSettings: {
-      enabled: false,
-      grades: [5, 6],
-      mode: "auto",
-      candidateBlocks: [],
-      manualBlocks: { "5": null, "6": null }
-    }
+    gradeTimeRulesSettings: createDefaultGradeTimeRulesSettings(),
   });
+
+  // 🛡️ UI-only transient state for Grade-Time rules warning confirmation
+  const gradeTimeRuleWarningConfirmed = ref(false);
+
+  const resetGradeTimeRuleWarningConfirmation = () => {
+    gradeTimeRuleWarningConfirmed.value = false;
+  };
+
+  const updateGradeTimeRuleWarningConfirmed = (val) => {
+    gradeTimeRuleWarningConfirmed.value = Boolean(val);
+  };
 
   const teachers = ref([]);
   const classes = ref([]);
@@ -533,7 +540,10 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     return subj ? subj.color : '#e2e8f0';
   };
 
-  const markScheduleDirty = () => { syncStatus.value = 'unsaved'; };
+  const markScheduleDirty = () => {
+    syncStatus.value = 'unsaved';
+    resetGradeTimeRuleWarningConfirmation();
+  };
 
   const setMovableLocksEnabled = (enabled) => {
     movableLocksPolicy.value.movableLocksEnabled = Boolean(enabled);
@@ -627,12 +637,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         }
       }
 
-      // [2026-06-28] Normalize coPlanningSettings from DB using central normalizer
       if (data.schoolInfo) {
-        // Preserve the current in-memory value as a fallback so a missing DB key
-        // does not silently flip the UI toggle back to disabled.
-        schoolInfo.value.coPlanningSettings = normalizeCoPlanningSettings(
-          data.schoolInfo.coPlanningSettings ?? schoolInfo.value.coPlanningSettings
+        schoolInfo.value.gradeTimeRulesSettings = normalizeGradeTimeRulesSettings(
+          data.schoolInfo.gradeTimeRulesSettings
         );
       }
 
@@ -953,14 +960,19 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       };
     });
 
-    const normalizedCoPlanningSettings = normalizeCoPlanningSettings(schoolInfo.value.coPlanningSettings);
+    const cleanSchoolInfoPayload = { ...schoolInfo.value };
+    cleanSchoolInfoPayload.gradeTimeRulesSettings = normalizeGradeTimeRulesSettings(
+      schoolInfo.value.gradeTimeRulesSettings
+    );
+
     const payload = {
-      schoolInfo: {
-        ...schoolInfo.value,
-        coPlanningSettings: normalizedCoPlanningSettings,
-      },
-      teachers: teachers.value, classes: classesWithGrade, specialCourses: specialCourses.value, classrooms: classrooms.value, standardDomainSettings: standardDomainSettings.value,
-      aiSettings: aiSettings.value
+      schoolInfo: cleanSchoolInfoPayload,
+      teachers: teachers.value,
+      classes: classesWithGrade,
+      specialCourses: specialCourses.value,
+      classrooms: classrooms.value,
+      standardDomainSettings: standardDomainSettings.value,
+      aiSettings: aiSettings.value,
     };
 
     try {
@@ -1564,6 +1576,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     // 停止舊輪詢
     stopPolling();
     clearActiveJob();
+    resetGradeTimeRuleWarningConfirmation();
 
     engineStatus.value = 'PROCESSING';
     engineErrorMessage.value = '';
@@ -1725,8 +1738,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         '科技-資訊': [3, 4, 5, 6],
         '語文-英語': [1, 2, 3, 4, 5, 6]
       },
-      // [2026-06-28] Use normalizer to guarantee consistent coPlanningSettings shape
-      coPlanningSettings: normalizeCoPlanningSettings(null),
+      gradeTimeRulesSettings: createDefaultGradeTimeRulesSettings(),
     };
     teachers.value = [];
     classes.value = [];
@@ -1843,6 +1855,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     rejectMovableLockMove,
     resetMovableLockMoveDecision,
     resetMovableLockReviewDecisions,
-    syncMovableLockDecisionsWithResult,
+    // 🆕 年級時段規則風險確認重設接點
+    gradeTimeRuleWarningConfirmed,
+    resetGradeTimeRuleWarningConfirmation,
+    updateGradeTimeRuleWarningConfirmed,
   }
 });

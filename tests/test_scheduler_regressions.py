@@ -14,13 +14,11 @@ from constraints.class_rules import (
     apply_special_classroom_capacity,
     apply_week_specific_art_capacity_entries,
     build_grade_morning_first_period_homeroom_penalty,
-    build_co_planning_afternoon_block_penalty,
-    build_co_planning_subject_lesson_penalty,
 )
 from constraints.utils import grade_needs_special_room
 from constraints.teacher_rules import apply_alternating_teacher_anti_collision, apply_anti_collision
 from phase2_engine import SchedulePhase2Engine
-from preprocessor import preprocess_classes
+from preprocessor import build_effective_grade_rules, preprocess_classes
 from repair_agent import RepairAgent
 import solver as solver_module
 
@@ -41,6 +39,78 @@ class SchedulerRegressionTests(unittest.TestCase):
                 {"自然科學": [3, 4, 5, 6]},
             )
         )
+
+    def test_preprocess_classes_retains_grade_5_6_social_studies_when_standard_domain_settings_is_partial(self):
+        classes = [
+            {
+                "name": "5年1班",
+                "grade": 5,
+                "homeroom_teacher": "導師A",
+                "course_requirements": [
+                    {
+                        "subject": "社會",
+                        "periods": 3,
+                        "teacher_name": "社會老師A",
+                        "teacher": "社會老師A",
+                        "defaultTeacher": "subject",
+                    }
+                ],
+            },
+            {
+                "name": "6年1班",
+                "grade": 6,
+                "homeroom_teacher": "導師B",
+                "course_requirements": [
+                    {
+                        "subject": "社會",
+                        "periods": 3,
+                        "teacher_name": "社會老師B",
+                        "teacher": "社會老師B",
+                        "defaultTeacher": "subject",
+                    }
+                ],
+            },
+        ]
+
+        standard_domain_settings = [
+            {
+                "domain": "社會",
+                "subject": "社會",
+                "periods": {
+                    "3": 3,
+                    "4": 3
+                }
+            }
+        ]
+
+        effective_rules = build_effective_grade_rules(
+            standard_domain_settings=standard_domain_settings,
+            subject_grade_rules={},
+        )
+        self.assertEqual(effective_rules["社會"], {3, 4, 5, 6})
+
+        explicit_rules = build_effective_grade_rules(
+            standard_domain_settings=standard_domain_settings,
+            subject_grade_rules={"社會": [3]},
+        )
+        self.assertEqual(explicit_rules["社會"], {3})
+
+        processed_classes, _ = preprocess_classes(
+            classes,
+            ai_settings={},
+            standard_domain_settings=standard_domain_settings,
+            subject_grade_rules={}
+        )
+
+        # Verify 5年1班
+        cls_5 = next(c for c in processed_classes if c["name"] == "5年1班")
+        self.assertEqual(len(cls_5["course_requirements"]), 1)
+        self.assertEqual(cls_5["course_requirements"][0]["subject"], "社會")
+
+        # Verify 6年1班
+        cls_6 = next(c for c in processed_classes if c["name"] == "6年1班")
+        self.assertEqual(len(cls_6["course_requirements"]), 1)
+        self.assertEqual(cls_6["course_requirements"][0]["subject"], "社會")
 
     def test_grade_needs_special_room_returns_false_when_unconfigured(self):
         """New policy: only subjects explicitly in subjectClassroomGrades need special rooms.
@@ -824,82 +894,6 @@ class SchedulerRegressionTests(unittest.TestCase):
         self.assertEqual(status, cp_model.OPTIMAL)
         self.assertEqual(len(penalties), 1)
         self.assertEqual(solver.Value(penalties[0]["var"]), 0)
-
-    def test_co_planning_penalizes_selected_slots_without_subject_teacher_lesson(self):
-        model = cp_model.CpModel()
-        selected = model.NewBoolVar("selected_co_plan")
-        non_subject = model.NewBoolVar("activity")
-        schedule = {
-            ("5年1班", 18, "導師A", "社團活動"): non_subject,
-        }
-        classes_data = [
-            {
-                "name": "5年1班",
-                "grade": 5,
-                "course_requirements": [
-                    {"subject": "社團活動", "defaultTeacher": "none"},
-                    {"subject": "自然科學", "defaultTeacher": "subject"},
-                ],
-            },
-        ]
-
-        penalties = build_co_planning_subject_lesson_penalty(
-            model,
-            schedule,
-            classes_data,
-            indicator_map={(5, 3, 5): selected},
-        )
-        model.Add(selected == 1)
-        model.Add(non_subject == 1)
-
-        solver = cp_model.CpSolver()
-        status = solver.Solve(model)
-
-        self.assertEqual(status, cp_model.OPTIMAL)
-        self.assertTrue(penalties)
-        self.assertGreater(sum(solver.Value(item["var"]) for item in penalties), 0)
-
-    def test_co_planning_block_penalty_reports_when_no_candidate_block_is_fully_subject_teacher(self):
-        model = cp_model.CpModel()
-        non_subject = model.NewBoolVar("activity")
-        schedule = {
-            ("5年1班", 18, "導師A", "社團活動"): non_subject,
-        }
-        classes_data = [
-            {
-                "name": "5年1班",
-                "grade": 5,
-                "course_requirements": [
-                    {"subject": "社團活動", "defaultTeacher": "none"},
-                    {"subject": "自然科學", "defaultTeacher": "subject"},
-                ],
-            },
-        ]
-
-        penalties, _indicator_map = build_co_planning_afternoon_block_penalty(
-            model,
-            schedule,
-            classes_data,
-            school_info={
-                "coPlanningSettings": {
-                    "enabled": True,
-                    "grades": [5],
-                    "candidateBlocks": [{"day": 3, "startPeriod": 5, "length": 2}],
-                }
-            },
-        )
-        model.Add(non_subject == 1)
-
-        solver = cp_model.CpSolver()
-        status = solver.Solve(model)
-
-        self.assertEqual(status, cp_model.OPTIMAL)
-        grade_penalties = [
-            item for item in penalties
-            if item["rule_id"] == "grade_co_planning_afternoon_block"
-        ]
-        self.assertTrue(grade_penalties)
-        self.assertGreater(sum(solver.Value(item["var"]) for item in grade_penalties), 0)
 
     def test_standard_domain_settings_drive_backend_grade_filter(self):
         classes = [

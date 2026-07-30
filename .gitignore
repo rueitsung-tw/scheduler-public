@@ -86,3 +86,6 @@ __pycache__/
 # Python virtual environments
 venv/
 .venv/
+
+# Local Git worktrees
+.worktrees/
