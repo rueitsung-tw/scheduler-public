@@ -359,6 +359,43 @@ def _entry_room_weight(entry):
     return 0.5 if week in ("odd", "even") else 1.0
 
 
+def _entries_match_same_resolved_special_course_event(entries, teacher_name, day, period, resolved_special_courses):
+    for sc in resolved_special_courses or []:
+        sc_teacher = sc.get("teacher") or sc.get("teacher_name")
+        if sc_teacher != teacher_name:
+            continue
+
+        slots = sc.get("lockedSlots") or []
+        if not any(slot.get("day") == day and slot.get("period") == period for slot in slots):
+            continue
+
+        target_classes = set(sc.get("targetClasses") or [])
+        target_subject = sc.get("targetSubject") or sc.get("subject")
+        effective_subjects = sc.get("_effective_subjects") or {}
+        if not target_classes or not target_subject:
+            continue
+
+        all_entries_match = True
+        for entry in entries:
+            class_name = entry.get("className")
+            if class_name not in target_classes:
+                all_entries_match = False
+                break
+
+            allowed_subjects = {target_subject}
+            effective_subject = effective_subjects.get(class_name)
+            if effective_subject:
+                allowed_subjects.add(effective_subject)
+            if entry.get("subject") not in allowed_subjects:
+                all_entries_match = False
+                break
+
+        if all_entries_match:
+            return True
+
+    return False
+
+
 def _configured_special_room_subjects(classrooms, classroom_limits, school_info, fallback_limits):
     subjects = set()
 
@@ -504,6 +541,14 @@ def _validate_schedule_result(
 
     for (teacher_name, day, period, week), entries in teacher_slots.items():
         if len(entries) <= 1:
+            continue
+        if _entries_match_same_resolved_special_course_event(
+            entries,
+            teacher_name,
+            day,
+            period,
+            resolved_special_courses,
+        ):
             continue
         if (ai_settings or {}).get("artsClassEnabled", False) and is_virtual_teacher(teacher_name):
             if all(class_map.get(e.get("className"), {}).get("isArtsClass", False) for e in entries):
@@ -1765,7 +1810,18 @@ def main():
         # Phase 2: 教師維度約束
         # ============================================================
         print("[CONSTRAINT] [核心約束] 加入教師衝堂防護...")
-        apply_anti_collision(model, schedule, class_names, teacher_names, classes_data, ai_settings)
+        model.special_courses = special_courses
+        model.preprocess_metadata = data.get("preprocessMetadata")
+        apply_anti_collision(
+            model,
+            schedule,
+            class_names,
+            teacher_names,
+            classes_data,
+            ai_settings,
+            special_courses=special_courses,
+            preprocess_metadata=data.get("preprocessMetadata"),
+        )
 
         print("[CONSTRAINT] [核心約束] 加入交替課單雙週教師衝堂防護...")
         apply_alternating_teacher_anti_collision(
@@ -1775,6 +1831,8 @@ def main():
             alternating_class_is_music_odd,
             classes_data=classes_data,
             ai_settings=ai_settings,
+            special_courses=special_courses,
+            preprocess_metadata=data.get("preprocessMetadata"),
         )
 
         print("[CONSTRAINT] [核心約束] 加入教師配額限制...")
@@ -2627,6 +2685,7 @@ def main():
                         "className": dec["className"],
                         "subject": dec["subject"],
                         "type": dec["lockType"],
+                        "specialCourseType": dec.get("specialCourseType", ""),
                         "originalPeriod": {"day": (orig_p // PERIODS_PER_DAY) + 1, "period": (orig_p % PERIODS_PER_DAY) + 1},
                         "newPeriod": {"day": (new_p // PERIODS_PER_DAY) + 1, "period": (new_p % PERIODS_PER_DAY) + 1}
                     })

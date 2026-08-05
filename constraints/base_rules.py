@@ -15,7 +15,7 @@ base_rules.py — 排課系統基礎建模規則
 import terminal_sanitizer
 import re
 from config import DAYS, PERIODS_PER_DAY, TOTAL_PERIODS
-from constraints.movable_locks import is_manual_lock_movable, get_candidate_periods, apply_movable_lock
+from constraints.movable_locks import is_manual_lock_movable, is_cell_per_cell_movable, get_candidate_periods, apply_movable_lock
 
 
 def create_schedule_vars_and_course_demands(model, classes_data, schedule):
@@ -260,7 +260,7 @@ def apply_preallocation_locks(model, classes_data, schedule, movable_locks_polic
     return len(locked_vars), locked_vars, lock_audit_log
 
 
-def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
+def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy=None, cell=None):
     """
     處理單個 locked cell。內部輔助函式。
     """
@@ -289,8 +289,9 @@ def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule,
     lock_audit_log.append(audit_entry)
 
     if match_vars:
-        if is_manual_lock_movable(lock_subj, movable_locks_policy):
-            candidates = get_candidate_periods(abs_p, movable_locks_policy)
+        if is_manual_lock_movable(lock_subj, movable_locks_policy, cell=cell):
+            must_cross_noon = is_cell_per_cell_movable(cell)
+            candidates = get_candidate_periods(abs_p, movable_locks_policy, must_cross_noon=must_cross_noon)
             def var_getter(p):
                 return schedule.get((current_c_name, p, lock_teach, lock_subj))
             
@@ -327,7 +328,7 @@ def _process_array_timetable(model, current_c_name, raw_timetable, schedule, loc
                 abs_p = day_idx * PERIODS_PER_DAY + period_idx
                 if abs_p >= TOTAL_PERIODS:
                     continue
-                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy)
+                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy, cell=cell)
 
 def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
     """處理 Object 格式的 timetable: timetable[dayKey][periodKey]"""
@@ -355,7 +356,7 @@ def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock
                 abs_p = day_idx * PERIODS_PER_DAY + period_idx
                 if abs_p >= TOTAL_PERIODS:
                     continue
-                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy)
+                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy, cell=cell)
 
 
 def _count_valid_locks(lock_audit_log):

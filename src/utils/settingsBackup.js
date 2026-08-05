@@ -21,6 +21,15 @@ const DEFAULT_AI_SETTINGS = {
   enableSpecialRoomLimit: true,
 }
 
+const SEMESTER_SETTINGS_AI_TOGGLE_KEYS = [
+  'naturalConsecutive',
+  'swimmingCapEnabled',
+  'artsClassEnabled',
+  'grade12TuesdayAfternoonHomeroom',
+  'homeroomBlockizationEnabled',
+]
+const SEMESTER_SETTINGS_AI_OBJECT_KEYS = ['qualityRules']
+
 // Canonical subject keys for classroom normalization (mirrors store's normalizeRoomSubject)
 const CANONICAL_SUBJECT_MAP = {
   '英語': '語文-英語',
@@ -52,6 +61,7 @@ export function buildExportPayload() {
   return {
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
+    nativeLanguagePreallocation: store.nativeLanguagePreallocation ?? null,
     // 🆕 匯出專科教室資料
     classrooms: (store.classrooms || []).map((r) => ({
       id: r.id,
@@ -155,6 +165,8 @@ export function parseImportFile(text) {
     classes: Array.isArray(payload.classes) ? payload.classes : [],
     // 🆕 解析專科教室資料（舊版備份可能沒有，預設空陣列）
     classrooms: Array.isArray(payload.classrooms) ? payload.classrooms : [],
+    // 🆕 解析本土語預排 metadata（舊版備份缺少時預設 null）
+    nativeLanguagePreallocation: payload.nativeLanguagePreallocation ?? null,
   }
 }
 
@@ -262,7 +274,84 @@ export function applyImport(data) {
   }
   // 舊版備份沒有 classrooms 時，不觸發任何操作，保留現有教室資料
 
+  // 🆕 還原本土語預排 metadata
+  store.nativeLanguagePreallocation = cloneDeep(data.nativeLanguagePreallocation ?? null)
+
   store.markScheduleDirty()
+}
+
+export function previewSemesterSettingsImport(data) {
+  const store = useScheduleStore()
+  const importedNames = new Set(
+    (data.classrooms || []).map((room) => String(room.name || '').trim()),
+  )
+  const currentNames = new Set(
+    (store.classrooms || []).map((room) => String(room.name || '').trim()),
+  )
+  return {
+    classrooms: {
+      added: [...importedNames].filter((name) => name && !currentNames.has(name)).length,
+      overwritten: [...importedNames].filter((name) => name && currentNames.has(name)).length,
+      removed: [...currentNames].filter((name) => name && !importedNames.has(name)).length,
+    },
+    available: {},
+  }
+}
+
+export function applySemesterSettingsImport(data) {
+  const store = useScheduleStore()
+  const summary = previewSemesterSettingsImport(data)
+
+  if (data.schoolInfo) {
+    if (data.schoolInfo.alternativeMatrix) {
+      store.schoolInfo.alternativeMatrix = cloneDeep(data.schoolInfo.alternativeMatrix)
+    }
+    if (data.schoolInfo.classroomLimits) {
+      store.schoolInfo.classroomLimits = cloneDeep(data.schoolInfo.classroomLimits)
+    }
+    if (data.schoolInfo.subjectClassroomGrades) {
+      store.schoolInfo.subjectClassroomGrades = cloneDeep(data.schoolInfo.subjectClassroomGrades)
+    }
+  }
+
+  if (Array.isArray(data.standardDomainSettings)) {
+    store.standardDomainSettings = cloneDeep(data.standardDomainSettings)
+  }
+
+  if (data.aiSettings) {
+    SEMESTER_SETTINGS_AI_TOGGLE_KEYS.forEach((key) => {
+      if (key in data.aiSettings) {
+        store.aiSettings[key] = data.aiSettings[key]
+      }
+    })
+    SEMESTER_SETTINGS_AI_OBJECT_KEYS.forEach((key) => {
+      if (key in data.aiSettings) {
+        store.aiSettings[key] = cloneDeep(data.aiSettings[key])
+      }
+    })
+  }
+
+  if (Array.isArray(data.classrooms) && data.classrooms.length > 0) {
+    const currentRooms = store.classrooms || []
+    const reconstructed = data.classrooms.map((room) => {
+      const trimmedName = String(room.name || '').trim()
+      const existingMatch = currentRooms.find((cr) => String(cr.name || '').trim() === trimmedName)
+      return {
+        id: existingMatch ? existingMatch.id : (room.id || `cr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+        name: room.name || '未命名教室',
+        subject: normalizeClassroomSubject(room.subject),
+        primaryTeacher: '',
+        allowSharing: room.allowSharing !== undefined ? room.allowSharing : true,
+        gradePreferences: Array.isArray(room.gradePreferences)
+          ? room.gradePreferences.map((g) => Number(g) > 0 ? Number(g) : 0).filter((g) => g > 0)
+          : [],
+      }
+    })
+    store.classrooms.splice(0, store.classrooms.length, ...reconstructed)
+  }
+
+  store.markScheduleDirty()
+  return summary
 }
 
 /* ── Private helpers ── */

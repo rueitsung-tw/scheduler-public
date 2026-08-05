@@ -1,12 +1,13 @@
 <template>
   <div class="settings-page">
     <div class="ai-settings-container">
-      <h2>AI 連線設定</h2>
-      <p class="desc">
-        這裡可以切換你要連線的本地 LLM 服務，並針對不同服務自動套用對應的端點與測試方式。
-      </p>
+      <h2>⚙️ 系統功能設定</h2>
 
       <div class="settings-card">
+        <h3>AI 連線設定</h3>
+        <p class="desc">
+          這裡可以切換你要連線的本地 LLM 服務，並針對不同服務自動套用對應的端點與測試方式。
+        </p>
         <div class="form-group toggle-group">
           <label class="switch">
             <input type="checkbox" v-model="aiStore.enabled" />
@@ -125,6 +126,137 @@
 
           <div v-if="testResult" :class="['test-result', testStatus]">
             {{ testResult }}
+          </div>
+        </div>
+      </div>
+
+      <!-- 🆕 預排課表匯入區塊 -->
+      <div class="settings-card preallocation-import-card" style="margin-top: 24px;">
+        <h3>預排課表匯入</h3>
+        <p class="desc">
+          匯入外部預排課表（目前優先支援 native-language-scheduler 的 <code>native-language-exchange.json</code>）。匯入前進行班級、教師與時段對照與衝突診斷，請完成衝突決議後套用。
+        </p>
+
+        <div class="file-upload-row">
+          <input
+            type="file"
+            accept=".json,application/json,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ref="preallocationFileInput"
+            @change="handlePreallocationFileUpload"
+            style="display: none;"
+          />
+          <button @click="$refs.preallocationFileInput.click()" class="test-btn file-select-btn" type="button">
+            📂 選擇預排課表檔 (.json / .xlsx)
+          </button>
+          <button @click="handleDownloadExcelTemplate" class="test-btn template-download-btn" type="button" style="margin-left: 8px;">
+            📥 下載 Excel 範例檔
+          </button>
+          <span v-if="importFileName" class="file-name-text" style="margin-left: 8px;">已選擇：{{ importFileName }}</span>
+        </div>
+
+        <div v-if="importError" class="test-result error" style="margin-top: 12px;">
+          ❌ {{ importError }}
+        </div>
+
+        <div v-if="preallocationPlan" class="preallocation-preview-section">
+          <div class="summary-info-bar">
+            <span>來源：<strong>{{ preallocationPlan.source?.sourceKind === 'excel-template' ? 'Excel 範例格式' : 'JSON 預排匯入' }}</strong></span>
+            <span>預排項目總計：<strong>{{ preallocationPlan.summary.imported }}</strong> 筆</span>
+            <span>強鎖：<strong>{{ preallocationPlan.summary.hardLocked }}</strong> 節</span>
+            <span>可微調：<strong>{{ preallocationPlan.summary.movable }}</strong> 節</span>
+            <span>其他母語綁定保護：<strong>{{ preallocationPlan.summary.protectedByPullout }}</strong> 節</span>
+            <span :class="{ 'warning-text': preallocationPlan.summary.conflicts > 0 }">
+              衝突班級數：<strong>{{ preallocationPlan.classPlans.filter(p => p.conflicts.length > 0).length }}</strong> 班
+            </span>
+          </div>
+
+          <div v-for="classPlan in preallocationPlan.classPlans" :key="classPlan.className" class="class-plan-card">
+            <div class="class-plan-header">
+              <span class="class-title">🏫 {{ classPlan.className }}</span>
+              <span v-if="classPlan.conflicts.length > 0" class="conflict-badge">
+                ⚠️ {{ classPlan.conflicts.length }} 項衝突
+              </span>
+              <span v-else class="success-badge">
+                ✅ 無衝突
+              </span>
+            </div>
+
+            <table class="conflict-detail-table">
+              <thead>
+                <tr>
+                  <th>科目</th>
+                  <th>原有教師 → 匯入教師</th>
+                  <th>原有時段內容 → 匯入時段</th>
+                  <th>人工鎖定</th>
+                  <th>微調 / 保護</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="entry in classPlan.importedEntries" :key="entry.id">
+                  <td>{{ entry.subject }}</td>
+                  <td>
+                    <span v-if="getTeacherDiff(classPlan.className, entry.subject)" class="diff-text">
+                      {{ getTeacherDiff(classPlan.className, entry.subject).original }} → <strong>{{ entry.teacher }}</strong>
+                    </span>
+                    <span v-else>{{ entry.teacher }}</span>
+                  </td>
+                  <td>
+                    <span>週{{ ['一','二','三','四','五'][entry.originalSlot.day - 1] || entry.originalSlot.day }} 第{{ entry.originalSlot.period }}節</span>
+                  </td>
+                  <td>
+                    <span v-if="entry.sourceLocked || entry.protectedByPullout">🔒 強鎖</span>
+                    <span v-else>解鎖</span>
+                  </td>
+                  <td>
+                    <span v-if="entry.protectedByPullout" class="tag-protected">
+                      其他母語綁定保護 (強制強鎖)
+                    </span>
+                    <label v-else-if="!entry.sourceLocked" class="inline-checkbox">
+                      <input
+                        type="checkbox"
+                        :checked="entry.lockMode === 'movable'"
+                        @change="toggleEntryMovable(entry.id, $event.target.checked)"
+                      />
+                      <span>允許微調</span>
+                    </label>
+                    <span v-else>來源強鎖</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div v-if="classPlan.conflicts.length > 0" class="resolution-choice-box">
+              <div class="choice-title">🚨 衝突決議選項 (此班必須選擇一項方可匯入)：</div>
+              <label class="choice-option">
+                <input
+                  type="radio"
+                  :name="`resolution_${classPlan.className}`"
+                  value="overwrite_imported_fields"
+                  v-model="classPlan.resolution"
+                />
+                <span><strong>以匯入資料複寫此班衝突欄位</strong> (僅更新匯入明示的該班科目教師與衝突時段)</span>
+              </label>
+              <label class="choice-option">
+                <input
+                  type="radio"
+                  :name="`resolution_${classPlan.className}`"
+                  value="keep_existing_skip_import"
+                  v-model="classPlan.resolution"
+                />
+                <span><strong>維持此班既有資料，跳過匯入</strong> (保留該班所有既有課表與教師指派)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="apply-actions" style="margin-top: 20px;">
+            <button
+              @click="confirmApplyPreallocationImport"
+              class="main-save-btn apply-import-btn"
+              :disabled="!canApplyPlan"
+              type="button"
+            >
+              {{ canApplyPlan ? '確認套用匯入' : '請先完成所有衝突班級決議' }}
+            </button>
           </div>
         </div>
       </div>
@@ -475,6 +607,13 @@ import { useAiStore } from '../stores/aiSettings'
 import { useScheduleStore } from '../stores/schedule'
 import SlotRuleEditor from '../components/SlotRuleEditor.vue'
 import GradeTimeRuleEditor from '../components/GradeTimeRuleEditor.vue'
+import {
+  parseNativeLanguagePreallocation,
+  buildNativeLanguagePreallocationPlan,
+} from '../utils/nativeLanguagePreallocationImport.js'
+import { parseNativeLanguagePreallocationExcel } from '../utils/nativeLanguagePreallocationExcelImport.js'
+import { downloadNativeLanguagePreallocationExcelTemplate } from '../utils/nativeLanguagePreallocationExcelTemplate.js'
+import { canApplyPreallocationConflictPlan } from '../utils/preallocationConflictResolution.js'
 
 const aiStore = useAiStore()
 const scheduleStore = useScheduleStore()
@@ -794,6 +933,107 @@ async function saveSettings() {
   const ok = await scheduleStore.syncToCloud()
   if (ok) {
     alert('演算法硬約束設定已儲存。')
+  }
+}
+
+// --- 🆕 預排課表匯入邏輯 ---
+const preallocationFileInput = ref(null)
+const rawPreallocationData = ref(null)
+const importFileName = ref('')
+const importError = ref('')
+const movableEntryIds = ref([])
+const preallocationPlan = ref(null)
+
+const handleDownloadExcelTemplate = () => {
+  downloadNativeLanguagePreallocationExcelTemplate()
+}
+
+const handlePreallocationFileUpload = (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  importFileName.value = file.name
+  importError.value = ''
+
+  const lowerName = file.name.toLowerCase()
+  if (lowerName.endsWith('.json')) {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        rawPreallocationData.value = parseNativeLanguagePreallocation(e.target.result)
+        rebuildPlan()
+      } catch (err) {
+        importError.value = err.message || '檔案解析失敗'
+        rawPreallocationData.value = null
+        preallocationPlan.value = null
+      }
+    }
+    reader.readAsText(file)
+  } else if (lowerName.endsWith('.xlsx')) {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        rawPreallocationData.value = parseNativeLanguagePreallocationExcel(e.target.result, {
+          fileName: file.name,
+        })
+        rebuildPlan()
+      } catch (err) {
+        importError.value = err.message || '檔案解析失敗'
+        rawPreallocationData.value = null
+        preallocationPlan.value = null
+      }
+    }
+    reader.readAsArrayBuffer(file)
+  } else {
+    importError.value = '僅支援 native-language-exchange.json 或 Excel 預排課表範例檔（.xlsx）。'
+    rawPreallocationData.value = null
+    preallocationPlan.value = null
+  }
+}
+
+const rebuildPlan = () => {
+  if (!rawPreallocationData.value) return
+  preallocationPlan.value = buildNativeLanguagePreallocationPlan(
+    rawPreallocationData.value,
+    scheduleStore.classes,
+    { movableEntryIds: movableEntryIds.value },
+  )
+}
+
+const toggleEntryMovable = (entryId, isMovable) => {
+  if (isMovable) {
+    if (!movableEntryIds.value.includes(entryId)) {
+      movableEntryIds.value.push(entryId)
+    }
+  } else {
+    movableEntryIds.value = movableEntryIds.value.filter((id) => id !== entryId)
+  }
+  rebuildPlan()
+}
+
+const canApplyPlan = computed(() => {
+  if (!preallocationPlan.value) return false
+  return canApplyPreallocationConflictPlan(preallocationPlan.value)
+})
+
+const getTeacherDiff = (className, subject) => {
+  const cls = (scheduleStore.classes || []).find((c) => c.name === className)
+  if (!cls) return null
+  const req = (cls.course_requirements || []).find(
+    (r) => r.subject === subject || (subject === '語文-本土語' && r.subject === '本土語'),
+  )
+  if (req && req.teacher_name) {
+    return { original: req.teacher_name }
+  }
+  return null
+}
+
+const confirmApplyPreallocationImport = () => {
+  if (!canApplyPlan.value) return
+  try {
+    scheduleStore.applyNativeLanguagePreallocation(preallocationPlan.value)
+    alert('預排課表已成功套用至系統！')
+  } catch (err) {
+    alert(`套用失敗：${err.message}`)
   }
 }
 </script>
@@ -1542,6 +1782,152 @@ input:checked + .slider:before {
 .movable-policy-notice-box ul {
   margin: 0;
   padding-left: 20px;
+}
+
+/* 🆕 預排課表匯入 CSS */
+.preallocation-import-card {
+  margin-top: 24px;
+}
+
+.file-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.file-name-text {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: #334155;
+}
+
+.preallocation-preview-section {
+  margin-top: 20px;
+  border-top: 1px dashed #cbd5e1;
+  padding-top: 20px;
+}
+
+.summary-info-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 18px;
+  font-size: 0.9em;
+  color: #334155;
+  margin-bottom: 20px;
+}
+
+.warning-text {
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.class-plan-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: #ffffff;
+}
+
+.class-plan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.class-title {
+  font-size: 1.05em;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.conflict-badge {
+  background-color: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.success-badge {
+  background-color: #f0fdf4;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.conflict-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 14px;
+  font-size: 0.88em;
+}
+
+.conflict-detail-table th,
+.conflict-detail-table td {
+  border: 1px solid #e2e8f0;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.conflict-detail-table th {
+  background-color: #f1f5f9;
+  color: #475569;
+}
+
+.tag-protected {
+  background-color: #fff7ed;
+  color: #c2410c;
+  border: 1px solid #ffedd5;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.82em;
+  font-weight: 600;
+}
+
+.diff-text {
+  color: #d97706;
+}
+
+.resolution-choice-box {
+  background-color: #fefce8;
+  border: 1px solid #fef08a;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-top: 10px;
+}
+
+.choice-title {
+  font-size: 0.88em;
+  font-weight: 700;
+  color: #854d0e;
+  margin-bottom: 8px;
+}
+
+.choice-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.88em;
+  color: #334155;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+.apply-import-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
 

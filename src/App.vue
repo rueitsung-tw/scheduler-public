@@ -18,7 +18,7 @@
         <router-link to="/export" class="nav-item" v-if="currentUserRole === 'admin'"><span>🖨️</span> 匯出與列印中心</router-link>
         <router-link to="/validation" class="nav-item" v-if="currentUserRole === 'admin'"><span>📊</span> 配課檢核報告</router-link>
         <router-link to="/teacher-board" class="nav-item" v-if="currentUserRole !== 'admin'"><span>👨‍🏫</span> 導師排課台</router-link>
-        <router-link to="/ai-settings" class="nav-item" v-if="currentUserRole === 'admin'"><span>⚙️</span> AI 輔助設定</router-link>
+        <router-link to="/ai-settings" class="nav-item" v-if="currentUserRole === 'admin'"><span>⚙️</span> 系統功能設定</router-link>
 
       </nav>
     </aside>

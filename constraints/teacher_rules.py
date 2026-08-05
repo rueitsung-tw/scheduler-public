@@ -49,12 +49,40 @@ def _teacher_is_collision_exempt(teacher_name, classes_data, ai_settings, schedu
     return all(class_map.get(class_name, {}).get("isArtsClass", False) for class_name in assigned_classes)
 
 
-def apply_anti_collision(model, schedule, class_names, teacher_names, classes_data, ai_settings):
+def _get_special_course_keys(model=None, special_courses=None, classes_data=None, preprocess_metadata=None):
+    sc_list = special_courses or getattr(model, "special_courses", None) or []
+    metadata = preprocess_metadata
+    if metadata is None:
+        metadata = getattr(model, "preprocess_metadata", None)
+    sc_keys = set()
+    for sc in sc_list:
+        t = sc.get("teacher") or sc.get("teacher_name")
+        s = sc.get("targetSubject") or sc.get("subject")
+        if t and s:
+            for c in sc.get("targetClasses") or []:
+                sc_keys.add((c, t, s))
+                effective_s = resolve_effective_special_course_subject(sc, c, metadata)
+                if effective_s:
+                    sc_keys.add((c, t, effective_s))
+
+    return sc_keys
+
+
+def apply_anti_collision(
+    model,
+    schedule,
+    class_names,
+    teacher_names,
+    classes_data,
+    ai_settings,
+    special_courses=None,
+    preprocess_metadata=None,
+):
     """
     [硬約束 2] 衝堂防護
 
     1. 班級同時段不衝突（音樂/美勞視為一組）
-    2. 教師同時段不衝突（2*fixed + alt <= 2 魔法方程式）
+    2. 教師同時段不衝突（特殊課程由 apply_special_course_locks 獨立維護）
 
     Args:
         model: CpModel
@@ -63,15 +91,22 @@ def apply_anti_collision(model, schedule, class_names, teacher_names, classes_da
         teacher_names: list of teacher names
         classes_data: list of class dicts
         ai_settings: dict with artsClassEnabled flag
+        special_courses: list of special course dicts (optional)
     """
-    # 建立 O(1) Indexing 字典以取代重複掃描 schedule.items()
     from collections import defaultdict
     schedule_by_class_period = defaultdict(list)
     schedule_by_teacher_period = defaultdict(list)
     
+    sc_keys = _get_special_course_keys(
+        model,
+        special_courses,
+        classes_data,
+        preprocess_metadata=preprocess_metadata,
+    )
+
     for (c, per, t, s), var in schedule.items():
         schedule_by_class_period[(c, per)].append(var)
-        if t:
+        if t and (c, t, s) not in sc_keys:
             schedule_by_teacher_period[(t, per)].append(var)
 
     # 班級維度：同時段只能有一門課
@@ -106,6 +141,8 @@ def apply_alternating_teacher_anti_collision(
     alternating_class_is_music_odd,
     classes_data=None,
     ai_settings=None,
+    special_courses=None,
+    preprocess_metadata=None,
 ):
     """
     交替課實際授課教師的單雙週互斥。
@@ -116,11 +153,17 @@ def apply_alternating_teacher_anti_collision(
     才能攔下「固定課 both + 交替課 odd/even」的真實衝堂。
     """
     teacher_week_slots = defaultdict(list)
+    sc_keys = _get_special_course_keys(
+        model,
+        special_courses,
+        classes_data,
+        preprocess_metadata=preprocess_metadata,
+    )
 
     for (c_name, period, schedule_teacher, subject), active_var in schedule.items():
         is_alt = "交替" in subject or "/" in subject
         if not is_alt:
-            if schedule_teacher and not _teacher_is_collision_exempt(
+            if schedule_teacher and (c_name, schedule_teacher, subject) not in sc_keys and not _teacher_is_collision_exempt(
                 schedule_teacher,
                 classes_data,
                 ai_settings,
@@ -438,11 +481,13 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
     from config import LUNCH_BOUNDARY
 
     # [PERFORMANCE INDEXING]
+    model.special_courses = special_courses
     schedule_by_c_p_s = defaultdict(list)
     schedule_by_t_p = defaultdict(list)
     for (sch_c, sch_p, sch_t, sch_s), var in schedule.items():
         schedule_by_c_p_s[(sch_c, sch_p, sch_s)].append(var)
-        schedule_by_t_p[(sch_t, sch_p)].append(var)
+        if sch_t:
+            schedule_by_t_p[(sch_t, sch_p)].append((sch_s, var))
 
     # 1. 預先建立班級與其年級的對照表
     class_grade_map = {}
@@ -592,9 +637,7 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                 p_lock = next(iter(sub_allowed))
                 sc_sample = sub_sc_list[0] if sub_sc_list else {}
                 is_movable = is_special_course_lock_movable(sc_sample, movable_locks_policy)
-                # [Semantic Fix] Explicitly skip multi-class movable special courses because P2 prototype
-                # lacks per-class accounting and exact-one slot release semantics for shared courses.
-                if is_movable and len(classes_in_pool) == 1:
+                if is_movable:
                     global_allowed = set()
                     for p in range(TOTAL_PERIODS):
                         is_allowed = True
@@ -618,10 +661,8 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                         "from_period": p_lock,
                     }
                     apply_movable_lock(model, p_lock, candidates, var_getter, decision_meta)
-                    print(f"  [LOCK] [可遷移抽離鎖定] {sc_sample.get('name')} 第{p_lock//PERIODS_PER_DAY+1}天第{p_lock%PERIODS_PER_DAY+1}節")
+                    print(f"  [LOCK] [可遷移抽離鎖定] {sc_sample.get('name')} (班級={','.join(classes_in_pool)}) 第{p_lock//PERIODS_PER_DAY+1}天第{p_lock%PERIODS_PER_DAY+1}節")
                 else:
-                    if is_movable and len(classes_in_pool) > 1:
-                        print(f"  [LOCK] [Skip Movable] {sc_sample.get('name')} contains {len(classes_in_pool)} classes, fallback to hard lock.")
                     model.Add(sub_event_vars[p_lock] == 1)
             elif len(sub_allowed) > 1:
                 for p in range(TOTAL_PERIODS):
@@ -691,12 +732,25 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                                 model.Add(sum(class_p_subj_vars) >= sub_event_vars[p])
 
     # 4. 特教教師衝堂防護與常規配課衝突限制
-    # [SEMANTIC FIX] 因為 teacher_p_sc_vars 現在是事件層級，
-    # 同一抽離事件只貢獻一個變數，不會被重複計算
+    sc_subjects_by_teacher = defaultdict(set)
+    for sc in special_courses or []:
+        sc_t = sc.get("teacher", "")
+        sc_s = sc.get("targetSubject", "")
+        if sc_t and sc_s:
+            sc_subjects_by_teacher[sc_t].add(sc_s)
+
     for (teacher, p), sc_vars_at_p in teacher_p_sc_vars.items():
-        regular_vars = schedule_by_t_p.get((teacher, p), [])
-        model.Add(sum(regular_vars) + sum(sc_vars_at_p) <= 1)
+        t_sc_subjs = sc_subjects_by_teacher.get(teacher, set())
+        reg_t_vars = schedule_by_t_p.get((teacher, p), [])
+        regular_rep_vars = []
+        seen_subjs = set()
+        for subj, var in reg_t_vars:
+            if subj in t_sc_subjs:
+                continue
+            if subj not in seen_subjs:
+                seen_subjs.add(subj)
+                regular_rep_vars.append(var)
+        model.Add(sum(regular_rep_vars) + sum(sc_vars_at_p) <= 1)
 
     # 把 sc_decision_vars 暫存到 model 中，方便主程式存取
     model.sc_decision_vars = sc_decision_vars
-

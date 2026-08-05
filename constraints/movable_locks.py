@@ -7,11 +7,28 @@ def get_movable_lock_policy(payload):
             return payload
     return policy
 
-def is_manual_lock_movable(lock_subj, policy):
+def is_manual_lock_movable(lock_subj, policy, cell=None):
+    if cell and isinstance(cell, dict):
+        if cell.get("protectedByPullout") is True:
+            return False
+        mode = cell.get("lockMode")
+        if mode == "hard":
+            return False
+        if mode == "movable":
+            return True
+
+    # 未提供逐格 lockMode 時才退回既有全域 policy
     if not policy or not policy.get("movableLocksEnabled"):
         return False
     movable_subjects = policy.get("movableSubjects", [])
     return lock_subj in movable_subjects
+
+def is_cell_per_cell_movable(cell):
+    if cell and isinstance(cell, dict):
+        if cell.get("protectedByPullout") is True:
+            return False
+        return cell.get("lockMode") == "movable"
+    return False
 
 def is_special_course_lock_movable(sc, policy):
     if not policy or not policy.get("movableLocksEnabled"):
@@ -26,11 +43,11 @@ def is_special_course_lock_movable(sc, policy):
         return True
     return False
 
-def get_candidate_periods(original_p, policy, allowed_periods=None):
+def get_candidate_periods(original_p, policy, allowed_periods=None, must_cross_noon=False):
     if allowed_periods is None:
         allowed_periods = set(range(TOTAL_PERIODS))
     
-    window = policy.get("moveWindow", {})
+    window = policy.get("moveWindow", {}) if policy else {}
     scope = window.get("scope", "same_day")
     allow_cross_noon = window.get("allowCrossMorningAfternoon", False)
     max_dist = window.get("maxPeriodDistance", 0)
@@ -47,16 +64,21 @@ def get_candidate_periods(original_p, policy, allowed_periods=None):
         pr = p % PERIODS_PER_DAY
         is_morning = pr < LUNCH_BOUNDARY
         
-        if scope == "same_day" and d != orig_d:
-            continue
-            
-        if not allow_cross_noon and (is_morning != orig_is_morning):
-            continue
+        if must_cross_noon:
+            if d != orig_d:
+                continue
+            if is_morning == orig_is_morning:
+                continue
+        else:
+            if scope == "same_day" and d != orig_d:
+                continue
+            if not allow_cross_noon and (is_morning != orig_is_morning):
+                continue
+            dist = abs(p - original_p)
+            if dist > max_dist and max_dist > 0:
+                continue
             
         dist = abs(p - original_p)
-        if dist > max_dist:
-            continue
-            
         candidates.append((p, dist))
         
     return candidates

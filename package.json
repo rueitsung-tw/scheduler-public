@@ -21,7 +21,10 @@
     "lint:eslint": "eslint . --fix --cache",
     "format": "prettier --write --experimental-cli src/",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "test:fast": "vitest run --exclude tests/nativeLanguagePreallocationRealScenarios.test.js",
+    "test:solver": "vitest run tests/nativeLanguagePreallocationRealScenarios.test.js",
+    "test:all": "npm run test:fast && npm run test:solver"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.8.0",

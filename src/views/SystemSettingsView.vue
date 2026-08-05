@@ -252,14 +252,64 @@
       </button>
       <p v-if="scheduleStore.lastSavedTime" class="save-time">上次同步：{{ scheduleStore.lastSavedTime }}</p>
     </div>
-  </div>
 
+    <!-- 🆕 匯入模式選擇對話框 -->
+    <div v-if="pendingImportData" class="modal-overlay" data-test="import-mode-modal">
+      <div class="modal-card">
+        <h3>📥 選擇匯入模式</h3>
+
+        <div v-if="!selectedImportMode" class="mode-options">
+          <p class="modal-desc">已成功解析備份檔案，請選擇要執行的匯入方式：</p>
+          <div class="option-buttons">
+            <button
+              class="mode-btn full-btn"
+              data-test="choose-full-restore"
+              @click="confirmFullRestore"
+            >
+              <strong>完整還原</strong>
+              <small>包含學年學期、班級規模、班級與教師完整資料、課表及專科教室等所有設定。</small>
+            </button>
+            <button
+              class="mode-btn semester-btn"
+              data-test="choose-semester-settings-import"
+              @click="chooseSemesterSettingsImport"
+            >
+              <strong>新學期設定匯入</strong>
+              <small>僅匯入彈性矩陣、專科容量、領域/專科教室設定與 AI 規則；不覆蓋學期、班級、教師與課表。</small>
+            </button>
+          </div>
+          <div class="modal-footer">
+            <button class="modal-cancel-btn" data-test="cancel-settings-import" @click="cancelImport">取消</button>
+          </div>
+        </div>
+
+        <div v-else-if="selectedImportMode === 'semester-settings'" class="mode-summary">
+          <h4>📋 新學期設定匯入摘要</h4>
+          <div class="summary-box" v-if="semesterImportPreview">
+            <p><strong>專科教室變更：</strong></p>
+            <ul>
+              <li>新增教室：{{ semesterImportPreview.classrooms.added }} 間</li>
+              <li>覆蓋教室：{{ semesterImportPreview.classrooms.overwritten }} 間</li>
+              <li>移除教室：{{ semesterImportPreview.classrooms.removed }} 間</li>
+            </ul>
+            <div class="warning-callout">
+              ⚠️ 注意：專科教室將以此備份資料完全取代，且專科教室的<strong>負責老師將清空</strong>。現有班級、教師與課表將保持不變。
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="modal-cancel-btn" data-test="cancel-settings-import" @click="cancelImport">取消</button>
+            <button class="modal-confirm-btn" data-test="confirm-semester-settings-import" @click="confirmSemesterSettingsImport">確定匯入新學期設定</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
 import { useScheduleStore } from '../stores/schedule'
-import { buildExportPayload, downloadExport, parseImportFile, applyImport } from '../utils/settingsBackup'
+import { buildExportPayload, downloadExport, parseImportFile, applyImport, previewSemesterSettingsImport, applySemesterSettingsImport } from '../utils/settingsBackup'
 import { isSubjectApplicableToGrade, sanitizeRequirementsByGrade } from '../utils/gradeSubjectUtils'
 
 const scheduleStore = useScheduleStore()
@@ -269,6 +319,20 @@ const fileInput = ref(null)
 // 匯出/匯入狀態
 const eiMessage = ref('')
 const eiType = ref('success')
+
+// 🆕 匯入模式選擇狀態機
+const pendingImportData = ref(null)
+const selectedImportMode = ref(null)
+const semesterImportPreview = ref(null)
+
+function resetImportState() {
+  pendingImportData.value = null
+  selectedImportMode.value = null
+  semesterImportPreview.value = null
+  if (fileInput.value) {
+    fileInput.value.value = ''
+  }
+}
 
 function handleExport() {
   try {
@@ -293,25 +357,42 @@ async function handleImport(event) {
   try {
     const text = await file.text()
     const data = parseImportFile(text)
-
-    const hasClassrooms = Array.isArray(data.classrooms) && data.classrooms.length > 0;
-    if (data.teachers.length > 0 || data.standardDomainSettings.length > 0 || hasClassrooms) {
-      const extra = hasClassrooms ? '、專科教室資料' : '';
-      if (!confirm(`匯入將覆蓋目前設定（包含教師資料、課綱矩陣${extra}）。確定繼續？`)) return
-    }
-
-    applyImport(data)
-    scheduleStore.syncClassesFromGradeSettings()
-
-    const extraMsg = hasClassrooms ? '（包含專科教室資料）' : '';
-    eiMessage.value = `✅ 設定已匯入${extraMsg}，請記得點擊「儲存所有教師與系統設定」以寫入資料庫`
-    eiType.value = 'success'
+    pendingImportData.value = data
+    selectedImportMode.value = null
+    semesterImportPreview.value = null
   } catch (e) {
     eiMessage.value = `❌ 匯入失敗：${e.message}`
     eiType.value = 'error'
-  } finally {
-    event.target.value = ''
+    resetImportState()
   }
+}
+
+function cancelImport() {
+  resetImportState()
+}
+
+function chooseSemesterSettingsImport() {
+  selectedImportMode.value = 'semester-settings'
+  if (pendingImportData.value) {
+    semesterImportPreview.value = previewSemesterSettingsImport(pendingImportData.value)
+  }
+}
+
+function confirmSemesterSettingsImport() {
+  if (!pendingImportData.value) return
+  applySemesterSettingsImport(pendingImportData.value)
+  eiMessage.value = '✅ 新學期設定已匯入，請記得點擊「儲存所有教師與系統設定」以寫入資料庫'
+  eiType.value = 'success'
+  resetImportState()
+}
+
+function confirmFullRestore() {
+  if (!pendingImportData.value) return
+  applyImport(pendingImportData.value)
+  scheduleStore.syncClassesFromGradeSettings()
+  eiMessage.value = '✅ 設定已完整還原，請記得點擊「儲存所有教師與系統設定」以寫入資料庫'
+  eiType.value = 'success'
+  resetImportState()
 }
 
 const getAltList = (g) => {
@@ -593,5 +674,124 @@ const toggleGradeForRoom = (subjectName, grade) => {
 }
 .ei-message.error {
   color: #ef4444;
+}
+
+/* 🆕 匯入模式選擇對話框樣式 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-card {
+  background: white;
+  padding: 24px;
+  border-radius: 12px;
+  max-width: 550px;
+  width: 90%;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+}
+.modal-card h3, .modal-card h4 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  color: #1e293b;
+}
+.modal-desc {
+  margin-bottom: 16px;
+  color: #475569;
+  font-size: 0.95rem;
+}
+.option-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.mode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s;
+}
+.mode-btn:hover {
+  border-color: #6366f1;
+  background: #f0f2fe;
+}
+.mode-btn strong {
+  font-size: 1.05rem;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+.mode-btn small {
+  color: #64748b;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 20px;
+}
+.modal-cancel-btn {
+  padding: 8px 16px;
+  border: 1px solid #cbd5e1;
+  background: white;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #475569;
+  font-weight: 500;
+}
+.modal-cancel-btn:hover {
+  background: #f1f5f9;
+}
+.modal-confirm-btn {
+  padding: 8px 16px;
+  border: none;
+  background: #10b981;
+  color: white;
+  border-radius: 6px;
+  font-weight: bold;
+  cursor: pointer;
+}
+.modal-confirm-btn:hover {
+  background: #059669;
+}
+.summary-box {
+  background: #f8fafc;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  margin-top: 12px;
+  font-size: 0.95rem;
+}
+.summary-box ul {
+  margin: 8px 0 12px 20px;
+  padding: 0;
+}
+.summary-box li {
+  margin-bottom: 4px;
+  color: #334155;
+}
+.warning-callout {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #fffbeb;
+  border-left: 4px solid #f59e0b;
+  color: #92400e;
+  font-size: 0.9rem;
+  border-radius: 4px;
 }
 </style>

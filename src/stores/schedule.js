@@ -7,6 +7,10 @@ import {
   createDefaultGradeTimeRulesSettings,
   normalizeGradeTimeRulesSettings,
 } from '../utils/gradeTimeRules'
+import {
+  canApplyPreallocationConflictPlan,
+  applyClassResolution,
+} from '../utils/preallocationConflictResolution.js'
 
 export const useScheduleStore = defineStore('simpleSchedule', () => {
 
@@ -1810,6 +1814,38 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     markScheduleDirty()
   }
 
+  const nativeLanguagePreallocation = ref(null)
+
+  const applyNativeLanguagePreallocation = (plan) => {
+    if (!plan) throw new Error('本土語預排資料未通過驗證')
+    if (plan.errors && plan.errors.length > 0) {
+      throw new Error('本土語預排資料未通過驗證')
+    }
+    if (!canApplyPreallocationConflictPlan(plan)) {
+      throw new Error('有未決議的班級衝突，無法套用')
+    }
+
+    const nextClasses = JSON.parse(JSON.stringify(classes.value))
+
+    const classPlans = plan.classPlans || []
+    for (const classPlan of classPlans) {
+      const idx = nextClasses.findIndex((c) => c.name === classPlan.className)
+      if (idx !== -1) {
+        nextClasses[idx] = applyClassResolution(nextClasses[idx], classPlan)
+      } else {
+        throw new Error(`目標班級 ${classPlan.className} 不存在，無法套用`)
+      }
+    }
+
+    classes.value = nextClasses
+    nativeLanguagePreallocation.value = {
+      source: plan.source,
+      summary: plan.summary,
+      appliedAt: new Date().toISOString(),
+    }
+    markScheduleDirty()
+  }
+
   return {
     isInitialized,
     schoolInfo, syncStatus, lastSavedTime, teachers, classes, specialCourses, classrooms, standardDomainSettings, allAvailableSubjects,
@@ -1834,6 +1870,10 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     // 新增：班級同步
     syncClassesFromGradeSettings,
     
+    // 🆕 本土語/預排課表匯入
+    nativeLanguagePreallocation,
+    applyNativeLanguagePreallocation,
+
     // 🆕 Movable Locks
     movableLocksPolicy,
     movableLocksReviewData,
