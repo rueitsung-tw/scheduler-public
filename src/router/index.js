@@ -81,6 +81,12 @@ const routes = [
     component: () => import('@/views/AiSettingsView.vue')
   },
   {
+    path: '/prealloc-import',
+    name: 'PreallocationImport',
+    // 通用預排匯入頁面，支援任意科目的 Excel 課表匯入
+    component: () => import('@/views/PreallocationImportView.vue')
+  },
+  {
     path: '/schedule',
     name: 'Schedule',
     component: () => import('@/views/ScheduleView.vue')

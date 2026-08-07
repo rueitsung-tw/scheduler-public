@@ -11,6 +11,12 @@ import {
   canApplyPreallocationConflictPlan,
   applyClassResolution,
 } from '../utils/preallocationConflictResolution.js'
+import {
+  canApplyPreallocationEvent,
+  buildEventApplyPlan,
+  applyEventPlanToClasses,
+  adaptNativePlanToEvent,
+} from '../utils/preallocEventModel.js'
 
 export const useScheduleStore = defineStore('simpleSchedule', () => {
 
@@ -179,6 +185,11 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       '語文-英語': [1, 2, 3, 4, 5, 6]
     },
     gradeTimeRulesSettings: createDefaultGradeTimeRulesSettings(),
+    preallocEventSettings: {
+      allowMorningSession: false,
+      allowNoonBreakSession: false,
+      activePreallocEventId: null,
+    },
   });
 
   // 🛡️ UI-only transient state for Grade-Time rules warning confirmation
@@ -196,6 +207,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   const classes = ref([]);
   const specialCourses = ref([]);
   const classrooms = ref([]);
+  const preallocEvents = ref([]);
 
   // 🚀 補上這段：宣告 AI 硬約束設定
   const aiSettings = ref({
@@ -645,6 +657,15 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         schoolInfo.value.gradeTimeRulesSettings = normalizeGradeTimeRulesSettings(
           data.schoolInfo.gradeTimeRulesSettings
         );
+        // 🆕 preallocEventSettings merge
+        if (data.schoolInfo?.preallocEventSettings) {
+          schoolInfo.value.preallocEventSettings = {
+            allowMorningSession: false,
+            allowNoonBreakSession: false,
+            activePreallocEventId: null,
+            ...(data.schoolInfo?.preallocEventSettings || {}),
+          };
+        }
       }
 
       // 🌟 關鍵修復：從資料庫讀取教師資料時，強制將 JSON 字串解析回陣列
@@ -729,6 +750,11 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             gradePreferences: Array.isArray(gp) ? gp : []
           };
         });
+      }
+
+      // 🆕 載入 preallocEvents
+      if (Array.isArray(data.preallocEvents)) {
+        preallocEvents.value = data.preallocEvents;
       }
 
       // 🚀 修復：從 top-level key 讀取 standardDomainSettings（與後端回傳結構一致）
@@ -977,6 +1003,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       classrooms: classrooms.value,
       standardDomainSettings: standardDomainSettings.value,
       aiSettings: aiSettings.value,
+      preallocEvents: preallocEvents.value,
     };
 
     try {
@@ -1816,6 +1843,78 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
 
   const nativeLanguagePreallocation = ref(null)
 
+  // === 🆕 Preallocation Event Actions ===
+
+  const applyPreallocationEvent = (event) => {
+    if (!canApplyPreallocationEvent(event)) {
+      throw new Error('事件含未解決的阻擋錯誤，無法套用')
+    }
+    const applyPlan = buildEventApplyPlan(event, classes.value, schoolInfo.value)
+    if (applyPlan.blockers.length > 0) {
+      throw new Error(applyPlan.blockers.map((b) => b.message).join('；'))
+    }
+    const newClasses = applyEventPlanToClasses(classes.value, applyPlan)
+    // 建立新教師（不重複）
+    const existingNames = new Set(teachers.value.map((t) => t.name))
+    for (const name of applyPlan.teachersToCreate) {
+      if (!existingNames.has(name)) {
+        teachers.value = [
+          ...teachers.value,
+          {
+            name,
+            type: 'subject',
+            max_periods: 20,
+            reduction: 0,
+            overtime: 0,
+            expertiseSubjects: [],
+            unavailable_slots: [],
+            gradePreferences: [],
+          },
+        ]
+        existingNames.add(name)
+      }
+    }
+    classes.value = newClasses
+    const appliedEvent = { ...event, status: 'applied', appliedAt: new Date().toISOString() }
+    preallocEvents.value = [...preallocEvents.value, appliedEvent]
+    markScheduleDirty()
+  }
+
+  const completePreallocationEvent = (eventId) => {
+    preallocEvents.value = preallocEvents.value.map((e) =>
+      e.id === eventId ? { ...e, status: 'completed', completedAt: new Date().toISOString() } : e,
+    )
+    markScheduleDirty()
+  }
+
+  const updatePreallocationEvent = (eventId, patch) => {
+    const allowed = { allowAdjustment: Boolean(patch?.allowAdjustment) }
+    let found = false
+    preallocEvents.value = preallocEvents.value.map((event) => {
+      if (event.id !== eventId) return event
+      if (event.status !== 'applied') throw new Error('只有已套用事件可修改微調設定')
+      found = true
+      return { ...event, ...allowed }
+    })
+    if (!found) throw new Error('找不到預排事件')
+    markScheduleDirty()
+  }
+
+  const getEventManualLockedSlots = (eventId) => {
+    const event = preallocEvents.value.find((e) => e.id === eventId)
+    if (!event) return []
+    return (event.slots || []).filter((s) => s.manualLocked)
+  }
+
+  const cancelDraftEvent = (eventId) => {
+    const event = preallocEvents.value.find((e) => e.id === eventId)
+    if (!event || event.status !== 'draft') {
+      throw new Error('只能取消 draft 狀態的事件')
+    }
+    preallocEvents.value = preallocEvents.value.filter((e) => e.id !== eventId)
+    markScheduleDirty()
+  }
+
   const applyNativeLanguagePreallocation = (plan) => {
     if (!plan) throw new Error('本土語預排資料未通過驗證')
     if (plan.errors && plan.errors.length > 0) {
@@ -1843,6 +1942,15 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       summary: plan.summary,
       appliedAt: new Date().toISOString(),
     }
+
+    // 🆕 相容橋接：將舊版 nativeLanguagePlan 轉換為通用 PreallocationEvent 並持久化
+    try {
+      const event = adaptNativePlanToEvent(plan, '語文-本土語')
+      preallocEvents.value = [...preallocEvents.value, event]
+    } catch (adaptError) {
+      console.warn('[schedule.js] 本土語相容橋接轉換失敗，但不影響既有套用:', adaptError.message)
+    }
+
     markScheduleDirty()
   }
 
@@ -1874,6 +1982,14 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     nativeLanguagePreallocation,
     applyNativeLanguagePreallocation,
 
+    // 🆕 Preallocation Events
+    preallocEvents,
+    applyPreallocationEvent,
+    completePreallocationEvent,
+    getEventManualLockedSlots,
+    updatePreallocationEvent,
+    cancelDraftEvent,
+
     // 🆕 Movable Locks
     movableLocksPolicy,
     movableLocksReviewData,
@@ -1895,6 +2011,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     rejectMovableLockMove,
     resetMovableLockMoveDecision,
     resetMovableLockReviewDecisions,
+    syncMovableLockDecisionsWithResult,
     // 🆕 年級時段規則風險確認重設接點
     gradeTimeRuleWarningConfirmed,
     resetGradeTimeRuleWarningConfirmation,

@@ -103,6 +103,10 @@ model SystemSetting {
   subjectGradeRules String @default("{}")
   // [Grade Time Rules] 新增：年級時段規則設定（JSON 字串）
   gradeTimeRulesSettings String @default("{}")
+  // [Preallocation] 新增：通用預排事件列表（JSON 字串）
+  preallocEvents String @default("[]")
+  // [Preallocation] 新增：預排事件設定（早/午休開關、當前微調事件 ID）
+  preallocEventSettings String @default("{}")
 }
 
 // 8. 管理員使用者 (Setup Wizard 專用)

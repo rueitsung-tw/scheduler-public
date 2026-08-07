@@ -133,6 +133,10 @@
       <!-- 🆕 預排課表匯入區塊 -->
       <div class="settings-card preallocation-import-card" style="margin-top: 24px;">
         <h3>預排課表匯入</h3>
+        <p class="compat-notice" style="font-size: 12px; color: #6b7280; margin: 0 0 8px;">
+          💡 本區塊保留本土語相容匯入路徑。其他科目請使用
+          <RouterLink to="/prealloc-import" style="color: #2563eb;">通用預排匯入</RouterLink>。
+        </p>
         <p class="desc">
           匯入外部預排課表（目前優先支援 native-language-scheduler 的 <code>native-language-exchange.json</code>）。匯入前進行班級、教師與時段對照與衝突診斷，請完成衝突決議後套用。
         </p>
@@ -258,6 +262,76 @@
               {{ canApplyPlan ? '確認套用匯入' : '請先完成所有衝突班級決議' }}
             </button>
           </div>
+        </div>
+      </div>
+
+      <!-- 🆕 預排事件設定 -->
+      <div class="settings-card prealloc-event-settings-card" style="margin-top: 24px;">
+        <h3>預排事件設定</h3>
+        <p class="desc">
+          控制新版通用預排匯入的解析行為與微調範圍。
+          <RouterLink to="/prealloc-import">前往通用預排匯入頁面</RouterLink>
+        </p>
+
+        <div class="prealloc-event-adjustment-panel">
+          <h4>事件微調管理</h4>
+          <p class="sub">僅「已套用」且尚未完成的事件可啟用。一次只能選取一個事件交給智慧排課微調。</p>
+          <p v-if="adjustableEvents.length === 0" class="empty-notice">目前沒有可微調的預排事件。</p>
+          <div v-for="event in adjustableEvents" :key="event.id" class="prealloc-event-row">
+            <label>
+              <input
+                type="radio"
+                name="activePreallocEvent"
+                :value="event.id"
+                :checked="scheduleStore.schoolInfo.preallocEventSettings?.activePreallocEventId === event.id"
+                @change="selectActivePreallocEvent(event.id)"
+              />
+              {{ event.subject }}｜{{ event.sourceFileName }}
+            </label>
+            <label class="inline-checkbox-label">
+              <input
+                type="checkbox"
+                :checked="event.allowAdjustment"
+                @change="setEventAdjustment(event.id, $event.target.checked)"
+              />
+              允許微調
+            </label>
+            <span>人工鎖定 {{ event.summary?.manualLockedCount || 0 }} 節</span>
+          </div>
+        </div>
+
+        <div class="control-item">
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="scheduleStore.schoolInfo.preallocEventSettings?.allowMorningSession"
+              @change="updatePreallocEventSetting('allowMorningSession', $event.target.checked)"
+            />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">允許匯入「早」時段</span>
+            <span class="sub">啟用後，Excel 中標記為「早」的列視為有效課次（period=0）。</span>
+          </div>
+        </div>
+
+        <div class="control-item">
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="scheduleStore.schoolInfo.preallocEventSettings?.allowNoonBreakSession"
+              @change="updatePreallocEventSetting('allowNoonBreakSession', $event.target.checked)"
+            />
+            <span class="slider round"></span>
+          </label>
+          <div class="label-box">
+            <span class="title">允許匯入「午休」時段</span>
+            <span class="sub">啟用後，Excel 中標記為「午休」的列視為有效課次（period=8）。</span>
+          </div>
+        </div>
+
+        <div class="apply-actions" style="margin-top: 16px;">
+          <button @click="saveSettings" class="main-save-btn" type="button">儲存預排事件設定</button>
         </div>
       </div>
     </div>
@@ -497,6 +571,20 @@
             </div>
           </div>
 
+          <!-- 🆕 人工鎖定課次清單 -->
+          <div v-if="manualLockedSlotsBySubject.length > 0" class="manual-locked-slots-notice">
+            <p style="font-size: 13px; color: #92400e; margin: 8px 0 4px;">
+              ⚠️ 以下課次已人工鎖定，選擇允許微調後這些時段仍不會被移動：
+            </p>
+            <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #78716c;">
+              <li v-for="entry in manualLockedSlotsBySubject" :key="entry.key">
+                {{ entry.className }}｜週{{ ['一','二','三','四','五'][entry.day - 1] }}｜第{{ entry.period
+                }}節
+                <span style="color: #dc2626;">🔒</span>
+              </li>
+            </ul>
+          </div>
+
           <!-- 3. 移動範圍參數 -->
           <div class="movable-section">
             <div class="section-header">
@@ -602,6 +690,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import axios from 'axios'
 import { useAiStore } from '../stores/aiSettings'
 import { useScheduleStore } from '../stores/schedule'
@@ -766,6 +855,67 @@ function updateBudgetField(field, value) {
     [field]: numVal
   })
 }
+
+// --- 🆕 預排事件設定 ---
+function updatePreallocEventSetting(field, value) {
+  const current = scheduleStore.schoolInfo.preallocEventSettings || {}
+  scheduleStore.schoolInfo.preallocEventSettings = {
+    allowMorningSession: false,
+    allowNoonBreakSession: false,
+    activePreallocEventId: null,
+    ...current,
+    [field]: Boolean(value),
+  }
+  scheduleStore.markScheduleDirty()
+}
+
+const adjustableEvents = computed(() =>
+  scheduleStore.preallocEvents?.filter((event) => event.status === 'applied') || [],
+)
+
+function setEventAdjustment(eventId, enabled) {
+  scheduleStore.updatePreallocationEvent(eventId, { allowAdjustment: Boolean(enabled) })
+  if (
+    !enabled &&
+    scheduleStore.schoolInfo.preallocEventSettings?.activePreallocEventId === eventId
+  ) {
+    updatePreallocEventSetting('activePreallocEventId', null)
+  }
+}
+
+function selectActivePreallocEvent(eventId) {
+  const event = scheduleStore.preallocEvents?.find((item) => item.id === eventId)
+  if (!event?.allowAdjustment) return
+  updatePreallocEventSetting('activePreallocEventId', eventId)
+}
+
+// --- 🆕 人工鎖定課次清單 (movableLocks) ---
+const manualLockedSlotsBySubject = computed(() => {
+  const subjects = new Set(movableLocksPolicy.value.movableSubjects || [])
+  if (subjects.size === 0) return []
+  const result = []
+  for (const cls of scheduleStore.classes) {
+    if (!cls.timetable) continue
+    for (let d = 1; d <= 5; d++) {
+      for (let p = 0; p <= 8; p++) {
+        const cell = Array.isArray(cls.timetable)
+          ? cls.timetable[d - 1]?.[p - 1]
+          : cls.timetable[d]?.[p]
+        if (!cell) continue
+        if (cell.manualLocked && subjects.has(cell.subject)) {
+          result.push({
+            key: `${cls.name}-${d}-${p}`,
+            className: cls.name,
+            day: d,
+            period: p,
+            subject: cell.subject,
+          })
+        }
+      }
+    }
+  }
+  return result
+})
 
 
 onMounted(() => {
@@ -1787,6 +1937,64 @@ input:checked + .slider:before {
 /* 🆕 預排課表匯入 CSS */
 .preallocation-import-card {
   margin-top: 24px;
+}
+
+/* 🆕 預排事件設定 CSS */
+.prealloc-event-settings-card {
+  margin-top: 24px;
+}
+
+.prealloc-event-adjustment-panel {
+  margin: 16px 0;
+  padding: 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+}
+
+.prealloc-event-adjustment-panel h4 {
+  margin: 0 0 4px 0;
+  font-size: 0.95em;
+  color: #1e293b;
+}
+
+.prealloc-event-adjustment-panel .sub {
+  font-size: 0.82em;
+  color: #64748b;
+  margin: 0 0 12px 0;
+}
+
+.prealloc-event-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 0.9em;
+}
+
+.prealloc-event-row:last-child {
+  border-bottom: none;
+}
+
+.prealloc-event-row label {
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+}
+
+.prealloc-event-row span {
+  font-size: 0.82em;
+  color: #64748b;
+  margin-left: auto;
+}
+
+.manual-locked-slots-notice {
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-top: 12px;
 }
 
 .file-upload-row {

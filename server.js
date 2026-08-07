@@ -295,7 +295,8 @@ app.patch('/api/teachers/:name', async (req, res) => {
 // 全面儲存 API (排課前的設定檔存檔)
 app.post('/api/save-all', async (req, res) => {
     try {
-        const { teachers, classes, schoolInfo, specialCourses, classrooms, aiSettings } = req.body;
+        const { teachers, classes, schoolInfo, specialCourses, classrooms, aiSettings, preallocEvents } =
+          req.body;
 
         if (!teachers || !classes) {
             return res.status(400).json({ error: '缺少必要資料 (teachers 或 classes)' });
@@ -452,37 +453,41 @@ app.post('/api/save-all', async (req, res) => {
 
              await prisma.systemSetting.upsert({
                  where: { id: 1 },
-                 update: {
-                     schoolName: persistedSchoolName,
-                     academic_year: academicYear,
-                     semester: schoolInfo.semester || "上學期",
-                     grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
-                     period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
-                     alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
-                     standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
-                     class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
-                     ai_settings: JSON.stringify(prepared.cleanedAiSettings),
-                     gradeTimeRulesSettings: JSON.stringify(prepared.gradeTimeRulesSettings),
-                     classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
-                     subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
-                     subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
-                },
-                 create: {
-                     id: 1,
-                     schoolName: persistedSchoolName,
-                     academic_year: academicYear,
-                     semester: schoolInfo.semester || "上學期",
-                     grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
-                     period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
-                     alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
-                     standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
-                     class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
-                     ai_settings: JSON.stringify(prepared.cleanedAiSettings),
-                     gradeTimeRulesSettings: JSON.stringify(prepared.gradeTimeRulesSettings),
-                     classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
-                     subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
-                     subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {})
-                }
+                  update: {
+                      schoolName: persistedSchoolName,
+                      academic_year: academicYear,
+                      semester: schoolInfo.semester || "上學期",
+                      grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
+                      period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
+                      alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
+                      standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
+                      class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
+                      ai_settings: JSON.stringify(prepared.cleanedAiSettings),
+                      gradeTimeRulesSettings: JSON.stringify(prepared.gradeTimeRulesSettings),
+                      classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
+                      subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
+                      subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {}),
+                      preallocEvents: JSON.stringify(Array.isArray(preallocEvents) ? preallocEvents : []),
+                      preallocEventSettings: JSON.stringify(schoolInfo?.preallocEventSettings || {}),
+                 },
+                  create: {
+                      id: 1,
+                      schoolName: persistedSchoolName,
+                      academic_year: academicYear,
+                      semester: schoolInfo.semester || "上學期",
+                      grade_settings: JSON.stringify(schoolInfo.gradeSettings || {}),
+                      period_defaults: JSON.stringify(schoolInfo.periodDefaults || {}),
+                      alternative_matrix: JSON.stringify(schoolInfo.alternativeMatrix || {}),
+                      standard_domain_settings: JSON.stringify(req.body.standardDomainSettings || []),
+                      class_exceptions: JSON.stringify(schoolInfo.classExceptions || []),
+                      ai_settings: JSON.stringify(prepared.cleanedAiSettings),
+                      gradeTimeRulesSettings: JSON.stringify(prepared.gradeTimeRulesSettings),
+                      classroom_limits: JSON.stringify(schoolInfo.classroomLimits || {}),
+                      subjectClassroomGrades: JSON.stringify(schoolInfo.subjectClassroomGrades || {}),
+                      subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {}),
+                      preallocEvents: JSON.stringify(Array.isArray(preallocEvents) ? preallocEvents : []),
+                      preallocEventSettings: JSON.stringify(schoolInfo?.preallocEventSettings || {}),
+                 }
             });
         }
         // 更新特殊課程
@@ -621,8 +626,10 @@ app.get('/api/schedule', async (req, res) => {
                 ai_settings: publicAiSettings,
                 subjectClassroomGrades: JSON.parse(systemSetting.subjectClassroomGrades || '{}'),
                 subjectGradeRules: JSON.parse(systemSetting.subjectGradeRules || '{}'),
+                preallocEventSettings: JSON.parse(systemSetting?.preallocEventSettings || '{}'),
              } : null,
             standardDomainSettings: systemSetting ? JSON.parse(systemSetting.standard_domain_settings || '[]') : [],
+            preallocEvents: JSON.parse(systemSetting?.preallocEvents || '[]'),
             teachers: teachers.map(t => ({
                 ...t,
                 expertiseSubjects: JSON.parse(t.expertise || '[]'),

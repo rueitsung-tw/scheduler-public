@@ -696,7 +696,9 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                                      weight_grade_affinity=None,
                                      weight_teacher_affinity=None,
                                      # [Task 08] Specialty room non-preferred grade penalty weight
-                                     weight_specialty_non_preferred_grade=None):
+                                     weight_specialty_non_preferred_grade=None,
+                                     # [Task 0.2] useClassroom override occurrences to skip
+                                     classroom_override_occurrences=None):
     """
     [硬約束 9] 專科教室容量限制
 
@@ -804,11 +806,20 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
         else:
             capacity_units = room_count
 
+        # [Task 0.2] Build override lookup set: (className, absolutePeriod) pairs to skip
+        _override_keys = None
+        if classroom_override_occurrences:
+            _override_keys = {(occ[0], occ[1]) for occ in classroom_override_occurrences}
+
         for p in range(TOTAL_PERIODS):
             usage_terms = []
             for c_name, _t_name, raw_subject, active_var in schedule_by_period.get(p, []):
                 mapped_subject = _canonical_schedule_subject_for_room(raw_subject)
                 if mapped_subject != subj:
+                    continue
+
+                # [Task 0.2] Skip useClassroom override occurrences
+                if _override_keys and (c_name, p) in _override_keys:
                     continue
 
                 grade = class_grade_map.get(c_name, 1)
@@ -860,9 +871,14 @@ def apply_special_classroom_capacity(model, classes_data, schedule, classrooms,
                         })
                 # === C1 PROTOTYPE END ===
 
+    # [Task 0.2] _override_keys already defined above in the capacity loop scope
     for (class_name, period_idx, teacher_name, raw_subject), active_var in schedule.items():
         canonical_room_subject = _canonical_schedule_subject_for_room(raw_subject)
         if not canonical_room_subject or canonical_room_subject not in constrained_subjects:
+            continue
+
+        # [Task 0.2] Skip useClassroom override occurrences for room assignment too
+        if _override_keys and (class_name, period_idx) in _override_keys:
             continue
 
         actual_rooms = rooms_by_subject.get(canonical_room_subject, [])

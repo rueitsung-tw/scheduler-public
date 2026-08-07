@@ -1,7 +1,7 @@
 {
   "version": 1,
   "targetDir": "F:/scheduler-public",
-  "includeRoots": ["src", "constraints", "prisma", "public", "tests"],
+  "includeRoots": ["src", "constraints", "prisma", "public"],
   "includeFiles": [
     ".editorconfig",
     ".gitattributes",
@@ -73,6 +73,7 @@
     "scratch",
     "smoke_evidence",
     "regression_outputs",
+    "tmp",
     "venv",
     ".clinerules",
     ".codebase-memory",
@@ -125,6 +126,7 @@
     "scripts/**",
     "solver_log.txt",
     "solver_test_*_backup.py",
+    "tests/**",
     "skills-lock.json",
     "verify_alternating_fix.py",
     "verify_periods.py",

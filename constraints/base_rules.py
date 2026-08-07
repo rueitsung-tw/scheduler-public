@@ -195,26 +195,33 @@ def create_alternating_vars(model, classes_data):
     )
 
 
-def apply_preallocation_locks(model, classes_data, schedule, movable_locks_policy=None):
+def apply_preallocation_locks(model, classes_data, schedule, movable_locks_policy=None, active_prealloc_event_id=None):
     """
     掃描前端傳入的 timetable 中 isLocked=true 的格子，
     將對應的 schedule BoolVar 鎖定為 1，並將同一時段的其他科目鎖定為 0。
     （若符合可遷移鎖定條件，則套用 movable_locks）
+
+    同時收集：
+    - external_fixed_slots: 固定外部預約（早/午休）cell，不進入求解域
+    - classroom_override_occurrences: useClassroom=true 的 cell，略過專科教室容量
 
     Args:
         model: ortools.sat.python.cp_model.CpModel
         classes_data: list of class dicts (may contain timetable field)
         schedule: dict with (c, p, t, s) -> BoolVar
         movable_locks_policy: dict with prototype configuration
-
+        active_prealloc_event_id: str | None, 當前微調的事件 ID（Task 0.3）
 
     Returns:
-        tuple: (locked_count: int, locked_vars: set, lock_audit_log: list[dict])
+        tuple: (locked_count: int, locked_vars: set, lock_audit_log: list[dict],
+                external_fixed_slots: list[dict], classroom_override_occurrences: set)
     """
     print("\n[LOCK] [鎖定掃描] 開始掃描手動預排鎖定...")
     locked_count = 0
     lock_audit_log = []
     locked_vars = set()
+    external_fixed_slots = []
+    classroom_override_occurrences = set()
 
     for cls_data in classes_data:
         current_c_name = cls_data.get("name")
@@ -224,10 +231,16 @@ def apply_preallocation_locks(model, classes_data, schedule, movable_locks_polic
             continue
 
         if isinstance(raw_timetable, list):
-            _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy)
+            _process_array_timetable(model, current_c_name, raw_timetable, schedule,
+                                     lock_audit_log, locked_vars, movable_locks_policy,
+                                     external_fixed_slots, classroom_override_occurrences,
+                                     active_prealloc_event_id=active_prealloc_event_id)
             locked_count += _count_valid_locks(lock_audit_log)
         elif isinstance(raw_timetable, dict):
-            _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy)
+            _process_dict_timetable(model, current_c_name, raw_timetable, schedule,
+                                    lock_audit_log, locked_vars, movable_locks_policy,
+                                    external_fixed_slots, classroom_override_occurrences,
+                                    active_prealloc_event_id=active_prealloc_event_id)
             locked_count += _count_valid_locks(lock_audit_log)
 
     # 輸出 Lock Audit 報告
@@ -260,9 +273,12 @@ def apply_preallocation_locks(model, classes_data, schedule, movable_locks_polic
     return len(locked_vars), locked_vars, lock_audit_log
 
 
-def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy=None, cell=None):
+def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy=None, cell=None, external_fixed_slots=None, classroom_override_occurrences=None, active_prealloc_event_id=None):
     """
     處理單個 locked cell。內部輔助函式。
+
+    Args:
+        active_prealloc_event_id: 若指定，只有同一事件的 movable 課次才被視為可移動。
     """
     match_vars = []
     other_vars = []
@@ -289,8 +305,17 @@ def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule,
     lock_audit_log.append(audit_entry)
 
     if match_vars:
-        if is_manual_lock_movable(lock_subj, movable_locks_policy, cell=cell):
-            must_cross_noon = is_cell_per_cell_movable(cell)
+        # Task 0.3: 事件 ID 篩選 — 檢查是否為可移動
+        is_movable = is_manual_lock_movable(lock_subj, movable_locks_policy, cell=cell)
+        if is_movable and active_prealloc_event_id is not None:
+            # 只在同一事件且 lockMode='movable' 的課次才可移動
+            cell_event_id = (cell or {}).get("preallocEventId")
+            cell_lock_mode = (cell or {}).get("lockMode")
+            if cell_event_id != active_prealloc_event_id or cell_lock_mode != "movable":
+                is_movable = False
+
+        if is_movable:
+            must_cross_noon = is_cell_per_cell_movable(cell, active_event_id=active_prealloc_event_id)
             candidates = get_candidate_periods(abs_p, movable_locks_policy, must_cross_noon=must_cross_noon)
             def var_getter(p):
                 return schedule.get((current_c_name, p, lock_teach, lock_subj))
@@ -314,7 +339,7 @@ def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule,
         print(f"   [幽靈鎖跳過] {current_c_name} 第{day+1}天第{period+1}節 -> {lock_subj} ({lock_teach})：無對應課程需求，已略過")
 
 
-def _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
+def _process_array_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None, external_fixed_slots=None, classroom_override_occurrences=None, active_prealloc_event_id=None):
     """處理 Array 格式的 timetable: timetable[day_idx][period_idx]"""
     for day_idx, day_data in enumerate(raw_timetable):
         if not isinstance(day_data, list):
@@ -322,15 +347,34 @@ def _process_array_timetable(model, current_c_name, raw_timetable, schedule, loc
         for period_idx, cell in enumerate(day_data):
             if not isinstance(cell, dict):
                 continue
+            # Task 0.1: 收集固定外部預約 cell
+            if cell.get("isExternalFixedSlot"):
+                if external_fixed_slots is not None:
+                    external_fixed_slots.append({
+                        "className": current_c_name,
+                        "day": day_idx + 1,
+                        "period": period_idx,
+                        "externalSlotKind": cell.get("externalSlotKind", "unknown"),
+                        "subject": cell.get("subject", ""),
+                        "teacher": cell.get("teacher") or cell.get("teacher_name", ""),
+                        "cell": cell,
+                    })
+                continue
+            # Task 0.2: 收集 useClassroom 覆寫
+            if cell.get("useClassroom") and classroom_override_occurrences is not None:
+                lesson_id = cell.get("preallocSlotId") or f"{current_c_name}:{day_idx}:{period_idx}"
+                classroom_override_occurrences.add((current_c_name, day_idx * PERIODS_PER_DAY + period_idx, lesson_id))
             if cell.get("isLocked") is True:
                 lock_subj = cell.get("subject", "")
                 lock_teach = cell.get("teacher") or cell.get("teacher_name", "")
                 abs_p = day_idx * PERIODS_PER_DAY + period_idx
                 if abs_p >= TOTAL_PERIODS:
                     continue
-                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy, cell=cell)
+                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy, cell=cell,
+                              external_fixed_slots=external_fixed_slots, classroom_override_occurrences=classroom_override_occurrences,
+                              active_prealloc_event_id=active_prealloc_event_id)
 
-def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None):
+def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock_audit_log, locked_vars, movable_locks_policy=None, external_fixed_slots=None, classroom_override_occurrences=None, active_prealloc_event_id=None):
     """處理 Object 格式的 timetable: timetable[dayKey][periodKey]"""
     for day_key, day_data in raw_timetable.items():
         if not isinstance(day_data, dict):
@@ -344,6 +388,31 @@ def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock
         for period_key, cell in day_data.items():
             if not isinstance(cell, dict):
                 continue
+            # Task 0.1: 收集固定外部預約 cell
+            if cell.get("isExternalFixedSlot"):
+                try:
+                    period_idx = int(period_key) - 1
+                except (ValueError, TypeError):
+                    period_idx = 0
+                if external_fixed_slots is not None:
+                    external_fixed_slots.append({
+                        "className": current_c_name,
+                        "day": day_idx + 1,
+                        "period": period_idx,
+                        "externalSlotKind": cell.get("externalSlotKind", "unknown"),
+                        "subject": cell.get("subject", ""),
+                        "teacher": cell.get("teacher") or cell.get("teacher_name", ""),
+                        "cell": cell,
+                    })
+                continue
+            # Task 0.2: 收集 useClassroom 覆寫
+            if cell.get("useClassroom") and classroom_override_occurrences is not None:
+                try:
+                    period_idx = int(period_key) - 1
+                except (ValueError, TypeError):
+                    period_idx = 0
+                lesson_id = cell.get("preallocSlotId") or f"{current_c_name}:{day_idx}:{period_idx}"
+                classroom_override_occurrences.add((current_c_name, day_idx * PERIODS_PER_DAY + period_idx, lesson_id))
             if cell.get("isLocked") is True:
                 lock_subj = cell.get("subject", "")
                 lock_teach = cell.get("teacher") or cell.get("teacher_name", "")
@@ -356,7 +425,9 @@ def _process_dict_timetable(model, current_c_name, raw_timetable, schedule, lock
                 abs_p = day_idx * PERIODS_PER_DAY + period_idx
                 if abs_p >= TOTAL_PERIODS:
                     continue
-                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy, cell=cell)
+                _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule, lock_audit_log, locked_vars, movable_locks_policy, cell=cell,
+                              external_fixed_slots=external_fixed_slots, classroom_override_occurrences=classroom_override_occurrences,
+                              active_prealloc_event_id=active_prealloc_event_id)
 
 
 def _count_valid_locks(lock_audit_log):
