@@ -413,7 +413,7 @@ const getRoomClassesLegacy = (day, period) => {
 
         // 針對交替課 (如 "音樂(單)/美勞(雙)") 做人性化後綴顯示
         if (course.subject.includes('單') || course.subject.includes('雙')) {
-          const matchesSubj = course.subject.match(/([^\(/]+)\((單|雙)\)/g);
+          const matchesSubj = course.subject.match(/([^(/]+)\((單|雙)\)/g);
           if (matchesSubj) {
             const matchedPart = matchesSubj.find(p => p.includes(selectedRoom.value.subject));
             if (matchedPart) {

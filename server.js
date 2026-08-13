@@ -352,7 +352,9 @@ app.post('/api/save-all', async (req, res) => {
                     unavailable_slots: t.unavailable_slots ? JSON.stringify(t.unavailable_slots) : '[]',
                     gradePreferences: t.gradePreferences ? JSON.stringify(t.gradePreferences) : '[]',
                     assignedClass: t.assignedClass || null,
-                    google_account: t.google_account || null
+                    google_account: t.google_account || null,
+                    expertise_allocations: t.expertise_allocations ? JSON.stringify(t.expertise_allocations) : '[]',
+                    assignment_rules: t.assignment_rules ? JSON.stringify(t.assignment_rules) : '[]'
                 },
                 create: {
                     name: String(t.name),
@@ -364,7 +366,9 @@ app.post('/api/save-all', async (req, res) => {
                     unavailable_slots: t.unavailable_slots ? JSON.stringify(t.unavailable_slots) : '[]',
                     gradePreferences: t.gradePreferences ? JSON.stringify(t.gradePreferences) : '[]',
                     assignedClass: t.assignedClass || null,
-                    google_account: t.google_account || null
+                    google_account: t.google_account || null,
+                    expertise_allocations: t.expertise_allocations ? JSON.stringify(t.expertise_allocations) : '[]',
+                    assignment_rules: t.assignment_rules ? JSON.stringify(t.assignment_rules) : '[]'
                 }
             });
         }
@@ -469,6 +473,7 @@ app.post('/api/save-all', async (req, res) => {
                       subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {}),
                       preallocEvents: JSON.stringify(Array.isArray(preallocEvents) ? preallocEvents : []),
                       preallocEventSettings: JSON.stringify(schoolInfo?.preallocEventSettings || {}),
+                      subjectCodeMappings: JSON.stringify(schoolInfo?.subjectCodeMappings || {}),
                  },
                   create: {
                       id: 1,
@@ -487,6 +492,7 @@ app.post('/api/save-all', async (req, res) => {
                       subjectGradeRules: JSON.stringify(schoolInfo.subjectGradeRules || {}),
                       preallocEvents: JSON.stringify(Array.isArray(preallocEvents) ? preallocEvents : []),
                       preallocEventSettings: JSON.stringify(schoolInfo?.preallocEventSettings || {}),
+                      subjectCodeMappings: JSON.stringify(schoolInfo?.subjectCodeMappings || {}),
                  }
             });
         }
@@ -627,6 +633,7 @@ app.get('/api/schedule', async (req, res) => {
                 subjectClassroomGrades: JSON.parse(systemSetting.subjectClassroomGrades || '{}'),
                 subjectGradeRules: JSON.parse(systemSetting.subjectGradeRules || '{}'),
                 preallocEventSettings: JSON.parse(systemSetting?.preallocEventSettings || '{}'),
+                subjectCodeMappings: JSON.parse(systemSetting?.subjectCodeMappings || '{}'),
              } : null,
             standardDomainSettings: systemSetting ? JSON.parse(systemSetting.standard_domain_settings || '[]') : [],
             preallocEvents: JSON.parse(systemSetting?.preallocEvents || '[]'),
@@ -634,7 +641,9 @@ app.get('/api/schedule', async (req, res) => {
                 ...t,
                 expertiseSubjects: JSON.parse(t.expertise || '[]'),
                 unavailable_slots: JSON.parse(t.unavailable_slots || '[]'),
-                gradePreferences: t.gradePreferences ? JSON.parse(t.gradePreferences) : []
+                gradePreferences: t.gradePreferences ? JSON.parse(t.gradePreferences) : [],
+                expertise_allocations: t.expertise_allocations ? JSON.parse(t.expertise_allocations) : [],
+                assignment_rules: t.assignment_rules ? JSON.parse(t.assignment_rules) : []
             })),
             classes: classes.map(c => ({
                 ...c,
@@ -3332,7 +3341,7 @@ function diagnosticWarningsToAiAnalysis(diagnosticWarnings) {
 
 function formatGenericDiagnosticAnalysisLine(level, line) {
     const normalized = normalizeDiagnosticReportLine(line);
-    const withoutBullet = normalized.replace(/^\-\s*/, '');
+    const withoutBullet = normalized.replace(/^-\s*/, '');
     const withoutLevelTag = withoutBullet.replace(/\[(WARN|ERROR|ALERT)\]\s*/i, '').trim();
     return `[${level}] ${withoutLevelTag || withoutBullet}`;
 }
@@ -3344,7 +3353,7 @@ function buildDiagnosticWarningDetail({ level, line, contextLine }) {
         return null;
     }
 
-    const classOverloadMatch = normalized.match(/^\-\s*(.+?):\s*共需排\s*(\d+)\s*節課\s*\(該年級上限:\s*(\d+)\s*節\)\s*\[ERROR\]/i);
+    const classOverloadMatch = normalized.match(/^-\s*(.+?):\s*共需排\s*(\d+)\s*節課\s*\(該年級上限:\s*(\d+)\s*節\)\s*\[ERROR\]/i);
     if (classOverloadMatch) {
         const [, className, needed, limit] = classOverloadMatch;
         return createDiagnosticWarning({
@@ -3356,7 +3365,7 @@ function buildDiagnosticWarningDetail({ level, line, contextLine }) {
         });
     }
 
-    const periodMatch = normalized.match(/^\-\s*(.+?):\s*科任需求\s*(\d+)\s*節\s*\/\s*有效時段\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
+    const periodMatch = normalized.match(/^-\s*(.+?):\s*科任需求\s*(\d+)\s*節\s*\/\s*有效時段\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
     if (periodMatch) {
         const [, className, needed, available] = periodMatch;
         return createDiagnosticWarning({
@@ -3368,7 +3377,7 @@ function buildDiagnosticWarningDetail({ level, line, contextLine }) {
         });
     }
 
-    const capacityMatch = normalized.match(/^\-\s*(.+?):\s*容量\s*(\d+)\s*間\s*\(週容量=?\s*(\d+)節\)\s*\/\s*總需求\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
+    const capacityMatch = normalized.match(/^-\s*(.+?):\s*容量\s*(\d+)\s*間\s*\(週容量=?\s*(\d+)節\)\s*\/\s*總需求\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
     if (capacityMatch) {
         const [, subject, roomCount, weeklyCapacity, needed] = capacityMatch;
         return createDiagnosticWarning({
@@ -3381,7 +3390,7 @@ function buildDiagnosticWarningDetail({ level, line, contextLine }) {
     }
 
     if (normalized.includes('交替班級')) {
-        const teacherContextMatch = normalizeDiagnosticReportLine(contextLine).match(/^\-\s*(.+?):\s*負責\s*(\d+)\s*個交替班級(?:\s*\((.+)\))?/);
+        const teacherContextMatch = normalizeDiagnosticReportLine(contextLine).match(/^-\s*(.+?):\s*負責\s*(\d+)\s*個交替班級(?:\s*\((.+)\))?/);
         if (teacherContextMatch) {
             const [, teacher, classCount] = teacherContextMatch;
             const limitMatch = normalized.match(/最多只能上\s*(\d+)\s*個交替班級/i);

@@ -17,6 +17,7 @@ import {
   applyEventPlanToClasses,
   adaptNativePlanToEvent,
 } from '../utils/preallocEventModel.js'
+import { DEFAULT_SUBJECT_CODE_MAPPINGS } from '../utils/subjectAssignmentExcelParser.js'
 
 export const useScheduleStore = defineStore('simpleSchedule', () => {
 
@@ -184,6 +185,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       '科技-資訊': [3, 4, 5, 6],
       '語文-英語': [1, 2, 3, 4, 5, 6]
     },
+    subjectCodeMappings: { ...DEFAULT_SUBJECT_CODE_MAPPINGS },
     gradeTimeRulesSettings: createDefaultGradeTimeRulesSettings(),
     preallocEventSettings: {
       allowMorningSession: false,
@@ -194,6 +196,10 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
 
   // 🛡️ UI-only transient state for Grade-Time rules warning confirmation
   const gradeTimeRuleWarningConfirmed = ref(false);
+
+  // 🆕 混合配課暫存狀態 (Pinia Non-persisted state)
+  const pendingMixedPlans = ref([]);
+  const hasPendingMixedPlans = computed(() => (pendingMixedPlans.value || []).length > 0);
 
   const resetGradeTimeRuleWarningConfirmation = () => {
     gradeTimeRuleWarningConfirmed.value = false;
@@ -629,16 +635,22 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           ? dbGradeRules
           : null;
 
+        const dbCodeMappings = data.schoolInfo?.subjectCodeMappings;
+        const mergedCodeMappings = dbCodeMappings && typeof dbCodeMappings === 'object'
+          ? { ...DEFAULT_SUBJECT_CODE_MAPPINGS, ...dbCodeMappings }
+          : (schoolInfo.value.subjectCodeMappings || { ...DEFAULT_SUBJECT_CODE_MAPPINGS });
+
         schoolInfo.value = {
           ...schoolInfo.value,
           ...data.schoolInfo,
+          subjectCodeMappings: mergedCodeMappings,
           classroomLimits: {
             ...DEFAULT_CLASSROOM_LIMITS,
-            ...(data.schoolInfo?.classroomLimits ?? {}),
+            ...data.schoolInfo?.classroomLimits,
           },
           subjectClassroomGrades: {
             ...DEFAULT_SUBJECT_CLASSROOM_GRADES,
-            ...(data.schoolInfo?.subjectClassroomGrades ?? {}),
+            ...data.schoolInfo?.subjectClassroomGrades,
           },
           // If DB already has subjectGradeRules, use it; will be filled by migration below if needed
           subjectGradeRules: mergedGradeRules || schoolInfo.value.subjectGradeRules
@@ -663,7 +675,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             allowMorningSession: false,
             allowNoonBreakSession: false,
             activePreallocEventId: null,
-            ...(data.schoolInfo?.preallocEventSettings || {}),
+            ...data.schoolInfo?.preallocEventSettings,
           };
         }
       }
@@ -1779,6 +1791,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     resetMovableLocksPolicy();
     movableLocksReviewData.value = null;
     resetMovableLockReviewDecisions();
+    pendingMixedPlans.value = [];
     resetEngineState();
     markScheduleDirty();
   };
@@ -2016,5 +2029,8 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     gradeTimeRuleWarningConfirmed,
     resetGradeTimeRuleWarningConfirmation,
     updateGradeTimeRuleWarningConfirmed,
+    // 🆕 混合配課 Pinia 狀態
+    pendingMixedPlans,
+    hasPendingMixedPlans,
   }
 });

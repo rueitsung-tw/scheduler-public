@@ -1674,7 +1674,7 @@ const cancelCurrentAiTuningJob = async () => {
     });
     await refreshAiTuningJobHistory();
     aiTuningJobState.value = {
-      ...(aiTuningJobState.value || {}),
+      ...aiTuningJobState.value,
       status: 'CANCELLED',
       progressPhase: 'CANCELLED',
       progressMessage: '使用者已取消背景 job',

@@ -23,6 +23,8 @@ model Teacher {
   unavailable_slots String?  // 儲存老師不排課時段 (JSON)
   gradePreferences String? // 年級志願 (JSON 字串)
   assignedClass String? // 🆕 帶領班級 (CSV 匯入解析)
+  expertise_allocations String? @default("[]") // 專長分配 (JSON 字串)
+  assignment_rules    String? @default("[]") // 精準配課規則 (JSON 字串)
 
   homeroom_class Class? @relation("HomeroomTeacher")
 }
@@ -107,6 +109,8 @@ model SystemSetting {
   preallocEvents String @default("[]")
   // [Preallocation] 新增：預排事件設定（早/午休開關、當前微調事件 ID）
   preallocEventSettings String @default("{}")
+  // [Subject Assignment] 新增：科目與 Excel 代碼對照表 (JSON 字串)
+  subjectCodeMappings String @default("{}")
 }
 
 // 8. 管理員使用者 (Setup Wizard 專用)

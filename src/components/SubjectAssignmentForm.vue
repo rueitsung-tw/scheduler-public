@@ -2,10 +2,19 @@
   <div class="batch-assignment-container">
     <h3>👨‍🏫 科任教師批次配課與規則設定</h3>
 
+    <!-- 🚀 新增：科任教師配課 Excel 匯入區 -->
+    <div class="excel-import-section card" style="margin-bottom: 20px;">
+      <h3>📥 科任教師配課 Excel 匯入（含配課規則設定與對照表管理）</h3>
+      <SubjectExcelImport />
+    </div>
+
     <!-- 🚀 新增：全校科任智慧自動配課區域 -->
     <div class="smart-assignment-section">
       <h4>🤖 智慧自動配課區</h4>
       <p class="section-desc">自動找出尚未配課的科任科目，並根據教師志願優先級智慧指派。</p>
+      <div v-if="scheduleStore.pendingMixedPlans?.length > 0 || scheduleStore.hasPendingMixedPlans" class="pending-mixed-warning" style="margin-bottom: 12px; color: #7f1d1d; background: #fef2f2; border: 1px solid #fca5a5; padding: 10px 14px; border-radius: 8px; font-weight: bold;">
+        ⚠️ 尚有混合配課待確認，請先完成匯入確認。
+      </div>
       <button @click="smartSubjectAssignment" class="smart-btn" :disabled="isSmartAssigning">
         {{ isSmartAssigning ? '⏳ 正在配課中...' : '🚀 全校科任智慧自動配課' }}
       </button>
@@ -119,6 +128,8 @@
 import { ref, computed, watch } from 'vue'
 import { useScheduleStore } from '../stores/schedule'
 import { getSubjectGradeValidation, isSubjectApplicableToGrade } from '../utils/gradeSubjectUtils'
+import SubjectExcelImport from './SubjectExcelImport.vue'
+import { runSmartSubjectAssignment } from '../utils/subjectAssignmentMaterializer'
 
 const scheduleStore = useScheduleStore()
 const targetMode = ref('specific_classes')
@@ -434,151 +445,55 @@ function findBestTeacher(subjectName, requiredPeriods, teachersList, loadTracker
 
 // 🚀 智慧自動配課主函數 (套用新配額機制與評分公式)
 const smartSubjectAssignment = () => {
+  if (scheduleStore.pendingMixedPlans?.length > 0 || scheduleStore.hasPendingMixedPlans) {
+    const errMsg = '尚有混合配課待確認，請先完成匯入確認。'
+    alert(`🚨 自動配課已被阻擋：\n${errMsg}`)
+    diagnosticLog.value = `=== 🚀 東門國小科任自動配課診斷日誌 ===\n\n❌ 阻擋：${errMsg}\n`
+    smartAssignResult.value = {
+      successMsg: `配課阻擋：${errMsg}`,
+      processedCount: 0,
+      assignedCount: 0,
+      skippedCount: 0
+    }
+    return
+  }
+
   isSmartAssigning.value = true
   smartAssignResult.value = null
   diagnosticLog.value = '=== 🚀 東門國小科任自動配課診斷日誌 ===\n\n'
 
   setTimeout(async () => {
-    let processedCount = 0
-    let assignedCount = 0
-    let skippedCount = 0
-
-    const teachers = scheduleStore.teachers || []
-
-    // 🆕 片段 B：建立集中的 teacherQuotaMap
-    diagnosticLog.value += '【1. 初始教師配額狀態檢查】\n'
-    const teacherQuotaMap = {};
-    teachers.forEach(t => {
-      const roleGroup = t.type || 'subject';
-      const base = Number(t.base_periods || t.max_periods ||
-        (scheduleStore.schoolInfo?.periodDefaults?.[roleGroup] || 20));
-      const reduction = Number(t.reduction || 0);
-      const overtime = Number(t.overtime || 0);
-      const used = countUsedPeriods(t.name, scheduleStore.classes);
-
-      teacherQuotaMap[t.name] = {
-        base, reduction, overtime,
-        maxPeriods: base - reduction + overtime,
-        used,
-        remaining: Math.max(0, base - reduction + overtime - used)
-      };
-
-      if (t.type !== 'homeroom') {
-        diagnosticLog.value += `- [${t.name}]: 上限 ${teacherQuotaMap[t.name].maxPeriods} 節 | 已排 ${used} 節 | 剩餘 ${teacherQuotaMap[t.name].remaining} 節\n`
-      }
-    });
-    diagnosticLog.value += '-----------------------------------\n\n'
-
-    const classes = scheduleStore.classes || []
-    const assignments = []
-
-    classes.forEach(cls => {
-      if (!cls.course_requirements) return
-      const grade = getGradeFromClassName(cls.name)
-      cls.course_requirements.forEach(req => {
-        if (req.defaultTeacher === 'subject' && (!req.teacher || req.teacher.trim() === '')) {
-          const periods = Number(req.periods) || 0
-          const sub = req.subject || ''
-
-          // 🔒 雙層過濾：0 節不配課 + 年級適用性檢查
-          // 1. 0 節過濾 (排除所有節數為 0 的科目需求)
-          if (periods <= 0) return
-
-          // 2. 年級適用性硬限制 (使用統一工具函數)
-          if (!isSubjectApplicableToGrade(sub, grade)) return
-
-          assignments.push({
-            clsName: cls.name,
-            clsGrade: grade,
-            subject: sub,
-            periods: periods,
-            reqRef: req
-          })
-        }
-      })
-    })
-
-    // ================================================
-    // 步驟 1：建立即時負載追蹤表 (Load Tracker)
-    // ================================================
-    // 直接從 teacherQuotaMap 取得已排節數（countUsedPeriods 已算過所有 hand-assigned 的課）
-    const teacherLoads = {};
-    teachers.forEach(t => {
-      teacherLoads[t.name] = teacherQuotaMap[t.name]?.used || 0;
-    });
-
-    diagnosticLog.value += `【2. 負載追蹤表初始化完成】\n`;
-    Object.entries(teacherLoads).forEach(([name, load]) => {
-      if (load > 0) {
-        diagnosticLog.value += `  - ${name}: 目前負載 ${load} 節\n`;
-      }
-    });
-    diagnosticLog.value += `  共發現 ${assignments.length} 筆空缺待配\n\n`;
-
-    // ================================================
-    // 步驟 2 & 3：主迴圈 - Round-Robin 均分 + 即時更新負載
-    // ================================================
-    for (const task of assignments) {
-      processedCount++;
-      diagnosticLog.value += `🎯 處理：[${task.clsName} - ${task.subject}] (需 ${task.periods} 節) | 剩餘待配：${assignments.length - processedCount} 筆\n`;
-
-      // 使用 findBestTeacher (志願序優先 + 負載均分)
-      const bestTeacher = findBestTeacher(task.subject, task.periods, teachers, teacherLoads, teacherQuotaMap, task.clsGrade);
-
-      if (bestTeacher) {
-        // 設定教師
-        bestTeacher.assignedClass = task.clsName;
-        task.reqRef.teacher = bestTeacher.name;
-
-        // ✅ 關鍵：配課成功後，立刻增加該老師的負載
-        teacherLoads[bestTeacher.name] = (teacherLoads[bestTeacher.name] || 0) + task.periods;
-
-        // 同步更新配額 Map
-        teacherQuotaMap[bestTeacher.name].remaining = Math.max(0, teacherQuotaMap[bestTeacher.name].maxPeriods - teacherLoads[bestTeacher.name]);
-        teacherQuotaMap[bestTeacher.name].used = teacherLoads[bestTeacher.name];
-
-        assignedCount++;
-
-        diagnosticLog.value += `   ✅ 指派 → ${bestTeacher.name}\n`;
-        diagnosticLog.value += `      目前負載: ${teacherLoads[bestTeacher.name]} 節 | 配額上限: ${teacherQuotaMap[bestTeacher.name].maxPeriods} 節 | 剩餘: ${teacherQuotaMap[bestTeacher.name].remaining} 節\n\n`;
-      } else {
-        skippedCount++;
-        diagnosticLog.value += `   ⚠️ 無法為 ${task.clsName} 的 ${task.subject} 找到合適的老師 (可能專長不符或配額皆已滿)\n\n`;
-      }
-    }
-
-    // ================================================
-    // 步驟 4：交替課自動補償 — 確保總節數不超標
-    // ================================================
-    diagnosticLog.value += '\n【3. 交替課自動補償檢查】\n';
-    let compensationCount = 0;
-    classes.forEach(cls => {
-      if (!cls.course_requirements) return;
-      const grade = getGradeFromClassName(cls.name);
-      const beforeTotal = calculateClassTotalPeriods(cls.course_requirements);
-      adjustPeriodsForAlternating(cls.course_requirements, grade);
-      const afterTotal = calculateClassTotalPeriods(cls.course_requirements);
-
-      if (beforeTotal !== afterTotal) {
-        compensationCount++;
-        diagnosticLog.value += `  ✅ [${cls.name}] 已補償調整: ${beforeTotal}節 → ${afterTotal}節\n`;
-      }
-    });
-    if (compensationCount === 0) {
-      diagnosticLog.value += '  無需調整（無交替課或已符合規範）\n';
-    }
-    diagnosticLog.value += `  共調整 ${compensationCount} 個班級\n`;
-    diagnosticLog.value += '=== 🏁 診斷完畢 ===\n'
-    scheduleStore.markScheduleDirty()
-
     try {
-      await scheduleStore.syncToCloud()
-      smartAssignResult.value = {
-        successMsg: `智慧配課完成！成功指派 ${assignedCount} 筆。`,
-        processedCount, assignedCount, skippedCount
+      const res = runSmartSubjectAssignment(scheduleStore)
+      if (!res.success) {
+        alert(`🚨 自動配課已被阻擋：\n${res.error}`)
+        diagnosticLog.value += `❌ 阻擋：${res.error}\n`
+        smartAssignResult.value = {
+          successMsg: `配課阻擋：${res.error}`,
+          processedCount: 0,
+          assignedCount: 0,
+          skippedCount: 0
+        }
+        return
       }
+
+      // 交替課自動補償檢查
+      scheduleStore.classes?.forEach(cls => {
+        if (!cls.course_requirements) return
+        const grade = getGradeFromClassName(cls.name)
+        adjustPeriodsForAlternating(cls.course_requirements, grade)
+      })
+
+      smartAssignResult.value = {
+        successMsg: res.successMsg,
+        processedCount: res.processedCount,
+        assignedCount: res.assignedCount,
+        skippedCount: res.skippedCount
+      }
+
+      await scheduleStore.syncToCloud?.()
     } catch (error) {
-      console.error('同步失敗:', error)
+      console.error('智慧配課失敗:', error)
     } finally {
       isSmartAssigning.value = false
     }
