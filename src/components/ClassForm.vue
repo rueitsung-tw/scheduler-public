@@ -57,6 +57,22 @@ const isExceptionClass = (className, subject) => {
   return exceptions.some(ex => ex.className === className && ex.subject === subject);
 };
 
+const resolveHomeroomTeacher = (cls, teachers = []) => {
+  const raw = cls?.homeroom_teacher
+  const refs = raw && typeof raw === 'object' ? [raw.id, raw.name] : [raw]
+  const validRefs = refs.filter((value) => value !== null && value !== undefined && String(value).trim())
+  for (const ref of validRefs) {
+    const byId = teachers.find((teacher) => String(teacher.id) === String(ref))
+    if (byId) return byId
+    const byName = teachers.find((teacher) => teacher.name === String(ref).trim())
+    if (byName) return byName
+  }
+  const fallbackCandidates = teachers.filter((teacher) =>
+    teacher.type === 'homeroom' && teacher.assignedClass === cls?.name,
+  )
+  return fallbackCandidates.length === 1 ? fallbackCandidates[0] : null
+}
+
 /**
  * 核心演算法：全校批次產生課程需求 (已整合例外清單辨識 + 特規科目過濾)
  */
@@ -68,15 +84,8 @@ const batchGenerateRequirements = async () => {
       // 1. 遍歷大倉庫中所有班級
       const periodTraces = [];
       (scheduleStore.classes || []).forEach(c => {
-         // 取得導師參考值 (可能是 ID 或 姓名)
-         const htRef = (typeof c.homeroom_teacher === 'object' ? c.homeroom_teacher?.name : c.homeroom_teacher) || null;
-
-         // 尋找導師物件 (支援 ID 或 姓名比對)
-         const teacherObj = (scheduleStore.teachers || []).find(t =>
-           String(t.id) === String(htRef) || t.name === htRef
-         );
-
-          const realTeacherName = teacherObj ? teacherObj.name : null;
+         const teacherObj = resolveHomeroomTeacher(c, scheduleStore.teachers || [])
+         const realTeacherName = teacherObj?.name || null
 
           // 🚀 核心修復 1：明確將找到的姓名，回填給班級物件的 homeroom_teacher 欄位！
           if (realTeacherName) {
@@ -361,14 +370,12 @@ const batchGenerateRequirements = async () => {
 
      // 3. 標記變動並同步至後端 SQLite
      scheduleStore.markScheduleDirty();
-     await scheduleStore.syncToCloud();
+     const syncSucceeded = await scheduleStore.syncToCloud();
+     if (syncSucceeded !== true) return;
 
      // 4. 同步成功後更新教師狀態
      (scheduleStore.classes || []).forEach(c => {
-        const htRef = (typeof c.homeroom_teacher === 'object' ? c.homeroom_teacher?.name : c.homeroom_teacher) || null;
-        const teacherObj = (scheduleStore.teachers || []).find(t =>
-          String(t.id) === String(htRef) || t.name === htRef
-        );
+        const teacherObj = resolveHomeroomTeacher(c, scheduleStore.teachers || [])
         if (teacherObj) {
           teacherObj.assignedClass = c.name;
           teacherObj.type = 'homeroom';
