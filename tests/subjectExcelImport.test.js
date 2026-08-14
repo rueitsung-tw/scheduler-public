@@ -5,6 +5,7 @@ import { nextTick } from 'vue'
 import * as XLSX from 'xlsx'
 import { useScheduleStore } from '../src/stores/schedule'
 import SubjectExcelImport from '../src/components/SubjectExcelImport.vue'
+import MixedTeachingResolutionDialog from '../src/components/MixedTeachingResolutionDialog.vue'
 import * as materializerModule from '../src/utils/subjectAssignmentMaterializer'
 
 function buildWorkbookBuffer(rows) {
@@ -490,6 +491,7 @@ describe('SubjectExcelImport.vue (Task 4 Component Tests)', () => {
     expect(store.classes).toEqual(originalClasses)
 
     expect(wrapper.find('[data-testid="mixed-dialog-content"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="mixed-apply-error"]').text()).toContain('無法儲存至雲端')
   })
 
   it('12. Pinia store pendingMixedPlans and hasPendingMixedPlans state lifecycle during mixed import, cancel, and sync failure', async () => {
@@ -827,5 +829,180 @@ describe('SubjectExcelImport.vue (Task 4 Component Tests)', () => {
     expect(store.teachers).toEqual(initialTeachers)
     expect(store.classes).toEqual(initialClasses)
     expect(syncSpy).not.toHaveBeenCalled()
+  })
+
+  it('18. Mixed 2nd-grade health confirmation assigns one class through the mixed plan and does not rematerialize that rule', async () => {
+    const store = useScheduleStore()
+    store.teachers = [
+      { id: 201, name: '謝純雅', type: 'subject', max_periods: 0, assignment_rules: [] },
+    ]
+    store.classes = Array.from({ length: 8 }, (_, index) => {
+      const homeroomTeacher = `二年${index + 1}班導師`
+      return {
+        name: `20${index + 1}班`,
+        grade: 2,
+        homeroom_teacher: homeroomTeacher,
+        course_requirements: [{
+          id: `req-health-${index + 1}`,
+          subject: '健康',
+          periods: 1,
+          defaultTeacher: 'homeroom',
+          teacher: homeroomTeacher,
+          teacher_name: homeroomTeacher,
+        }],
+      }
+    })
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+
+    const wrapper = mount(SubjectExcelImport)
+    await nextTick()
+    const buffer = buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [201, '專任', '健康科任', '謝純雅', '2健*1', 1],
+    ])
+    await triggerFileUpload(wrapper, buffer)
+    await wrapper.find('#confirm-overwrite').setValue(true)
+
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-testid="mixed-dialog-content"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="mixed-confirm"]').trigger('click')
+    await nextTick()
+
+    expect(syncSpy).toHaveBeenCalledTimes(1)
+    expect(store.teachers.find((teacher) => teacher.name === '謝純雅').assignment_rules).toEqual(
+      expect.arrayContaining([expect.objectContaining({ grade: 2, subject: '健康', periods: 1 })])
+    )
+
+    const subjectAssigned = store.classes.filter(
+      (cls) => cls.course_requirements[0].teacher === '謝純雅'
+    )
+    expect(subjectAssigned).toHaveLength(1)
+    expect(subjectAssigned[0].course_requirements[0]).toMatchObject({
+      teacher_name: '謝純雅',
+      assignmentSource: 'mixed-import',
+    })
+  })
+
+  it('19. Mixed confirmation exposes materialization errors in the dialog and does not write the store', async () => {
+    const store = useScheduleStore()
+    const initialTeachers = [
+      { id: 202, name: '失敗科任', type: 'subject', max_periods: 0, assignment_rules: [] },
+    ]
+    const initialClasses = Array.from({ length: 2 }, (_, index) => {
+      const homeroomTeacher = `二年${index + 1}班導師`
+      return {
+        name: `20${index + 1}班`,
+        grade: 2,
+        homeroom_teacher: homeroomTeacher,
+        course_requirements: [{
+          id: `req-health-error-${index + 1}`,
+          subject: '健康',
+          periods: 1,
+          defaultTeacher: 'homeroom',
+          teacher: homeroomTeacher,
+          teacher_name: homeroomTeacher,
+        }],
+      }
+    })
+    store.teachers = JSON.parse(JSON.stringify(initialTeachers))
+    store.classes = JSON.parse(JSON.stringify(initialClasses))
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+    vi.spyOn(materializerModule, 'materializeImportedAssignmentRules').mockReturnValueOnce({
+      success: false,
+      classes: initialClasses,
+      assignedCount: 0,
+      error: '[需求不符] 模擬物化失敗',
+    })
+
+    const wrapper = mount(SubjectExcelImport)
+    await nextTick()
+    const buffer = buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [202, '專任', '健康科任', '失敗科任', '2健*1', 1],
+    ])
+    await triggerFileUpload(wrapper, buffer)
+    await wrapper.find('#confirm-overwrite').setValue(true)
+
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+    await wrapper.find('[data-testid="mixed-confirm"]').trigger('click')
+    await nextTick()
+
+    const applyError = wrapper.find('[data-testid="mixed-apply-error"]')
+    expect(wrapper.find('[data-testid="mixed-dialog-content"]').exists()).toBe(true)
+    expect(applyError.exists()).toBe(true)
+    expect(applyError.text()).toContain('無法套用班級配課')
+    expect(applyError.text()).toContain('模擬物化失敗')
+    expect(store.teachers).toEqual(initialTeachers)
+    expect(store.classes).toEqual(initialClasses)
+    expect(syncSpy).not.toHaveBeenCalled()
+  })
+
+  it('20. Mixed dialog defaults to class order and retains one random result until it closes', async () => {
+    const plan = {
+      key: '2::健康',
+      grade: 2,
+      subject: '健康',
+      totalDemandPeriods: 8,
+      importedPeriods: 8,
+      importedSubjectAdminPeriods: 8,
+      homeroomPeriods: 0,
+      defaultRoleGroup: 'homeroom',
+      classBlocks: Array.from({ length: 8 }, (_, index) => ({
+        className: `2年${index + 1}班`,
+        periods: 1,
+        homeroomTeacherName: `二年${index + 1}班導師`,
+      })),
+      importedTeacherQuotas: [
+        { teacherName: '健康科任甲', teacherType: 'subject', periods: 4 },
+        { teacherName: '健康科任乙', teacherType: 'subject', periods: 1 },
+        { teacherName: '健康科任丙', teacherType: 'admin', periods: 3 },
+      ],
+    }
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(101)
+    const wrapper = mount(MixedTeachingResolutionDialog, {
+      props: { visible: true, plans: [plan] },
+    })
+    const preview = () => wrapper.findAll('.assignment-tag').map((tag) => tag.text())
+
+    const orderStrategy = wrapper.find('[data-testid="auto-strategy-order-2::健康"]')
+    const randomStrategy = wrapper.find('[data-testid="auto-strategy-random-2::健康"]')
+    expect(orderStrategy.exists()).toBe(true)
+    expect(randomStrategy.exists()).toBe(true)
+    expect(orderStrategy.element.checked).toBe(true)
+    expect(preview()[0]).toContain('2年1班')
+    expect(preview()[0]).toContain('健康科任甲')
+
+    await randomStrategy.setValue()
+    await nextTick()
+    const firstRandomPreview = preview()
+    expect(firstRandomPreview).not.toEqual([
+      '2年1班健康科任甲 (1堂)',
+      '2年2班健康科任甲 (1堂)',
+      '2年3班健康科任甲 (1堂)',
+      '2年4班健康科任甲 (1堂)',
+      '2年5班健康科任乙 (1堂)',
+      '2年6班健康科任丙 (1堂)',
+      '2年7班健康科任丙 (1堂)',
+      '2年8班健康科任丙 (1堂)',
+    ])
+
+    await wrapper.find('[data-testid="mode-manual"]').setValue()
+    await wrapper.find('[data-testid="mode-auto"]').setValue()
+    await nextTick()
+    expect(preview()).toEqual(firstRandomPreview)
+
+    await wrapper.setProps({ visible: false })
+    await wrapper.setProps({ visible: true })
+    await nextTick()
+    expect(wrapper.find('[data-testid="auto-strategy-order-2::健康"]').element.checked).toBe(true)
+    nowSpy.mockReturnValue(202)
+    await wrapper.find('[data-testid="auto-strategy-random-2::健康"]').setValue()
+    await nextTick()
+    expect(preview()).not.toEqual(firstRandomPreview)
   })
 })

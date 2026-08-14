@@ -7,6 +7,24 @@ function naturalCompare(a, b) {
   return String(a).localeCompare(String(b), 'zh-TW', { numeric: true, sensitivity: 'base' })
 }
 
+function createSeededRandom(seed) {
+  let state = (Number(seed) >>> 0) || 1
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0
+    return state / 0x100000000
+  }
+}
+
+function shuffleClassBlocks(classBlocks = [], seed) {
+  const random = createSeededRandom(seed)
+  const shuffled = [...classBlocks]
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const selectedIndex = Math.floor(random() * (index + 1))
+    ;[shuffled[index], shuffled[selectedIndex]] = [shuffled[selectedIndex], shuffled[index]]
+  }
+  return shuffled
+}
+
 /**
  * 依據配額嘗試將完整班級分配給匯入教師 (Backtracking)
  */
@@ -395,7 +413,7 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
  */
 export function resolveMixedTeachingPlan(
   plan,
-  { mode = 'auto', exceptionClassNames, subjectAdminClassNames } = {}
+  { mode = 'auto', exceptionClassNames, subjectAdminClassNames, autoAllocation } = {}
 ) {
   if (!plan) {
     return { valid: false, resolution: null, errors: ['無效的配課計畫'] }
@@ -420,7 +438,11 @@ export function resolveMixedTeachingPlan(
         }
       }
     } else {
-      const res = allocateClassesToQuotas(plan.importedTeacherQuotas, plan.classBlocks)
+      const strategy = autoAllocation?.strategy === 'random' ? 'random' : 'class-order'
+      const availableBlocks = strategy === 'random'
+        ? shuffleClassBlocks(plan.classBlocks, autoAllocation?.seed)
+        : plan.classBlocks
+      const res = allocateClassesToQuotas(plan.importedTeacherQuotas, availableBlocks)
       success = res.success
       assignmentMap = res.assignmentMap
     }
@@ -616,6 +638,7 @@ export function applyResolvedMixedTeachingPlans(classes = [], resolutions = []) 
         const [targetClass, targetSubject] = key.split('::')
         if (targetClass === cls.name && (req.subject === targetSubject || isSubjectMatch(req.subject, targetSubject))) {
           req.teacher = assign.teacherName
+          req.teacher_name = assign.teacherName || ''
           req.isAutoAssigned = true
           req.assignmentSource = 'mixed-import'
         }

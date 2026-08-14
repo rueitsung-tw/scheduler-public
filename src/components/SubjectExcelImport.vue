@@ -241,6 +241,8 @@
     <MixedTeachingResolutionDialog
       :visible="showMixedDialog"
       :plans="pendingMixedPlans"
+      :apply-error="mixedApplyError"
+      :is-applying="isApplyingMixed"
       @confirm="handleMixedConfirm"
       @cancel="handleMixedCancel"
     />
@@ -257,7 +259,10 @@ import {
   buildDiffComparison,
   applyImportToTeachers,
 } from '../utils/subjectAssignmentExcelParser'
-import { materializeImportedAssignmentRules } from '../utils/subjectAssignmentMaterializer'
+import {
+  filterRulesForImportedMaterialization,
+  materializeImportedAssignmentRules,
+} from '../utils/subjectAssignmentMaterializer'
 import MixedTeachingResolutionDialog from './MixedTeachingResolutionDialog.vue'
 import {
   buildMixedTeachingPlans,
@@ -283,6 +288,8 @@ const isSavingMappings = ref(false)
 const showMixedDialog = ref(false)
 const pendingMixedPlans = ref([])
 const mixedPlanBlockers = ref([])
+const mixedApplyError = ref('')
+const isApplyingMixed = ref(false)
 
 const newCode = ref('')
 const newSystemSubject = ref('')
@@ -380,6 +387,8 @@ const handleFileUpload = (e) => {
   statusMessage.value = ''
   showMixedDialog.value = false
   pendingMixedPlans.value = []
+  mixedApplyError.value = ''
+  isApplyingMixed.value = false
   scheduleStore.pendingMixedPlans = []
   mixedPlanBlockers.value = []
   unassignedTeacherWarnings.value = []
@@ -400,6 +409,8 @@ const parseBuffer = () => {
 
   showMixedDialog.value = false
   pendingMixedPlans.value = []
+  mixedApplyError.value = ''
+  isApplyingMixed.value = false
   scheduleStore.pendingMixedPlans = []
   mixedPlanBlockers.value = []
   confirmCorrections.value = false
@@ -505,6 +516,8 @@ const handleApplyImport = async () => {
 
   if (plans && plans.length > 0) {
     pendingMixedPlans.value = plans
+    mixedApplyError.value = ''
+    isApplyingMixed.value = false
     scheduleStore.pendingMixedPlans = plans
     showMixedDialog.value = true
     return
@@ -514,12 +527,22 @@ const handleApplyImport = async () => {
 }
 
 const handleMixedConfirm = async ({ resolutions }) => {
-  await commitImport({ resolutions })
+  if (isApplyingMixed.value) return
+
+  isApplyingMixed.value = true
+  mixedApplyError.value = ''
+  try {
+    await commitImport({ resolutions })
+  } finally {
+    isApplyingMixed.value = false
+  }
 }
 
 const handleMixedCancel = () => {
   showMixedDialog.value = false
   pendingMixedPlans.value = []
+  mixedApplyError.value = ''
+  isApplyingMixed.value = false
   scheduleStore.pendingMixedPlans = []
 }
 
@@ -554,15 +577,26 @@ const commitImport = async ({ resolutions = [] }) => {
     return byId || byName
   })
 
+  // 混合配課決議已完整寫入這些年級＋科目；只排除一般物化的暫存規則，
+  // 不影響 nextTeachers 內最終要保存的完整 Excel assignment_rules。
+  const materializationTeachers = filterRulesForImportedMaterialization(
+    participatingTeachers,
+    resolutions
+  )
+
   const materialized = materializeImportedAssignmentRules({
     classes: nextClasses,
-    teachers: participatingTeachers,
+    teachers: materializationTeachers,
     confirmedHomeroomTeacherIds,
   })
 
   if (!materialized.success) {
     statusType.value = 'error'
     statusMessage.value = `❌ 無法套用班級配課：${materialized.error || '未知錯誤'}`
+    if (resolutions.length > 0) {
+      mixedApplyError.value = `無法套用班級配課：${materialized.error || '未知錯誤'}`
+      showMixedDialog.value = true
+    }
     return
   }
 
@@ -588,6 +622,10 @@ const commitImport = async ({ resolutions = [] }) => {
     scheduleStore.classes = prevClasses
     statusType.value = 'error'
     statusMessage.value = '❌ 無法儲存至雲端: ' + (err.message || err)
+    if (resolutions.length > 0) {
+      mixedApplyError.value = statusMessage.value
+      showMixedDialog.value = true
+    }
   }
 }
 </script>

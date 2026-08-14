@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useScheduleStore } from '../src/stores/schedule'
-import { runSmartSubjectAssignment, materializeImportedAssignmentRules } from '../src/utils/subjectAssignmentMaterializer'
+import { runSmartSubjectAssignment, materializeImportedAssignmentRules, filterRulesForImportedMaterialization } from '../src/utils/subjectAssignmentMaterializer'
 import { applyImportToTeachers } from '../src/utils/subjectAssignmentExcelParser'
 import { applyResolvedMixedTeachingPlans } from '../src/utils/mixedTeachingPlan'
 
@@ -1496,5 +1496,309 @@ describe('materializeImportedAssignmentRules (Task 4 Materialization)', () => {
       assignmentSource: 'subject-excel-import',
       periods: 3,
     })
+  })
+
+  it('K. Excel rules replace matching unlocked homeroom defaults within their candidate classes', () => {
+    const classNames = Array.from({ length: 8 }, (_, index) => `2年${index + 1}班`)
+    const classes = classNames.map((name, index) => {
+      const homeroomTeacher = `二導${index + 1}`
+      return {
+        name,
+        grade: 2,
+        homeroom_teacher: homeroomTeacher,
+        course_requirements: [{
+          id: `health-${index + 1}`,
+          subject: '健康',
+          periods: 1,
+          defaultTeacher: 'homeroom',
+          teacher: homeroomTeacher,
+          teacher_name: homeroomTeacher,
+          isLocked: false,
+        }],
+      }
+    })
+    const teachers = [
+      { id: 1, name: '健康科任甲', type: 'subject', assignment_rules: [{ grade: 2, subject: '健康', periods: 4, candidateClassNames: classNames }] },
+      { id: 2, name: '健康科任乙', type: 'subject', assignment_rules: [{ grade: 2, subject: '健康', periods: 1, candidateClassNames: classNames }] },
+      { id: 3, name: '健康科任丙', type: 'admin', assignment_rules: [{ grade: 2, subject: '健康', periods: 3, candidateClassNames: classNames }] },
+    ]
+
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+
+    expect(result.success).toBe(true)
+    expect(result.assignedCount).toBe(8)
+    expect(result.classes).toHaveLength(8)
+    expect(result.classes.every((cls) => cls.course_requirements.length === 1)).toBe(true)
+    expect(result.classes.filter((cls) => cls.course_requirements[0].teacher === '健康科任甲')).toHaveLength(4)
+    expect(result.classes.filter((cls) => cls.course_requirements[0].teacher === '健康科任乙')).toHaveLength(1)
+    expect(result.classes.filter((cls) => cls.course_requirements[0].teacher === '健康科任丙')).toHaveLength(3)
+    expect(result.classes.every((cls) => cls.course_requirements[0].assignmentSource === 'subject-excel-import')).toBe(true)
+    expect(result.classes.every((cls) => cls.course_requirements[0].teacher_name === cls.course_requirements[0].teacher)).toBe(true)
+    expect(classes.every((cls, index) => cls.course_requirements[0].teacher === `二導${index + 1}`)).toBe(true)
+  })
+
+  it('L. locked, mixed-import, and manually assigned requirements remain protected when import demand is insufficient', () => {
+    const classes = [
+      {
+        name: '2年1班', grade: 2, homeroom_teacher: '二導1',
+        course_requirements: [{ id: 'locked-health', subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '二導1', teacher_name: '二導1', isLocked: true }],
+      },
+      {
+        name: '2年2班', grade: 2, homeroom_teacher: '二導2',
+        course_requirements: [{ id: 'mixed-health', subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '既有科任', teacher_name: '既有科任', isAutoAssigned: true, assignmentSource: 'mixed-import' }],
+      },
+      {
+        name: '2年3班', grade: 2, homeroom_teacher: '二導3',
+        course_requirements: [{ id: 'manual-health', subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '手動科任', teacher_name: '手動科任', isAutoAssigned: false }],
+      },
+    ]
+    const originalClasses = JSON.parse(JSON.stringify(classes))
+    const teachers = [{
+      id: 4,
+      name: '健康科任',
+      type: 'subject',
+      assignment_rules: [{ grade: 2, subject: '健康', periods: 3, candidateClassNames: ['2年1班', '2年2班', '2年3班'] }],
+    }]
+
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/可分派需求節數不足/)
+    expect(classes).toEqual(originalClasses)
+  })
+
+  it('M. re-importing a smaller quota clears both teacher fields from prior Excel assignments and consolidated remainders', () => {
+    const classes = [
+      {
+        name: '2年1班', grade: 2,
+        course_requirements: [{
+          id: 'health-1', subject: '健康', periods: 1,
+          teacher: '健康科任', teacher_name: '健康科任', isAutoAssigned: true,
+          assignmentSource: 'subject-excel-import',
+        }],
+      },
+      {
+        name: '2年2班', grade: 2,
+        course_requirements: [
+          {
+            id: 'health-2_split_健康科任_1', subject: '健康', periods: 1,
+            teacher: '健康科任', teacher_name: '健康科任', isAutoAssigned: true,
+            assignmentSource: 'subject-excel-import',
+          },
+          {
+            id: 'health-2_split_remainder_2', subject: '健康', periods: 1,
+            teacher: '', teacher_name: '', isAutoAssigned: false,
+          },
+        ],
+      },
+    ]
+    const teachers = [{
+      id: 5,
+      name: '健康科任',
+      type: 'subject',
+      assignment_rules: [{ grade: 2, subject: '健康', periods: 1, candidateClassNames: ['2年1班', '2年2班'] }],
+    }]
+
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+    const reimportedClass = result.classes.find((cls) => cls.name === '2年1班')
+    const unassignedClass = result.classes.find((cls) => cls.name === '2年2班')
+
+    expect(result.success).toBe(true)
+    expect(reimportedClass.course_requirements[0]).toMatchObject({
+      teacher: '健康科任', teacher_name: '健康科任', assignmentSource: 'subject-excel-import',
+    })
+    expect(unassignedClass.course_requirements).toHaveLength(1)
+    expect(unassignedClass.course_requirements[0]).toMatchObject({ teacher: '', teacher_name: '' })
+  })
+
+  it('N. filters only grade-subject rules already resolved by mixed teaching without mutating teachers', () => {
+    const teachers = [{
+      id: 7,
+      name: '謝純雅',
+      assignment_rules: [
+        { grade: 2, subject: '健康', periods: 1 },
+        { grade: 2, subject: '體育', periods: 2 },
+        { grade: 3, subject: '健康', periods: 1 },
+      ],
+    }]
+    const originalTeachers = JSON.parse(JSON.stringify(teachers))
+
+    const result = filterRulesForImportedMaterialization(teachers, [{
+      grade: 2,
+      subject: '健康',
+      resolution: { assignments: [{ className: '2年5班', teacherName: '謝純雅' }] },
+    }])
+
+    expect(result).not.toBe(teachers)
+    expect(result[0]).not.toBe(teachers[0])
+    expect(result[0].assignment_rules).toEqual([
+      { grade: 2, subject: '體育', periods: 2 },
+      { grade: 3, subject: '健康', periods: 1 },
+    ])
+    expect(teachers).toEqual(originalTeachers)
+  })
+
+  it('O. does not rematerialize a health rule after its mixed resolution assigns one second-grade class', () => {
+    const classes = Array.from({ length: 8 }, (_, index) => {
+      const classNumber = index + 1
+      const homeroomTeacher = `二導${classNumber}`
+      return {
+        name: `2年${classNumber}班`,
+        grade: 2,
+        homeroom_teacher: homeroomTeacher,
+        course_requirements: [{
+          id: `health-${classNumber}`,
+          subject: '健康',
+          periods: 1,
+          defaultTeacher: 'homeroom',
+          teacher: homeroomTeacher,
+          teacher_name: homeroomTeacher,
+        }],
+      }
+    })
+    const teachers = [{
+      id: 8,
+      name: '謝純雅',
+      type: 'subject',
+      assignment_rules: [{ grade: 2, subject: '健康', periods: 1, candidateClassNames: classes.map((cls) => cls.name) }],
+    }]
+    const resolutions = [{
+      grade: 2,
+      subject: '健康',
+      resolution: {
+        assignments: classes.map((cls) => ({
+          className: cls.name,
+          teacherName: cls.name === '2年5班' ? '謝純雅' : cls.homeroom_teacher,
+          teacherType: cls.name === '2年5班' ? 'subject' : 'homeroom',
+          periods: 1,
+        })),
+      },
+    }]
+
+    const afterMixed = applyResolvedMixedTeachingPlans(classes, resolutions)
+    const materialized = materializeImportedAssignmentRules({
+      classes: afterMixed,
+      teachers: filterRulesForImportedMaterialization(teachers, resolutions),
+    })
+
+    expect(materialized.success).toBe(true)
+    expect(materialized.assignedCount).toBe(0)
+    expect(materialized.classes.find((cls) => cls.name === '2年5班').course_requirements[0]).toMatchObject({
+      teacher: '謝純雅',
+      assignmentSource: 'mixed-import',
+    })
+  })
+
+  it('P. materializes explicit class rules before earlier teachers batch rules, preserving their target class', () => {
+    const classNames = Array.from({ length: 11 }, (_, index) => `5年${index + 1}班`)
+    const classes = classNames.map((name, index) => ({
+      name,
+      grade: 5,
+      course_requirements: [{
+        id: `science-${index + 1}`,
+        subject: '自然科學',
+        periods: 4,
+        teacher: '',
+      }],
+    }))
+    const teachers = [
+      {
+        id: 21,
+        name: '蔡明容',
+        type: 'subject',
+        assignment_rules: [{
+          grade: 5,
+          subject: '自然科學',
+          periods: 20,
+          sourceKind: 'grade-batch',
+          candidateClassNames: classNames,
+        }],
+      },
+      {
+        id: 22,
+        name: '林皎汝',
+        type: 'subject',
+        assignment_rules: [{
+          grade: 5,
+          subject: '自然科學',
+          periods: 20,
+          sourceKind: 'grade-batch',
+          candidateClassNames: classNames,
+        }],
+      },
+      {
+        id: 23,
+        name: '陳陵',
+        type: 'subject',
+        assignment_rules: [{
+          grade: 5,
+          subject: '自然科學',
+          periods: 4,
+          sourceKind: 'class-specific',
+          targetClassNames: ['5年5班'],
+        }],
+      },
+    ]
+    const originalClasses = JSON.parse(JSON.stringify(classes))
+    const originalTeachers = JSON.parse(JSON.stringify(teachers))
+
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+
+    expect(result.success).toBe(true)
+    expect(result.assignedCount).toBe(44)
+    expect(result.classes.find((cls) => cls.name === '5年5班').course_requirements[0]).toMatchObject({
+      teacher: '陳陵',
+      assignmentSource: 'subject-excel-import',
+    })
+    expect(result.classes.filter((cls) => cls.course_requirements[0].teacher === '蔡明容')).toHaveLength(5)
+    expect(result.classes.filter((cls) => cls.course_requirements[0].teacher === '林皎汝')).toHaveLength(5)
+    expect(classes).toEqual(originalClasses)
+    expect(teachers).toEqual(originalTeachers)
+  })
+
+  it('Q. materializes all-eligible rules before earlier grade-batch rules while retaining input order within each priority', () => {
+    const classNames = ['5年1班', '5年2班']
+    const classes = classNames.map((name, index) => ({
+      name,
+      grade: 5,
+      course_requirements: [{
+        id: `science-priority-${index + 1}`,
+        subject: '自然科學',
+        periods: 4,
+        teacher: '',
+      }],
+    }))
+    const teachers = [
+      {
+        id: 31,
+        name: '批次教師',
+        type: 'subject',
+        assignment_rules: [{
+          grade: 5,
+          subject: '自然科學',
+          periods: 4,
+          sourceKind: 'grade-batch',
+          candidateClassNames: classNames,
+        }],
+      },
+      {
+        id: 32,
+        name: '全班教師',
+        type: 'subject',
+        assignment_rules: [{
+          grade: 5,
+          subject: '自然科學',
+          periods: 4,
+          sourceKind: 'all-eligible',
+          candidateClassNames: classNames,
+        }],
+      },
+    ]
+
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+
+    expect(result.success).toBe(true)
+    expect(result.classes.find((cls) => cls.name === '5年1班').course_requirements[0].teacher).toBe('全班教師')
+    expect(result.classes.find((cls) => cls.name === '5年2班').course_requirements[0].teacher).toBe('批次教師')
   })
 })

@@ -48,6 +48,31 @@
 
           <!-- 自動模式預覽 -->
           <div v-if="getMode(plan) === 'auto'" class="auto-preview">
+            <div class="auto-strategy-selector">
+              <span class="auto-strategy-label">自動分配方式：</span>
+              <label class="mode-option">
+                <input
+                  type="radio"
+                  :name="'auto-strategy-' + getKey(plan)"
+                  value="class-order"
+                  :checked="getAutoAllocation(plan).strategy === 'class-order'"
+                  :data-testid="'auto-strategy-order-' + getKey(plan)"
+                  @change="setAutoStrategy(plan, 'class-order')"
+                />
+                <span>按班級順序（預設）</span>
+              </label>
+              <label class="mode-option">
+                <input
+                  type="radio"
+                  :name="'auto-strategy-' + getKey(plan)"
+                  value="random"
+                  :checked="getAutoAllocation(plan).strategy === 'random'"
+                  :data-testid="'auto-strategy-random-' + getKey(plan)"
+                  @change="setAutoStrategy(plan, 'random')"
+                />
+                <span>隨機分配</span>
+              </label>
+            </div>
             <div class="preview-title">自動分配預覽：</div>
             <div v-if="getPlanState(plan).valid" class="assignment-grid">
               <div
@@ -109,16 +134,19 @@
       </div>
 
       <div class="mixed-dialog-footer">
+        <div v-if="applyError" class="error-box" data-testid="mixed-apply-error">
+          ⚠️ {{ applyError }}
+        </div>
         <button class="btn btn-secondary" data-testid="mixed-cancel" @click="handleCancel">
           取消
         </button>
         <button
           class="btn btn-primary"
           data-testid="mixed-confirm"
-          :disabled="!isAllValid"
+          :disabled="!isAllValid || isApplying"
           @click="handleConfirm"
         >
-          確認套用
+          {{ isApplying ? '套用中…' : '確認套用' }}
         </button>
       </div>
     </div>
@@ -126,7 +154,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { resolveMixedTeachingPlan } from '../utils/mixedTeachingPlan.js'
 
 const props = defineProps({
@@ -138,6 +166,14 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  applyError: {
+    type: String,
+    default: '',
+  },
+  isApplying: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const emit = defineEmits(['confirm', 'cancel'])
@@ -147,6 +183,9 @@ const planModes = ref({})
 
 // 儲存每個 plan 的 exceptionClassNames: { [planKey]: Array<string> }
 const planExceptions = ref({})
+
+// 儲存每個 plan 的自動分配策略與一次性隨機 seed
+const autoAllocationStates = ref({})
 
 function getKey(plan) {
   return plan.key || `${plan.grade}::${plan.subject}`
@@ -164,6 +203,39 @@ function setMode(plan, mode) {
     [key]: mode,
   }
 }
+
+function getAutoAllocation(plan) {
+  const key = getKey(plan)
+  return autoAllocationStates.value[key] || { strategy: 'class-order' }
+}
+
+function createRandomSeed(plan) {
+  const keyOffset = Array.from(getKey(plan)).reduce((sum, char) => sum + char.charCodeAt(0), 0)
+  return Date.now() + keyOffset
+}
+
+function setAutoStrategy(plan, strategy) {
+  const key = getKey(plan)
+  const current = getAutoAllocation(plan)
+  autoAllocationStates.value = {
+    ...autoAllocationStates.value,
+    [key]: {
+      strategy,
+      ...(strategy === 'random' ? { seed: current.seed ?? createRandomSeed(plan) } : current.seed != null ? { seed: current.seed } : {}),
+    },
+  }
+}
+
+watch(
+  () => props.visible,
+  (visible, wasVisible) => {
+    if (!visible && wasVisible) {
+      planModes.value = {}
+      planExceptions.value = {}
+      autoAllocationStates.value = {}
+    }
+  }
+)
 
 function isHomeroomDefault(plan) {
   return (
@@ -227,6 +299,7 @@ const planStates = computed(() => {
     const res = resolveMixedTeachingPlan(plan, {
       mode,
       exceptionClassNames,
+      autoAllocation: getAutoAllocation(plan),
     })
 
     return {
@@ -252,7 +325,7 @@ const isAllValid = computed(() => {
 })
 
 function handleConfirm() {
-  if (!isAllValid.value) return
+  if (!isAllValid.value || props.isApplying) return
   const resolutions = planStates.value.map((s) => ({
     planKey: s.key,
     grade: s.plan.grade,
@@ -362,6 +435,20 @@ function handleCancel() {
   border: 1px solid #d1d5db;
   border-radius: 4px;
   padding: 10px;
+}
+
+.auto-strategy-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.auto-strategy-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
 }
 
 .preview-title {

@@ -24,6 +24,29 @@ export function isSubjectMatch(reqSub, ruleSub) {
 }
 
 /**
+ * 從一般 Excel 物化輸入排除已由混合配課決議處理的年級＋科目。
+ * 保留教師完整規則供 store 儲存；此函式只產生一般物化器使用的不可變副本。
+ */
+export function filterRulesForImportedMaterialization(teachers = [], resolutions = []) {
+  const mixedPairs = resolutions
+    .filter((item) => item?.resolution && Array.isArray(item.resolution.assignments))
+    .map((item) => ({
+      grade: Number(item.grade),
+      subject: String(item.subject || item.resolution.subject || '').trim(),
+    }))
+    .filter((pair) => pair.grade > 0 && pair.subject)
+
+  return teachers.map((teacher) => ({
+    ...teacher,
+    assignment_rules: Array.isArray(teacher.assignment_rules)
+      ? teacher.assignment_rules.filter((rule) => !mixedPairs.some(
+        (pair) => Number(rule.grade) === pair.grade && isSubjectMatch(rule.subject, pair.subject)
+      ))
+      : [],
+  }))
+}
+
+/**
  * 🛡️ 檢查教師是否符合 assignment_rules 配課資格
  * - subject 與 admin 預設符合
  * - homeroom 教師若已有持久化的 non-empty assignment_rules（由匯入關口寫入），或帶有確認狀態，即視為耐久確認 (Durable Confirmation)
@@ -106,6 +129,7 @@ export function consolidateSplitRequirements(classes, options = {}) {
           id: baseId,
           periods: totalPeriods,
           teacher: '',
+          teacher_name: '',
           isAutoAssigned: false
         }
         delete consolidatedReq.assignmentSource
@@ -141,6 +165,25 @@ export function getRuleScopeClassNames(rule) {
     return rule.candidateClassNames
   }
   return null
+}
+
+/**
+ * 判斷目前教師是否只是系統依班導帶入的預設值。
+ * 這類未鎖定、未有匯入來源的需求，允許本次 Excel 科任規則在自身 scope 內覆寫。
+ */
+export function isReplaceableDefaultHomeroomRequirement(cls, req) {
+  const homeroomName = String(cls?.homeroom_teacher || cls?.homeroomTeacher || '').trim()
+  const assignedName = String(req?.teacher || '').trim()
+  const storedName = String(req?.teacher_name || '').trim()
+
+  return Boolean(
+    homeroomName &&
+    req?.defaultTeacher === 'homeroom' &&
+    !req?.isLocked &&
+    !req?.assignmentSource &&
+    assignedName === homeroomName &&
+    (!storedName || storedName === homeroomName)
+  )
 }
 
 /**
@@ -216,13 +259,17 @@ export function preflightValidateDemand(classes, teachers, confirmedHomeroomTeac
             isExplicitTarget &&
             req.teacher &&
             req.teacher.trim() !== '' &&
+            !isReplaceableDefaultHomeroomRequirement(cls, req) &&
             (!req.isAutoAssigned || req.assignmentSource === 'mixed-import')
           ) {
             return {
               valid: false,
               error: `[需求不符] 班級「${targetName}」科目「${targetSubject}」已指派給「${req.teacher}」，與「${t.name}」的匯入規則衝突`
             }
-          } else if (!req.isLocked && (!req.teacher || req.teacher.trim() === '')) {
+          } else if (
+            !req.isLocked &&
+            (!req.teacher || req.teacher.trim() === '' || isReplaceableDefaultHomeroomRequirement(cls, req))
+          ) {
             availableUnassignedPeriods += p
           }
         }
@@ -290,7 +337,12 @@ export function preflightValidateDemand(classes, teachers, confirmedHomeroomTeac
         cls.course_requirements.forEach(req => {
           if (
             !req.isLocked &&
-            (!req.teacher || req.teacher.trim() === '' || (req.isAutoAssigned && req.assignmentSource !== 'mixed-import')) &&
+            (
+              !req.teacher ||
+              req.teacher.trim() === '' ||
+              isReplaceableDefaultHomeroomRequirement(cls, req) ||
+              (req.isAutoAssigned && req.assignmentSource !== 'mixed-import')
+            ) &&
             isSubjectApplicableToGrade(req.subject, clsGrade)
           ) {
             if (isSubjectMatch(req.subject, ruleSubj)) {
@@ -382,7 +434,7 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
           const req = cls.course_requirements[i]
           if (
             !req.isLocked &&
-            (!req.teacher || req.teacher.trim() === '') &&
+            (!req.teacher || req.teacher.trim() === '' || isReplaceableDefaultHomeroomRequirement(cls, req)) &&
             isSubjectApplicableToGrade(req.subject, clsGrade)
           ) {
             if (isSubjectMatch(req.subject, targetSubject)) {
@@ -392,6 +444,7 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
               if (P <= needed) {
                 // Fully assign this requirement
                 req.teacher = t.name
+                req.teacher_name = t.name
                 req.isAutoAssigned = true
                 ruleAssigned += P
                 assignedCount += P
@@ -403,6 +456,7 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
                   id: `${baseId}_split_${t.name}_1`,
                   periods: needed,
                   teacher: t.name,
+                  teacher_name: t.name,
                   isAutoAssigned: true
                 }
                 const chunk2 = {
@@ -410,6 +464,7 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
                   id: `${baseId}_split_remainder_2`,
                   periods: P - needed,
                   teacher: '',
+                  teacher_name: '',
                   isAutoAssigned: false
                 }
                 cls.course_requirements.splice(i, 1, chunk1, chunk2)
@@ -425,6 +480,12 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
   })
 
   return assignedCount
+}
+
+function getImportedRulePriority(rule) {
+  if (Array.isArray(rule?.targetClassNames) && rule.targetClassNames.length > 0) return 0
+  if (rule?.sourceKind === 'all-eligible') return 1
+  return 2
 }
 
 /**
@@ -485,6 +546,7 @@ export function materializeImportedAssignmentRules({
         )
         if (isTargetPair && req.assignmentSource === 'subject-excel-import' && !req.isLocked) {
           req.teacher = ''
+          req.teacher_name = ''
           req.isAutoAssigned = false
           delete req.assignmentSource
           if (req.id && String(req.id).includes('_split_')) {
@@ -516,10 +578,17 @@ export function materializeImportedAssignmentRules({
   // 5. 執行 Exact Rules 物化
   let totalAssignedCount = 0
 
-  for (const t of eligibleTeachers) {
-    if (!Array.isArray(t.assignment_rules)) continue
+  const orderedRuleEntries = eligibleTeachers
+    .flatMap((teacher, teacherIndex) => (Array.isArray(teacher.assignment_rules)
+      ? teacher.assignment_rules.map((rule, ruleIndex) => ({ teacher, rule, teacherIndex, ruleIndex }))
+      : []))
+    .sort((left, right) => (
+      getImportedRulePriority(left.rule) - getImportedRulePriority(right.rule) ||
+      left.teacherIndex - right.teacherIndex ||
+      left.ruleIndex - right.ruleIndex
+    ))
 
-    for (const rule of t.assignment_rules) {
+  for (const { teacher: t, rule } of orderedRuleEntries) {
       const targetGrade = Number(rule.grade)
       const targetSubject = String(rule.subject || '').trim()
       const targetPeriods = Number(rule.periods) || 0
@@ -589,7 +658,7 @@ export function materializeImportedAssignmentRules({
           const req = cls.course_requirements[i]
           if (
             !req.isLocked &&
-            (!req.teacher || req.teacher.trim() === '') &&
+            (!req.teacher || req.teacher.trim() === '' || isReplaceableDefaultHomeroomRequirement(cls, req)) &&
             isSubjectApplicableToGrade(req.subject, clsGrade) &&
             isSubjectMatch(req.subject, targetSubject)
           ) {
@@ -598,6 +667,7 @@ export function materializeImportedAssignmentRules({
 
             if (P <= needed + 1e-6) {
               req.teacher = t.name
+              req.teacher_name = t.name
               req.isAutoAssigned = true
               req.assignmentSource = 'subject-excel-import'
               ruleAssigned = Math.round((ruleAssigned + P) * 100) / 100
@@ -610,6 +680,7 @@ export function materializeImportedAssignmentRules({
                 id: `${baseId}_split_${t.name}_1`,
                 periods: needed,
                 teacher: t.name,
+                teacher_name: t.name,
                 isAutoAssigned: true,
                 assignmentSource: 'subject-excel-import',
               }
@@ -618,6 +689,7 @@ export function materializeImportedAssignmentRules({
                 id: `${baseId}_split_remainder_2`,
                 periods: Math.round((P - needed) * 100) / 100,
                 teacher: '',
+                teacher_name: '',
                 isAutoAssigned: false,
               }
               delete chunk2.assignmentSource
@@ -639,7 +711,6 @@ export function materializeImportedAssignmentRules({
           error: `[需求不符] 教師「${t.name}」科目「${targetSubject}」要求指派 ${targetPeriods} 節，但實際僅可指派 ${ruleAssigned} 節`,
         }
       }
-    }
   }
 
   return {
@@ -826,4 +897,3 @@ export function runSmartSubjectAssignment(scheduleStore, confirmedHomeroomTeache
     classes: scheduleStore.classes || classes,
   }
 }
-
