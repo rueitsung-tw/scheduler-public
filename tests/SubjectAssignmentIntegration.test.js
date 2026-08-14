@@ -1823,4 +1823,120 @@ describe('materializeImportedAssignmentRules (Task 4 Materialization)', () => {
     expect(result.classes[0].homeroom_teacher).toBe('六導1')
     expect(classes[0].homeroom_teacher).toBe('六導1')
   })
+
+  it('S. treats an identical explicit re-import as matched existing without mutations', () => {
+    const classes = [{ name: '5年5班', grade: 5, course_requirements: [{ id: 'music-505', subject: '音樂', periods: 1, teacher: '吳品璇', teacher_name: '吳品璇', isAutoAssigned: false }] }]
+    const teachers = [{ id: 51, name: '吳品璇', type: 'subject', assignment_rules: [{ grade: 5, subject: '音樂', periods: 1, targetClassNames: ['5年5班'] }] }]
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+    expect(result.success).toBe(true)
+    expect(result.assignedCount).toBe(0)
+    expect(result.assignmentLedger).toEqual([expect.objectContaining({ status: 'matched-existing', teacherName: '吳品璇', periods: 1 })])
+    expect(result.classes[0].course_requirements[0]).toEqual(classes[0].course_requirements[0])
+  })
+
+  it('T. rejects a conflicting explicit assignment with original class reference unless overwrite is confirmed', () => {
+    const classes = [{ name: '5年5班', grade: 5, course_requirements: [{ id: 'music-505', subject: '音樂', periods: 1, teacher: '原教師', teacher_name: '原教師', isAutoAssigned: false }] }]
+    const teachers = [
+      { id: 61, name: '原教師', type: 'subject', assignment_rules: [] },
+      { id: 62, name: '新教師', type: 'subject', assignment_rules: [{ grade: 5, subject: '音樂', periods: 1, targetClassNames: ['5年5班'] }] },
+    ]
+    const rejected = materializeImportedAssignmentRules({ classes, teachers })
+    expect(rejected.success).toBe(false)
+    expect(rejected.classes).toBe(classes)
+    expect(rejected.conflicts).toEqual([expect.objectContaining({ className: '5年5班', existingTeacher: '原教師', requestedTeacher: '新教師' })])
+    const overwritten = materializeImportedAssignmentRules({ classes, teachers, overwriteConflicts: true })
+    expect(overwritten.success).toBe(true)
+    expect(overwritten.classes[0].course_requirements[0].teacher).toBe('新教師')
+    expect(overwritten.assignmentLedger).toEqual([expect.objectContaining({ status: 'overwritten' })])
+  })
+
+  it('U. materializes a resolved homeroom default rule without changing the class homeroom teacher', () => {
+    const classes = [{ name: '3年5班', grade: 3, homeroom_teacher: '305導師', course_requirements: [{ id: 'art-305', subject: '美勞', periods: 1, teacher: '' }] }]
+    const teachers = [{ id: 71, name: '匯入代理', type: 'subject', assignment_rules: [{ grade: 3, subject: '美勞', periods: 1, targetClassNames: ['3年5班'], teacherSource: 'homeroom-default', resolvedTeacherName: '305導師' }] }]
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+    expect(result.success).toBe(true)
+    expect(result.classes[0].homeroom_teacher).toBe('305導師')
+    expect(result.classes[0].course_requirements[0]).toMatchObject({ teacher: '305導師', teacher_name: '305導師' })
+  })
+
+  it('V. reconciles matching split chunks but blocks a different teacher chunk in the same explicit class', () => {
+    const matchingClasses = [{ name: '5年5班', grade: 5, course_requirements: [
+      { id: 'music-505_split_吳品璇_1', subject: '音樂', periods: 1, teacher: '吳品璇' },
+      { id: 'music-505_split_remainder_2', subject: '音樂', periods: 1, teacher: '吳品璇' },
+    ] }]
+    const teachers = [{ id: 81, name: '吳品璇', type: 'subject', assignment_rules: [{ grade: 5, subject: '音樂', periods: 2, targetClassNames: ['5年5班'] }] }]
+    expect(materializeImportedAssignmentRules({ classes: matchingClasses, teachers }).assignmentLedger)
+      .toEqual([expect.objectContaining({ status: 'matched-existing' }), expect.objectContaining({ status: 'matched-existing' })])
+
+    const conflictClasses = JSON.parse(JSON.stringify(matchingClasses))
+    conflictClasses[0].course_requirements[1].teacher = '另一教師'
+    const conflictTeachers = [...teachers, { id: 82, name: '另一教師', type: 'subject', assignment_rules: [] }]
+    const result = materializeImportedAssignmentRules({ classes: conflictClasses, teachers: conflictTeachers })
+    expect(result.success).toBe(false)
+    expect(result.conflicts).toEqual([expect.objectContaining({ existingTeacher: '另一教師', requestedTeacher: '吳品璇' })])
+  })
+
+  it('V2. treats an explicit class with matching-teacher chunks above the requested quota as a conflict and overwrites it exactly', () => {
+    const classes = [{ name: '5年5班', grade: 5, course_requirements: [
+      { id: 'music-505_split_1', subject: '音樂', periods: 2, teacher: '吳品璇', teacher_name: '吳品璇' },
+      { id: 'music-505_split_2', subject: '音樂', periods: 1, teacher: '吳品璇', teacher_name: '吳品璇' },
+    ] }]
+    const snapshot = JSON.parse(JSON.stringify(classes))
+    const teachers = [{ id: 83, name: '吳品璇', type: 'subject', assignment_rules: [{ grade: 5, subject: '音樂', periods: 2, targetClassNames: ['5年5班'] }] }]
+
+    const rejected = materializeImportedAssignmentRules({ classes, teachers })
+    expect(rejected.success).toBe(false)
+    expect(rejected.classes).toBe(classes)
+    expect(rejected.conflicts).toEqual([expect.objectContaining({
+      className: '5年5班', subject: '音樂', existingTeacher: '吳品璇', existingPeriods: 3,
+      requestedTeacher: '吳品璇', requestedPeriods: 2,
+    })])
+    expect(classes).toEqual(snapshot)
+
+    const overwritten = materializeImportedAssignmentRules({ classes, teachers, overwriteConflicts: true })
+    expect(overwritten.success).toBe(true)
+    const assignedPeriods = overwritten.classes[0].course_requirements
+      .filter((req) => req.subject === '音樂' && req.teacher === '吳品璇')
+      .reduce((sum, req) => sum + req.periods, 0)
+    expect(assignedPeriods).toBe(2)
+    expect(overwritten.classes[0].course_requirements.some((req) => req.subject === '音樂' && req.teacher === '吳品璇' && req.periods === 1)).toBe(false)
+  })
+
+  it('W. re-imports two same-subject grade batches as matched existing without resetting either teacher', () => {
+    const classes = ['5年1班', '5年2班'].map((name, index) => ({
+      name, grade: 5, course_requirements: [{ id: `science-${index}`, subject: '自然科學', periods: 4,
+        teacher: index === 0 ? '自然甲' : '自然乙', teacher_name: index === 0 ? '自然甲' : '自然乙',
+        isAutoAssigned: true, assignmentSource: 'subject-excel-import' }],
+    }))
+    const snapshot = JSON.parse(JSON.stringify(classes))
+    const teachers = [
+      { id: 91, name: '自然甲', type: 'subject', assignment_rules: [{ grade: 5, subject: '自然科學', periods: 4, candidateClassNames: ['5年1班', '5年2班'] }] },
+      { id: 92, name: '自然乙', type: 'subject', assignment_rules: [{ grade: 5, subject: '自然科學', periods: 4, candidateClassNames: ['5年1班', '5年2班'] }] },
+    ]
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+    expect(result.success).toBe(true)
+    expect(result.assignedCount).toBe(0)
+    expect(result.assignmentLedger).toEqual(expect.arrayContaining([
+      expect.objectContaining({ teacherName: '自然甲', status: 'matched-existing', periods: 4 }),
+      expect.objectContaining({ teacherName: '自然乙', status: 'matched-existing', periods: 4 }),
+    ]))
+    expect(result.classes).toEqual(snapshot)
+  })
+
+  it('X. materializes an unmentioned individually adjusted homeroom course and keeps it out of the batch quota', () => {
+    const classes = [
+      { name: '3年1班', grade: 3, homeroom_teacher: '301導師', course_requirements: [{ id: 'art-301', subject: '美勞', periods: 2, defaultTeacher: 'homeroom', teacher: '' }] },
+      { name: '3年2班', grade: 3, homeroom_teacher: '302導師', course_requirements: [{ id: 'art-302', subject: '美勞', periods: 2, defaultTeacher: 'homeroom', teacher: '' }] },
+      { name: '3年5班', grade: 3, homeroom_teacher: '305導師', course_requirements: [{ id: 'art-305', subject: '美勞', periods: 1, defaultTeacher: 'homeroom', teacher: '' }] },
+    ]
+    const teachers = [{ id: 101, name: '美勞科任', type: 'subject', assignment_rules: [{ grade: 3, subject: '美勞', periods: 4, candidateClassNames: classes.map((cls) => cls.name) }] }]
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+    expect(result.success).toBe(true)
+    expect(result.assignedCount).toBe(4)
+    expect(result.classes.find((cls) => cls.name === '3年5班')).toMatchObject({ homeroom_teacher: '305導師' })
+    expect(result.classes.find((cls) => cls.name === '3年5班').course_requirements[0]).toMatchObject({
+      teacher: '305導師', teacher_name: '305導師', assignmentSource: 'homeroom-default-import',
+    })
+    expect(result.classes.filter((cls) => cls.name !== '3年5班').every((cls) => cls.course_requirements[0].teacher === '美勞科任')).toBe(true)
+  })
 })

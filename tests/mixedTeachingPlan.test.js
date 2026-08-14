@@ -847,6 +847,21 @@ describe('mixedTeachingPlan utils', () => {
     })
   })
 
+  it('counts created, matched-existing, and overwritten ledger entries but never an unresolved conflict', () => {
+    const parsedRows = [{ teacherId: 201, teacherName: '吳品璇', rules: [{ grade: 5, systemSubject: '音樂', periods: 16 }] }]
+    const teachers = [{ id: 201, name: '吳品璇' }]
+    const matchedExisting = [{ teacherId: 201, teacherName: '吳品璇', grade: 5, subject: '音樂', periods: 16, className: '5年5班', status: 'matched-existing' }]
+    const unresolvedConflict = [{ teacherId: 201, teacherName: '吳品璇', grade: 5, subject: '音樂', periods: 16, className: '5年5班', status: 'conflict' }]
+
+    expect(validateImportedTeacherAssignments({ parsedRows, teachers, assignmentLedger: matchedExisting }))
+      .toEqual({ valid: true, errors: [] })
+    expect(validateImportedTeacherAssignments({ parsedRows, teachers, assignmentLedger: unresolvedConflict }))
+      .toEqual({
+        valid: false,
+        errors: ['教師「吳品璇」5 年級科目「音樂」應配 16 節，實際已配 0 節'],
+      })
+  })
+
   it('does not let an old same-name class assignment satisfy this import ledger validation', () => {
     const parsedRows = [{ teacherId: 201, teacherName: '自然甲', rules: [{ grade: 6, systemSubject: '自然科學', periods: 20 }] }]
     const teachers = [{ id: 201, name: '自然甲' }]

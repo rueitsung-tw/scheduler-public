@@ -1202,4 +1202,142 @@ describe('SubjectExcelImport.vue (Task 4 Component Tests)', () => {
     expect(naturalAssignments.map((req) => req.teacher)).toContain('自然行政乙')
     expect(naturalAssignments.map((req) => req.teacher)).toContain('施懿珊')
   })
+
+  it('25. materializer conflict does not mutate or sync until the user confirms the same import transaction', async () => {
+    const store = useScheduleStore()
+    const initialTeachers = [{ id: 501, name: '新科任', type: 'subject', assignment_rules: [] }]
+    const initialClasses = [{ name: '501班', grade: 5, course_requirements: [{ subject: '健康', periods: 1, teacher: '舊教師' }] }]
+    store.teachers = JSON.parse(JSON.stringify(initialTeachers))
+    store.classes = JSON.parse(JSON.stringify(initialClasses))
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+    const materializeSpy = vi.spyOn(materializerModule, 'materializeImportedAssignmentRules')
+      .mockReturnValueOnce({
+        success: false,
+        classes: initialClasses,
+        assignedCount: 0,
+        assignmentLedger: [],
+        conflicts: [{ className: '501班', subject: '健康', existingTeacher: '舊教師', existingPeriods: 1, requestedTeacher: '新科任', requestedPeriods: 1 }],
+        error: '匯入資料與既有班級配課不同，請確認是否覆寫衝突資料',
+      })
+      .mockReturnValueOnce({
+        success: true,
+        classes: [{ name: '501班', grade: 5, course_requirements: [{ subject: '健康', periods: 1, teacher: '新科任', teacher_name: '新科任' }] }],
+        assignedCount: 1,
+        assignmentLedger: [{ teacherId: 501, teacherName: '新科任', grade: 5, subject: '健康', periods: 1, className: '501班', status: 'overwritten' }],
+        conflicts: [],
+        error: null,
+      })
+
+    const wrapper = mount(SubjectExcelImport)
+    await triggerFileUpload(wrapper, buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [501, '專任', '健康科任', '新科任', '5健*1', 1],
+    ]))
+    await wrapper.find('#confirm-overwrite').setValue(true)
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+
+    expect(wrapper.find('#import-conflict-notice').text()).toContain('501班')
+    expect(wrapper.find('#import-conflict-notice').text()).toContain('舊教師（1 節）')
+    expect(wrapper.find('#import-conflict-notice').text()).toContain('新科任（1 節）')
+    expect(store.teachers).toEqual(initialTeachers)
+    expect(store.classes).toEqual(initialClasses)
+    expect(syncSpy).not.toHaveBeenCalled()
+    expect(materializeSpy.mock.calls[0][0].overwriteConflicts).toBe(false)
+
+    await wrapper.find('#confirm-import-conflicts').trigger('click')
+    await nextTick()
+
+    expect(materializeSpy.mock.calls[1][0].overwriteConflicts).toBe(true)
+    expect(syncSpy).toHaveBeenCalledTimes(1)
+    expect(store.classes[0].course_requirements[0].teacher).toBe('新科任')
+  })
+
+  it('26. conflict retry preserves the confirmed mixed resolution instead of allocating classes again', async () => {
+    const store = useScheduleStore()
+    const initialTeachers = [{ id: 601, name: '健康科任', type: 'subject', assignment_rules: [] }]
+    const initialClasses = [
+      { name: '201班', grade: 2, homeroom_teacher: '二年一班導師', course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '二年一班導師' }] },
+      { name: '202班', grade: 2, homeroom_teacher: '二年二班導師', course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '二年二班導師' }] },
+    ]
+    store.teachers = JSON.parse(JSON.stringify(initialTeachers))
+    store.classes = JSON.parse(JSON.stringify(initialClasses))
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+    const materializeSpy = vi.spyOn(materializerModule, 'materializeImportedAssignmentRules')
+      .mockReturnValueOnce({ success: false, classes: initialClasses, assignedCount: 0, assignmentLedger: [], conflicts: [{ className: '202班', subject: '健康', existingTeacher: '二年二班導師', existingPeriods: 1, requestedTeacher: '健康科任', requestedPeriods: 1 }], error: '衝突' })
+      .mockImplementationOnce(({ classes }) => ({
+        success: true, classes, assignedCount: 0,
+        assignmentLedger: [], conflicts: [], error: null,
+      }))
+
+    const wrapper = mount(SubjectExcelImport)
+    await triggerFileUpload(wrapper, buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [601, '專任', '健康科任', '健康科任', '2健*1', 1],
+    ]))
+    await wrapper.find('#confirm-overwrite').setValue(true)
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+    const dialog = wrapper.findComponent(MixedTeachingResolutionDialog)
+    dialog.vm.$emit('confirm', { resolutions: [{
+      grade: 2, subject: '健康', resolution: { subject: '健康', assignments: [
+        { className: '201班', teacherId: 601, teacherName: '健康科任', periods: 1 },
+        { className: '202班', teacherName: '二年二班導師', teacherType: 'homeroom', periods: 1 },
+      ] },
+    }] })
+    await nextTick()
+
+    expect(wrapper.find('#import-conflict-notice').exists()).toBe(true)
+    expect(store.classes).toEqual(initialClasses)
+    expect(syncSpy).not.toHaveBeenCalled()
+    const firstResolved = materializeSpy.mock.calls[0][0].classes.find((cls) => cls.name === '201班').course_requirements[0]
+    expect(firstResolved.teacher).toBe('健康科任')
+
+    await wrapper.find('#confirm-import-conflicts').trigger('click')
+    await nextTick()
+
+    const retriedResolved = materializeSpy.mock.calls[1][0].classes.find((cls) => cls.name === '201班').course_requirements[0]
+    expect(retriedResolved.teacher).toBe('健康科任')
+    expect(materializeSpy.mock.calls[1][0].overwriteConflicts).toBe(true)
+    expect(syncSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('27. after conflict overwrite confirmation, shows the materializer error instead of reopening conflict confirmation', async () => {
+    const store = useScheduleStore()
+    store.teachers = [{ id: 701, name: '健康科任', type: 'subject', assignment_rules: [] }]
+    store.classes = [{ name: '201班', grade: 2, course_requirements: [{ subject: '健康', periods: 1, teacher: '舊教師' }] }]
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+    const materializeSpy = vi.spyOn(materializerModule, 'materializeImportedAssignmentRules')
+      .mockReturnValueOnce({
+        success: false, classes: store.classes, assignedCount: 0, assignmentLedger: [],
+        conflicts: [{ className: '201班', subject: '健康', existingTeacher: '舊教師', existingPeriods: 1, requestedTeacher: '健康科任', requestedPeriods: 1 }],
+        error: '匯入資料與既有班級配課不同，請確認是否覆寫衝突資料',
+      })
+      .mockReturnValueOnce({
+        success: false, classes: store.classes, assignedCount: 0, assignmentLedger: [],
+        conflicts: [{ className: '201班', subject: '健康', existingTeacher: '舊教師', existingPeriods: 1, requestedTeacher: '健康科任', requestedPeriods: 1 }],
+        error: '[需求不符] 覆寫後仍無足夠健康課需求',
+      })
+
+    const wrapper = mount(SubjectExcelImport)
+    await triggerFileUpload(wrapper, buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [701, '專任', '健康科任', '健康科任', '2健*1', 1],
+    ]))
+    await wrapper.find('#confirm-overwrite').setValue(true)
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+    expect(wrapper.find('#import-conflict-notice').exists()).toBe(true)
+
+    await wrapper.find('#confirm-import-conflicts').trigger('click')
+    await nextTick()
+
+    expect(materializeSpy.mock.calls[1][0].overwriteConflicts).toBe(true)
+    expect(wrapper.find('#import-conflict-notice').exists()).toBe(false)
+    expect(wrapper.find('#status-message').text()).toContain('覆寫後仍無足夠健康課需求')
+    expect(syncSpy).not.toHaveBeenCalled()
+  })
 })

@@ -365,6 +365,8 @@ export function validateAndParseExcelRows(
         title: titleVal,
         codeMappings,
         classes: existingClasses,
+        currentTeacherId: matchedTeachers[0]?.id ?? null,
+        currentTeacherName: matchedTeachers[0]?.name ?? rawTeacherName,
       })
 
       const { rules: formulaRules, totalPeriods, diagnostics } = resolved
@@ -516,6 +518,9 @@ export function deriveTeacherFieldsFromRules(rules = []) {
     sourceKind: r.sourceKind || '',
     targetClassNames: Array.isArray(r.targetClassNames) ? [...r.targetClassNames] : [],
     candidateClassNames: Array.isArray(r.candidateClassNames) ? [...r.candidateClassNames] : [],
+    resolvedTeacherName: r.resolvedTeacherName || '',
+    resolvedTeacherId: r.resolvedTeacherId ?? null,
+    teacherSource: r.teacherSource || '',
   }))
 
   const quotaMap = new Map()

@@ -740,6 +740,9 @@ export function validateImportedTeacherAssignments({ parsedRows = [], teachers =
   for (const { identity, grade, subject, expectedPeriods } of expectedAssignments) {
     const assignedPeriods = ledger
       .filter((entry) => (
+        // 舊版 mixed ledger 沒有 status，仍視為已確認的落班資料；
+        // reconciliation 衝突則尚未套用，不得計入匯入完成節數。
+        (entry?.status == null || ['created', 'matched-existing', 'overwritten'].includes(entry.status)) &&
         isSameLedgerTeacher(entry, identity) &&
         Number(entry?.grade) === grade &&
         isSubjectMatch(entry?.subject, subject)

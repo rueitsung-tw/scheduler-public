@@ -492,7 +492,7 @@ function freezeAssignmentLedger(entries = []) {
   return Object.freeze(entries.map((entry) => Object.freeze({ ...entry })))
 }
 
-function createAssignmentLedgerEntry(teacher, grade, subject, periods, className) {
+function createAssignmentLedgerEntry(teacher, grade, subject, periods, className, status = 'created') {
   return {
     teacherId: teacher?.id ?? null,
     teacherName: String(teacher?.name || '').trim(),
@@ -500,7 +500,64 @@ function createAssignmentLedgerEntry(teacher, grade, subject, periods, className
     subject: String(subject || '').trim(),
     periods: Number(periods) || 0,
     className,
+    status,
     source: 'subject-excel-import',
+  }
+}
+
+function getRuleTeacher(rule, teacher) {
+  return String(rule?.teacherSource === 'homeroom-default'
+    ? rule?.resolvedTeacherName
+    : teacher?.name || '').trim()
+}
+
+function classRuleCandidates(classes, grade, rule) {
+  const scope = getRuleScopeClassNames(rule)
+  const candidates = classes.filter((cls) => (
+    getGradeFromClassName(cls.name, cls.grade) === grade &&
+    (!scope || scope.some((name) => isClassNameMatch(cls.name, name)))
+  ))
+  return scope
+    ? scope.map((name) => candidates.find((cls) => isClassNameMatch(cls.name, name))).filter(Boolean)
+    : candidates.sort((a, b) => String(a.name).localeCompare(String(b.name)))
+}
+
+function existingTeacherIsUnambiguous(req, requestedTeacher, teachers, requestedTeacherId = null) {
+  const existingName = String(req?.teacher || req?.teacher_name || '').trim()
+  const id = req?.teacherId ?? req?.teacher_id ?? req?.assignedTeacherId
+  if (id !== undefined && id !== null && id !== '') return String(id) === String(requestedTeacherId)
+  if (!existingName) return true
+  return teachers.filter((teacher) => String(teacher?.name || '').trim() === existingName).length === 1
+}
+
+function materializeAdjustedHomeroomDefaults(classes, importedPairs) {
+  for (const pair of importedPairs) {
+    const gradeClasses = classes.filter((cls) => getGradeFromClassName(cls.name, cls.grade) === pair.grade)
+    const periodCounts = new Map()
+    gradeClasses.forEach((cls) => (cls.course_requirements || []).forEach((req) => {
+      if (isSubjectMatch(req.subject, pair.subject) && Number(req.periods) > 0) {
+        const periods = Number(req.periods)
+        periodCounts.set(periods, (periodCounts.get(periods) || 0) + 1)
+      }
+    }))
+    const sortedBaselines = [...periodCounts.entries()].sort((a, b) => b[1] - a[1])
+    if (sortedBaselines.length === 0 || (sortedBaselines[1] && sortedBaselines[0][1] === sortedBaselines[1][1])) continue
+    const baseline = sortedBaselines[0][0]
+    gradeClasses.forEach((cls) => (cls.course_requirements || []).forEach((req) => {
+      if (
+        isSubjectMatch(req.subject, pair.subject) &&
+        req.defaultTeacher === 'homeroom' &&
+        !String(req.teacher || '').trim() &&
+        Number(req.periods) > 0 && Number(req.periods) !== baseline &&
+        String(cls.homeroom_teacher || cls.homeroomTeacher || '').trim()
+      ) {
+        const teacherName = String(cls.homeroom_teacher || cls.homeroomTeacher).trim()
+        req.teacher = teacherName
+        req.teacher_name = teacherName
+        req.isAutoAssigned = false
+        req.assignmentSource = 'homeroom-default-import'
+      }
+    }))
   }
 }
 
@@ -518,6 +575,7 @@ export function materializeImportedAssignmentRules({
   classes = [],
   teachers = [],
   confirmedHomeroomTeacherIds = [],
+  overwriteConflicts = false,
 } = {}) {
   if (!Array.isArray(classes) || !Array.isArray(teachers)) {
     return {
@@ -529,7 +587,89 @@ export function materializeImportedAssignmentRules({
     }
   }
 
-  // 1. 深拷貝輸入資料，確保若失敗時絕不污染呼叫端物件
+  // 1. 先建立 reconciliation draft；未確認的衝突絕不進入 reset 或 mutation。
+  const reconciliationEntries = []
+  const conflicts = []
+  const protectedExisting = new Set()
+  const overwriteTargets = new Set()
+  const importedEligible = teachers.filter((t) => isTeacherEligibleForRules(t, confirmedHomeroomTeacherIds))
+  importedEligible.forEach((teacher) => {
+    ;(teacher.assignment_rules || []).forEach((rule) => {
+      const grade = Number(rule.grade)
+      const subject = String(rule.subject || '').trim()
+      const requestedTeacher = getRuleTeacher(rule, teacher)
+      const scope = Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0
+        ? rule.targetClassNames
+        : null
+      if (!grade || !subject || !requestedTeacher) return
+      const candidates = classRuleCandidates(classes, grade, rule)
+      // 明示班級規則以「整個 scope 的既有總節數」比對：不可把同教師的超額
+      // split chunk 當成已符合，否則重複匯入會留下超出 Excel 配額的節數。
+      if (scope) {
+        const existingByClass = candidates.map((cls) => ({
+          cls,
+          entries: (cls.course_requirements || [])
+            .map((req, reqIndex) => ({ req, reqIndex }))
+            .filter(({ req }) => isSubjectMatch(req.subject, subject) && String(req.teacher || req.teacher_name || '').trim()),
+        })).filter(({ entries }) => entries.length > 0)
+        const existingEntries = existingByClass.flatMap(({ cls, entries }) => entries.map((entry) => ({ cls, ...entry })))
+        const existingPeriods = existingEntries.reduce((sum, { req }) => sum + (Number(req.periods) || 0), 0)
+        const allMatchRequestedTeacher = existingEntries.length > 0 && existingEntries.every(({ req }) => (
+          String(req.teacher || req.teacher_name || '').trim() === requestedTeacher &&
+          existingTeacherIsUnambiguous(req, requestedTeacher, teachers, teacher.id)
+        ))
+        const requestedPeriods = Number(rule.periods) || 0
+
+        if (allMatchRequestedTeacher && Math.abs(existingPeriods - requestedPeriods) <= 1e-6) {
+          existingEntries.forEach(({ cls, req, reqIndex }) => {
+            const periods = Number(req.periods) || 0
+            protectedExisting.add(`${cls.name}::${req.id ?? reqIndex}`)
+            reconciliationEntries.push(createAssignmentLedgerEntry(teacher, grade, subject, periods, cls.name, 'matched-existing'))
+          })
+        } else if (existingEntries.length > 0) {
+          // 一個班級一筆衝突，並將該班同科所有既有 chunk 列為覆寫目標。
+          existingByClass.forEach(({ cls, entries }) => {
+            const classPeriods = entries.reduce((sum, { req }) => sum + (Number(req.periods) || 0), 0)
+            const conflictingEntries = entries.filter(({ req }) => (
+              String(req.teacher || req.teacher_name || '').trim() !== requestedTeacher ||
+              !existingTeacherIsUnambiguous(req, requestedTeacher, teachers, teacher.id)
+            ))
+            const existingTeacher = [...new Set((conflictingEntries.length > 0 ? conflictingEntries : entries)
+              .map(({ req }) => String(req.teacher || req.teacher_name || '').trim()))].join('、')
+            conflicts.push({
+              className: cls.name, grade, subject, existingTeacher, existingPeriods: classPeriods,
+              requestedTeacher, requestedPeriods,
+            })
+            entries.forEach(({ req, reqIndex }) => overwriteTargets.add(`${cls.name}::${req.id ?? reqIndex}`))
+          })
+        }
+        return
+      }
+
+      let matchedPeriods = 0
+      candidates.forEach((cls) => (cls.course_requirements || []).forEach((req, reqIndex) => {
+        if (!isSubjectMatch(req.subject, subject) || !String(req.teacher || '').trim()) return
+        const key = `${cls.name}::${req.id ?? reqIndex}`
+        const existingTeacher = String(req.teacher || req.teacher_name || '').trim()
+        const periods = Number(req.periods) || 0
+        const quotaLeft = Math.round(((Number(rule.periods) || 0) - matchedPeriods) * 100) / 100
+        if (existingTeacher === requestedTeacher && existingTeacherIsUnambiguous(req, requestedTeacher, teachers, teacher.id) && periods > 0 && periods <= quotaLeft + 1e-6) {
+          matchedPeriods += periods
+          protectedExisting.add(key)
+          reconciliationEntries.push(createAssignmentLedgerEntry(teacher, grade, subject, periods, cls.name, 'matched-existing'))
+        }
+      }))
+    })
+  })
+  if (conflicts.length > 0 && !overwriteConflicts) {
+    return {
+      success: false, classes, assignedCount: 0,
+      assignmentLedger: freezeAssignmentLedger(reconciliationEntries), conflicts,
+      error: '匯入資料與既有班級配課不同，請確認是否覆寫衝突資料',
+    }
+  }
+
+  // 2. 深拷貝輸入資料，確保若失敗時絕不污染呼叫端物件
   const clonedClasses = JSON.parse(JSON.stringify(classes))
   const clonedTeachers = JSON.parse(JSON.stringify(teachers))
 
@@ -537,7 +677,7 @@ export function materializeImportedAssignmentRules({
     isTeacherEligibleForRules(t, confirmedHomeroomTeacherIds)
   )
 
-  // 2. 收集本次匯入所涉及的 (grade, subject) 組合
+  // 3. 收集本次匯入所涉及的 (grade, subject) 組合
   const importedPairs = []
   eligibleTeachers.forEach((t) => {
     if (Array.isArray(t.assignment_rules)) {
@@ -551,17 +691,23 @@ export function materializeImportedAssignmentRules({
     }
   })
 
-  // 3. 在深拷貝上，針對本次匯入涉及的年級＋科目，重設既有 assignmentSource === 'subject-excel-import' 的需求
+  // 4. 在深拷貝上，針對本次匯入涉及的年級＋科目，重設既有 assignmentSource === 'subject-excel-import' 的需求
   // 嚴格保留 isLocked, 手動指定 (isAutoAssigned: false 或無 assignmentSource), 及 mixed-import
   const resetBaseIds = new Set()
   clonedClasses.forEach((cls) => {
     const clsGrade = getGradeFromClassName(cls.name, cls.grade)
     if (Array.isArray(cls.course_requirements)) {
-      cls.course_requirements.forEach((req) => {
+      cls.course_requirements.forEach((req, reqIndex) => {
+        const reconciliationKey = `${cls.name}::${req.id ?? reqIndex}`
         const isTargetPair = importedPairs.some(
           (p) => p.grade === clsGrade && isSubjectMatch(req.subject, p.subject)
         )
-        if (isTargetPair && req.assignmentSource === 'subject-excel-import' && !req.isLocked) {
+        if (overwriteTargets.has(reconciliationKey) && !req.isLocked) {
+          req.teacher = ''
+          req.teacher_name = ''
+          req.isAutoAssigned = false
+          delete req.assignmentSource
+        } else if (isTargetPair && req.assignmentSource === 'subject-excel-import' && !req.isLocked && !protectedExisting.has(reconciliationKey)) {
           req.teacher = ''
           req.teacher_name = ''
           req.isAutoAssigned = false
@@ -581,7 +727,11 @@ export function materializeImportedAssignmentRules({
     targetPairs: importedPairs,
   })
 
-  // 4. 需求預檢擋寫 (Preflight Allocation Guard)
+  // 個別調整、預設由導師授課而未出現在 Excel 公式中的班級，直接由班導落班；
+  // 這不是 Excel 科任配額，且帶有來源標記以免後續批次規則搶走。
+  materializeAdjustedHomeroomDefaults(clonedClasses, importedPairs)
+
+  // 5. 需求預檢擋寫 (Preflight Allocation Guard)
   const preflight = preflightValidateDemand(clonedClasses, eligibleTeachers, confirmedHomeroomTeacherIds)
   if (!preflight.valid) {
     return {
@@ -589,13 +739,14 @@ export function materializeImportedAssignmentRules({
       classes, // 傳回未變更之原始 classes
       assignedCount: 0,
       assignmentLedger: freezeAssignmentLedger(),
+      conflicts,
       error: preflight.error,
     }
   }
 
-  // 5. 執行 Exact Rules 物化
+  // 6. 執行 Exact Rules 物化
   let totalAssignedCount = 0
-  const assignmentLedger = []
+  const assignmentLedger = [...reconciliationEntries]
 
   const orderedRuleEntries = eligibleTeachers
     .flatMap((teacher, teacherIndex) => (Array.isArray(teacher.assignment_rules)
@@ -611,7 +762,11 @@ export function materializeImportedAssignmentRules({
       const targetGrade = Number(rule.grade)
       const targetSubject = String(rule.subject || '').trim()
       const targetPeriods = Number(rule.periods) || 0
-      if (targetGrade <= 0 || targetPeriods <= 0 || !targetSubject) continue
+      const ruleTeacherName = getRuleTeacher(rule, t)
+      const ledgerTeacher = rule.teacherSource === 'homeroom-default'
+        ? { id: null, name: ruleTeacherName }
+        : t
+      if (targetGrade <= 0 || targetPeriods <= 0 || !targetSubject || !ruleTeacherName) continue
 
       // 班級規則優先順序：targetClassNames 是明確班級；否則 candidateClassNames 是批次候選；兩者皆無時為自然排序
       const targetClassNames = Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0
@@ -621,28 +776,7 @@ export function materializeImportedAssignmentRules({
         ? rule.candidateClassNames
         : null
 
-      let candidateClasses = []
-      if (targetClassNames) {
-        candidateClasses = targetClassNames
-          .map((name) =>
-            clonedClasses.find(
-              (c) => getGradeFromClassName(c.name, c.grade) === targetGrade && isClassNameMatch(c.name, name)
-            )
-          )
-          .filter(Boolean)
-      } else if (candidateClassNames) {
-        candidateClasses = candidateClassNames
-          .map((name) =>
-            clonedClasses.find(
-              (c) => getGradeFromClassName(c.name, c.grade) === targetGrade && isClassNameMatch(c.name, name)
-            )
-          )
-          .filter(Boolean)
-      } else {
-        candidateClasses = clonedClasses
-          .filter((c) => getGradeFromClassName(c.name, c.grade) === targetGrade)
-          .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-      }
+      const candidateClasses = classRuleCandidates(clonedClasses, targetGrade, rule)
 
       // 計算該 scope 範圍內該教師已滿足的節數作為起始 ruleAssigned
       let alreadyAssigned = 0
@@ -652,7 +786,7 @@ export function materializeImportedAssignmentRules({
           cls.course_requirements.forEach((req) => {
             if (
               req.teacher &&
-              req.teacher.trim() === t.name.trim() &&
+              req.teacher.trim() === ruleTeacherName &&
               isSubjectMatch(req.subject, targetSubject)
             ) {
               alreadyAssigned = Math.round((alreadyAssigned + (Number(req.periods) || 0)) * 100) / 100
@@ -685,22 +819,22 @@ export function materializeImportedAssignmentRules({
             const P = Number(req.periods) || 0
 
             if (P <= needed + 1e-6) {
-              req.teacher = t.name
-              req.teacher_name = t.name
+              req.teacher = ruleTeacherName
+              req.teacher_name = ruleTeacherName
               req.isAutoAssigned = true
               req.assignmentSource = 'subject-excel-import'
               ruleAssigned = Math.round((ruleAssigned + P) * 100) / 100
               totalAssignedCount = Math.round((totalAssignedCount + P) * 100) / 100
-              assignmentLedger.push(createAssignmentLedgerEntry(t, targetGrade, targetSubject, P, cls.name))
+              assignmentLedger.push(createAssignmentLedgerEntry(ledgerTeacher, targetGrade, targetSubject, P, cls.name, overwriteConflicts && conflicts.some((c) => c.className === cls.name && c.subject === targetSubject) ? 'overwritten' : 'created'))
             } else {
               // 拆分需求 (Splitting)
               const baseId = req.id ? String(req.id).split('_split_')[0] : `req_${Date.now()}`
               const chunk1 = {
                 ...req,
-                id: `${baseId}_split_${t.name}_1`,
+                id: `${baseId}_split_${ruleTeacherName}_1`,
                 periods: needed,
-                teacher: t.name,
-                teacher_name: t.name,
+                teacher: ruleTeacherName,
+                teacher_name: ruleTeacherName,
                 isAutoAssigned: true,
                 assignmentSource: 'subject-excel-import',
               }
@@ -716,7 +850,7 @@ export function materializeImportedAssignmentRules({
               cls.course_requirements.splice(i, 1, chunk1, chunk2)
               ruleAssigned = Math.round((ruleAssigned + needed) * 100) / 100
               totalAssignedCount = Math.round((totalAssignedCount + needed) * 100) / 100
-              assignmentLedger.push(createAssignmentLedgerEntry(t, targetGrade, targetSubject, needed, cls.name))
+              assignmentLedger.push(createAssignmentLedgerEntry(ledgerTeacher, targetGrade, targetSubject, needed, cls.name, overwriteConflicts && conflicts.some((c) => c.className === cls.name && c.subject === targetSubject) ? 'overwritten' : 'created'))
               i++ // 跳過未分配的 remainder chunk
             }
           }
@@ -730,7 +864,7 @@ export function materializeImportedAssignmentRules({
           classes, // 傳回未變更之原始 classes
           assignedCount: 0,
           assignmentLedger: freezeAssignmentLedger(),
-          error: `[需求不符] 教師「${t.name}」科目「${targetSubject}」要求指派 ${targetPeriods} 節，但實際僅可指派 ${ruleAssigned} 節`,
+          error: `[需求不符] 教師「${ruleTeacherName}」科目「${targetSubject}」要求指派 ${targetPeriods} 節，但實際僅可指派 ${ruleAssigned} 節`,
         }
       }
   }
@@ -740,6 +874,7 @@ export function materializeImportedAssignmentRules({
     classes: clonedClasses,
     assignedCount: totalAssignedCount,
     assignmentLedger: freezeAssignmentLedger(assignmentLedger),
+    conflicts: [],
     error: null,
   }
 }

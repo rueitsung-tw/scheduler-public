@@ -246,6 +246,28 @@
       @confirm="handleMixedConfirm"
       @cancel="handleMixedCancel"
     />
+
+    <div v-if="pendingImportConflicts.length > 0" id="import-conflict-notice" class="blocker-notice card">
+      <h3 class="text-danger">⚠️ 匯入資料與既有班級配課不同</h3>
+      <p>尚未寫入任何資料。請確認是否以 Excel 資料覆寫以下班級課程配課。</p>
+      <div class="blocker-table-wrapper">
+        <table class="blocker-table">
+          <thead><tr><th>班級</th><th>科目</th><th>既有配課</th><th>Excel 匯入配課</th></tr></thead>
+          <tbody>
+            <tr v-for="(conflict, index) in pendingImportConflicts" :key="`${conflict.className}-${conflict.subject}-${index}`">
+              <td>{{ conflict.className }}</td>
+              <td>{{ conflict.subject }}</td>
+              <td>{{ formatConflictAssignment(conflict.existingTeacher, conflict.existingPeriods) }}</td>
+              <td>{{ formatConflictAssignment(conflict.requestedTeacher, conflict.requestedPeriods) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="apply-actions">
+        <button id="confirm-import-conflicts" class="btn btn-danger" @click="handleConfirmImportConflicts">確認覆寫衝突資料</button>
+        <button id="cancel-import-conflicts" class="btn btn-secondary" @click="handleCancelImportConflicts">取消</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -292,6 +314,8 @@ const pendingMixedPlans = ref([])
 const mixedPlanBlockers = ref([])
 const mixedApplyError = ref('')
 const isApplyingMixed = ref(false)
+const pendingImportConflicts = ref([])
+const pendingImportTransaction = ref(null)
 
 const newCode = ref('')
 const newSystemSubject = ref('')
@@ -362,6 +386,21 @@ const formatRules = (rules = []) => {
     .join(' + ')
 }
 
+const formatConflictAssignment = (teacher, periods) => `${teacher || '未指定教師'}（${Number(periods) || 0} 節）`
+
+const cloneAndFreeze = (value) => {
+  // Vue store arrays are reactive proxies and cannot be passed to structuredClone.
+  // Import transaction data is plain JSON domain data, so JSON cloning is deliberate here.
+  const clone = JSON.parse(JSON.stringify(value))
+  const freeze = (item) => {
+    if (!item || typeof item !== 'object' || Object.isFrozen(item)) return item
+    Object.freeze(item)
+    Object.values(item).forEach(freeze)
+    return item
+  }
+  return freeze(clone)
+}
+
 const handleDownloadTemplate = () => {
   const buffer = generateSubjectAssignmentTemplate()
   const blob = new Blob([buffer], {
@@ -391,6 +430,8 @@ const handleFileUpload = (e) => {
   pendingMixedPlans.value = []
   mixedApplyError.value = ''
   isApplyingMixed.value = false
+  pendingImportConflicts.value = []
+  pendingImportTransaction.value = null
   scheduleStore.pendingMixedPlans = []
   mixedPlanBlockers.value = []
   unassignedTeacherWarnings.value = []
@@ -413,6 +454,8 @@ const parseBuffer = () => {
   pendingMixedPlans.value = []
   mixedApplyError.value = ''
   isApplyingMixed.value = false
+  pendingImportConflicts.value = []
+  pendingImportTransaction.value = null
   scheduleStore.pendingMixedPlans = []
   mixedPlanBlockers.value = []
   confirmCorrections.value = false
@@ -548,27 +591,48 @@ const handleMixedCancel = () => {
   scheduleStore.pendingMixedPlans = []
 }
 
-const commitImport = async ({ resolutions = [] }) => {
-  const confirmedHomeroomTeacherIds = confirmHomeroom.value
-    ? diffResults.value
-        .filter((d) => d.isHomeroom || d.teacherType === 'homeroom')
-        .map((d) => d.teacherId ?? d.teacherName)
-    : []
+const handleConfirmImportConflicts = async () => {
+  if (!pendingImportTransaction.value) return
+  await commitImport({ transaction: pendingImportTransaction.value, overwriteConflicts: true })
+}
+
+const handleCancelImportConflicts = () => {
+  pendingImportConflicts.value = []
+  pendingImportTransaction.value = null
+  mixedApplyError.value = ''
+  statusType.value = 'info'
+  statusMessage.value = '已取消覆寫衝突資料，既有班級配課未變更。'
+}
+
+const commitImport = async ({ resolutions = [], transaction = null, overwriteConflicts = false }) => {
+  const importTransaction = transaction || cloneAndFreeze({
+    parsedRows: parsedRows.value,
+    teachers: scheduleStore.teachers || [],
+    classes: scheduleStore.classes || [],
+    resolutions,
+    confirmedHomeroomTeacherIds: confirmHomeroom.value
+      ? diffResults.value
+          .filter((d) => d.isHomeroom || d.teacherType === 'homeroom')
+          .map((d) => d.teacherId ?? d.teacherName)
+      : [],
+  })
+  const transactionResolutions = importTransaction.resolutions || []
+  const confirmedHomeroomTeacherIds = importTransaction.confirmedHomeroomTeacherIds || []
 
   const nextTeachers = applyImportToTeachers(
-    parsedRows.value,
-    scheduleStore.teachers || [],
+    importTransaction.parsedRows,
+    importTransaction.teachers,
     confirmedHomeroomTeacherIds
   )
 
-  const nextClasses = applyResolvedMixedTeachingPlans(scheduleStore.classes || [], resolutions)
+  const nextClasses = applyResolvedMixedTeachingPlans(importTransaction.classes, transactionResolutions)
   const mixedAssignmentLedger = buildMixedTeachingAssignmentLedger({
-    resolutions,
+    resolutions: transactionResolutions,
     teachers: nextTeachers,
   })
 
   const rowMap = new Map()
-  for (const row of parsedRows.value) {
+  for (const row of importTransaction.parsedRows) {
     if (row.teacherId != null) {
       rowMap.set(String(row.teacherId), row)
     }
@@ -587,19 +651,34 @@ const commitImport = async ({ resolutions = [] }) => {
   // 不影響 nextTeachers 內最終要保存的完整 Excel assignment_rules。
   const materializationTeachers = filterRulesForImportedMaterialization(
     participatingTeachers,
-    resolutions
+    transactionResolutions
   )
 
   const materialized = materializeImportedAssignmentRules({
     classes: nextClasses,
     teachers: materializationTeachers,
     confirmedHomeroomTeacherIds,
+    overwriteConflicts,
   })
 
+  // 第一次偵測到衝突才開啟覆寫確認；已確認覆寫後若物化失敗，必須呈現實際錯誤，
+  // 不可因保留的 conflicts 再次回到確認畫面。
+  if (Array.isArray(materialized.conflicts) && materialized.conflicts.length > 0 && !overwriteConflicts) {
+    // 第一階段只保存不可變交易，絕不更新 store 或同步；確認後才用相同快照重試。
+    pendingImportTransaction.value = importTransaction
+    pendingImportConflicts.value = materialized.conflicts
+    showMixedDialog.value = false
+    statusType.value = 'error'
+    statusMessage.value = '⚠️ 偵測到與既有班級配課不同的匯入資料，請確認是否覆寫。'
+    return
+  }
+
   if (!materialized.success) {
+    pendingImportConflicts.value = []
+    pendingImportTransaction.value = null
     statusType.value = 'error'
     statusMessage.value = `❌ 無法套用班級配課：${materialized.error || '未知錯誤'}`
-    if (resolutions.length > 0) {
+    if (transactionResolutions.length > 0) {
       mixedApplyError.value = `無法套用班級配課：${materialized.error || '未知錯誤'}`
       showMixedDialog.value = true
     }
@@ -607,7 +686,7 @@ const commitImport = async ({ resolutions = [] }) => {
   }
 
   const assignmentValidation = validateImportedTeacherAssignments({
-    parsedRows: parsedRows.value,
+    parsedRows: importTransaction.parsedRows,
     teachers: nextTeachers,
     assignmentLedger: [
       ...mixedAssignmentLedger,
@@ -619,7 +698,7 @@ const commitImport = async ({ resolutions = [] }) => {
     const detail = assignmentValidation.errors.join('；')
     statusType.value = 'error'
     statusMessage.value = `❌ 無法套用班級配課：匯入教師尚未完整分配至班級。${detail}`
-    if (resolutions.length > 0) {
+    if (transactionResolutions.length > 0) {
       mixedApplyError.value = `匯入教師配課檢核未通過：${detail}`
       showMixedDialog.value = true
     }
@@ -641,6 +720,8 @@ const commitImport = async ({ resolutions = [] }) => {
     showMixedDialog.value = false
     pendingMixedPlans.value = []
     scheduleStore.pendingMixedPlans = []
+    pendingImportConflicts.value = []
+    pendingImportTransaction.value = null
     statusType.value = 'success'
     statusMessage.value = `🎉 科任配課資料已成功套用並儲存至雲端！（已指派 ${materialized.assignedCount} 節班級課程）`
   } catch (err) {
@@ -648,7 +729,7 @@ const commitImport = async ({ resolutions = [] }) => {
     scheduleStore.classes = prevClasses
     statusType.value = 'error'
     statusMessage.value = '❌ 無法儲存至雲端: ' + (err.message || err)
-    if (resolutions.length > 0) {
+    if (transactionResolutions.length > 0) {
       mixedApplyError.value = statusMessage.value
       showMixedDialog.value = true
     }

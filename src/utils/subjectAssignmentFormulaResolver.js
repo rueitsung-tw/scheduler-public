@@ -139,6 +139,8 @@ export function resolveAssignmentFormula({
   title = '',
   codeMappings = {},
   classes = [],
+  currentTeacherId = null,
+  currentTeacherName = '',
 } = {}) {
   const diagnostics = []
   const rules = []
@@ -308,6 +310,27 @@ export function resolveAssignmentFormula({
     const periodsPerClass = Number(req.periods)
     const periods = periodsPerClass
 
+    const classesInGrade = classes.filter((c) => Number(c.grade) === desc.grade)
+    const { baselinePeriods, ambiguous } = getPeriodBaseline(classesInGrade, systemSubject)
+    const individuallyAdjusted = !ambiguous && baselinePeriods != null && isIndividuallyAdjusted(req, baselinePeriods)
+    const resolvedTeacherName = String(currentTeacherName || '').trim()
+    const resolvedTeacherId = currentTeacherId ?? null
+    const homeroomTeacherName = String(targetClass.homeroom_teacher || '').trim()
+
+    const teacherResolution = individuallyAdjusted && resolvedTeacherName
+      ? {
+          resolvedTeacherId,
+          resolvedTeacherName,
+          teacherSource: 'excel-explicit',
+        }
+      : individuallyAdjusted && req.defaultTeacher === 'homeroom' && homeroomTeacherName
+        ? {
+            resolvedTeacherId: null,
+            resolvedTeacherName: homeroomTeacherName,
+            teacherSource: 'homeroom-default',
+          }
+        : {}
+
     tokenResults[i] = {
       rule: {
         grade: desc.grade,
@@ -319,6 +342,7 @@ export function resolveAssignmentFormula({
         classCount: 1,
         periodsPerClass,
         targetClassNames: [targetClass.name],
+        ...teacherResolution,
       },
     }
 
@@ -369,8 +393,16 @@ export function resolveAssignmentFormula({
           (r) => (r.systemSubject || r.subject) === systemSubject
         )
         if (req && Number(req.periods) > 0 && isIndividuallyAdjusted(req, baselinePeriods)) {
-          // 若未於系統指定教師，回傳 blocker（不論公式是否明確指定該班級）
-          if (!hasAssignedTeacher(req)) {
+          const explicitRule = tokenResults.find((result) => (
+            result?.rule?.grade === grade &&
+            result.rule.systemSubject === systemSubject &&
+            result.rule.targetClassNames?.includes(c.name) &&
+            result.rule.teacherSource
+          ))
+          const hasHomeroomDefaultSource = req.defaultTeacher === 'homeroom' && String(c.homeroom_teacher || '').trim()
+
+          // 個別調整班級必須有既有教師、Excel 明示教師，或可推導的班導來源。
+          if (!hasAssignedTeacher(req) && !explicitRule && !hasHomeroomDefaultSource) {
             const diagKey = `adjusted_no_teacher_${key}_${c.name}`
             if (!reportedDiagnosticKeys.has(diagKey)) {
               reportedDiagnosticKeys.add(diagKey)
@@ -433,11 +465,20 @@ export function resolveAssignmentFormula({
       const req = (c.course_requirements || []).find(
         (r) => (r.systemSubject || r.subject) === systemSubject
       )
+      const explicitRule = tokenResults.find((result) => (
+        result?.rule?.grade === desc.grade &&
+        result.rule.systemSubject === systemSubject &&
+        result.rule.targetClassNames?.includes(c.name) &&
+        result.rule.teacherSource
+      ))
+      const hasHomeroomDefaultSource = req?.defaultTeacher === 'homeroom' && String(c.homeroom_teacher || '').trim()
       return (
         req &&
         Number(req.periods) > 0 &&
         isIndividuallyAdjusted(req, baselinePeriods) &&
-        !hasAssignedTeacher(req)
+        !hasAssignedTeacher(req) &&
+        !explicitRule &&
+        !hasHomeroomDefaultSource
       )
     })
     if (hasUnassignedAdjusted) {
@@ -451,8 +492,8 @@ export function resolveAssignmentFormula({
           (r) => (r.systemSubject || r.subject) === systemSubject
         )
         if (!req || Number(req.periods) <= 0) return false
-        // 排除已個別調整節數且已指定教師的班級
-        if (isIndividuallyAdjusted(req, baselinePeriods) && hasAssignedTeacher(req)) {
+        // 個別調整節數班級一律不交由年級批次規則選取。
+        if (isIndividuallyAdjusted(req, baselinePeriods)) {
           return false
         }
         return true
@@ -520,8 +561,8 @@ export function resolveAssignmentFormula({
           (r) => (r.systemSubject || r.subject) === systemSubject
         )
         if (!req || Number(req.periods) <= 0) return false
-        // 排除已個別調整節數且已指定教師的班級
-        if (isIndividuallyAdjusted(req, baselinePeriods) && hasAssignedTeacher(req)) {
+        // 個別調整節數班級一律不交由年級批次規則選取。
+        if (isIndividuallyAdjusted(req, baselinePeriods)) {
           return false
         }
         return true
@@ -581,4 +622,3 @@ export function resolveAssignmentFormula({
     normalizedFormula: normalizedTermParts.join('+'),
   }
 }
-
