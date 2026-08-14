@@ -41,6 +41,70 @@ function inferExcelCodeFromTitle(title) {
 }
 
 /**
+ * 檢查課程需求是否已指定教師 (teacher 或 teacher_name 非空白)
+ */
+function hasAssignedTeacher(requirement) {
+  if (!requirement) return false
+  const teacher = String(requirement.teacher || '').trim()
+  const teacherName = String(requirement.teacher_name || '').trim()
+  return Boolean(teacher || teacherName)
+}
+
+/**
+ * 計算特定年級與科目正數節數的基準（唯一眾數）
+ *
+ * @param {Array} classesInGrade
+ * @param {string} systemSubject
+ * @returns {{ baselinePeriods: number|null, ambiguous: boolean, hasPositiveCourses: boolean }}
+ */
+function getPeriodBaseline(classesInGrade = [], systemSubject = '') {
+  const counts = new Map()
+  for (const c of classesInGrade) {
+    const req = (c.course_requirements || []).find(
+      (r) => (r.systemSubject || r.subject) === systemSubject
+    )
+    if (req && Number(req.periods) > 0) {
+      const p = Number(req.periods)
+      counts.set(p, (counts.get(p) || 0) + 1)
+    }
+  }
+
+  if (counts.size === 0) {
+    return { baselinePeriods: null, ambiguous: false, hasPositiveCourses: false }
+  }
+
+  let maxCount = 0
+  for (const count of counts.values()) {
+    if (count > maxCount) {
+      maxCount = count
+    }
+  }
+
+  const modes = []
+  for (const [period, count] of counts.entries()) {
+    if (count === maxCount) {
+      modes.push(period)
+    }
+  }
+
+  if (modes.length > 1) {
+    return { baselinePeriods: null, ambiguous: true, hasPositiveCourses: true }
+  }
+
+  return { baselinePeriods: modes[0], ambiguous: false, hasPositiveCourses: true }
+}
+
+/**
+ * 判定課程需求是否為個別調整節數（正數節數與基準節數不同）
+ */
+function isIndividuallyAdjusted(requirement, baselinePeriods) {
+  if (!requirement || baselinePeriods == null) return false
+  const p = Number(requirement.periods)
+  if (isNaN(p) || p <= 0) return false
+  return p !== baselinePeriods
+}
+
+/**
  * 依據 3 位數班級代碼 (如 505, 608) 比對系統班級
  */
 function findClassByCode(classes = [], classCodeStr = '') {
@@ -170,6 +234,7 @@ export function resolveAssignmentFormula({
   // Key: `${grade}_${systemSubject}` -> Set of reserved class names
   const reservedClassesMap = new Map()
   const tokenResults = new Array(tokenDescriptors.length)
+  const reportedDiagnosticKeys = new Set()
 
   // Pass 1: Identify and resolve explicit/bare class-specific targets first
   for (let i = 0; i < tokenDescriptors.length; i++) {
@@ -264,6 +329,64 @@ export function resolveAssignmentFormula({
     reservedClassesMap.get(key).add(targetClass.name)
   }
 
+  // Pre-check: 對所有引用的年級與科目，檢查基準唯一性與個別調整未指定教師 blocker
+  for (let i = 0; i < tokenDescriptors.length; i++) {
+    const desc = tokenDescriptors[i]
+    let excelCode = desc.excelCode
+    if (desc.kind === 'class-specific-bare') {
+      const { excelCode: inferredCode, matches } = inferExcelCodeFromTitle(title)
+      if (matches.length === 1) {
+        excelCode = inferredCode
+      } else {
+        continue
+      }
+    }
+    if (!excelCode) continue
+
+    const systemSubject = codeMappings[excelCode]
+    if (!systemSubject) continue
+
+    const grade = desc.grade
+    const key = `${grade}_${systemSubject}`
+    const classesInGrade = classes.filter((c) => Number(c.grade) === grade)
+    if (classesInGrade.length === 0) continue
+
+    const { baselinePeriods, ambiguous } = getPeriodBaseline(classesInGrade, systemSubject)
+    if (ambiguous) {
+      const diagKey = `ambiguous_${key}`
+      if (!reportedDiagnosticKeys.has(diagKey)) {
+        reportedDiagnosticKeys.add(diagKey)
+        diagnostics.push({
+          severity: 'blocker',
+          code: 'ambiguous-baseline-periods',
+          message: `系統 ${grade} 年級科目「${systemSubject}」每班節數無唯一眾數（最高出現次數並列），無法自動判斷基準節數；請先於班級課程列表確認各班節數與教師設定`,
+          originalToken: desc.rawTerm,
+        })
+      }
+    } else if (baselinePeriods != null) {
+      for (const c of classesInGrade) {
+        const req = (c.course_requirements || []).find(
+          (r) => (r.systemSubject || r.subject) === systemSubject
+        )
+        if (req && Number(req.periods) > 0 && isIndividuallyAdjusted(req, baselinePeriods)) {
+          // 若未於系統指定教師，回傳 blocker（不論公式是否明確指定該班級）
+          if (!hasAssignedTeacher(req)) {
+            const diagKey = `adjusted_no_teacher_${key}_${c.name}`
+            if (!reportedDiagnosticKeys.has(diagKey)) {
+              reportedDiagnosticKeys.add(diagKey)
+              diagnostics.push({
+                severity: 'blocker',
+                code: 'adjusted-periods-teacher-required',
+                message: `班級「${c.name}」科目「${systemSubject}」的每週節數已個別調整為 ${req.periods} 節，但尚未於班級課程列表指定授課老師；請先指定老師後再匯入。`,
+                originalToken: desc.rawTerm,
+              })
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Pass 2: Grade-batch and All-eligible tokens using remaining eligible unreserved candidates
   for (let i = 0; i < tokenDescriptors.length; i++) {
     const desc = tokenDescriptors[i]
@@ -296,7 +419,30 @@ export function resolveAssignmentFormula({
     }
 
     const key = `${desc.grade}_${systemSubject}`
+    const { baselinePeriods, ambiguous } = getPeriodBaseline(classesInGrade, systemSubject)
+
+    // 若基準模稜兩可，前置檢查已發出 blocker，此處略過後續處理
+    if (ambiguous) {
+      continue
+    }
+
     const reservedSet = reservedClassesMap.get(key) || new Set()
+
+    // 若有未指定教師的個別調整班級，前置檢查已發出 blocker，此處略過後續處理避免產生混淆訊息
+    const hasUnassignedAdjusted = classesInGrade.some((c) => {
+      const req = (c.course_requirements || []).find(
+        (r) => (r.systemSubject || r.subject) === systemSubject
+      )
+      return (
+        req &&
+        Number(req.periods) > 0 &&
+        isIndividuallyAdjusted(req, baselinePeriods) &&
+        !hasAssignedTeacher(req)
+      )
+    })
+    if (hasUnassignedAdjusted) {
+      continue
+    }
 
     if (desc.kind === 'grade-batch') {
       const remainingCandidates = classesInGrade.filter((c) => {
@@ -304,7 +450,12 @@ export function resolveAssignmentFormula({
         const req = (c.course_requirements || []).find(
           (r) => (r.systemSubject || r.subject) === systemSubject
         )
-        return req && Number(req.periods) > 0
+        if (!req || Number(req.periods) <= 0) return false
+        // 排除已個別調整節數且已指定教師的班級
+        if (isIndividuallyAdjusted(req, baselinePeriods) && hasAssignedTeacher(req)) {
+          return false
+        }
+        return true
       })
 
       if (remainingCandidates.length === 0) {
@@ -321,7 +472,7 @@ export function resolveAssignmentFormula({
         diagnostics.push({
           severity: 'blocker',
           code: 'class-count-mismatch',
-          message: `${desc.grade} 年級科目「${systemSubject}」填寫 ${desc.classCount} 個班，但系統僅有 ${classesInGrade.length} 個班`,
+          message: `${desc.grade} 年級科目「${systemSubject}」填寫 ${desc.classCount} 個班，但系統僅有 ${remainingCandidates.length} 個班`,
           originalToken: desc.rawTerm,
         })
         continue
@@ -368,7 +519,12 @@ export function resolveAssignmentFormula({
         const req = (c.course_requirements || []).find(
           (r) => (r.systemSubject || r.subject) === systemSubject
         )
-        return req && Number(req.periods) > 0
+        if (!req || Number(req.periods) <= 0) return false
+        // 排除已個別調整節數且已指定教師的班級
+        if (isIndividuallyAdjusted(req, baselinePeriods) && hasAssignedTeacher(req)) {
+          return false
+        }
+        return true
       })
 
       if (eligibleClasses.length === 0) {
