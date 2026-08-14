@@ -266,7 +266,9 @@ import {
 import MixedTeachingResolutionDialog from './MixedTeachingResolutionDialog.vue'
 import {
   buildMixedTeachingPlans,
+  buildMixedTeachingAssignmentLedger,
   applyResolvedMixedTeachingPlans,
+  validateImportedTeacherAssignments,
 } from '../utils/mixedTeachingPlan.js'
 
 const scheduleStore = useScheduleStore()
@@ -560,6 +562,10 @@ const commitImport = async ({ resolutions = [] }) => {
   )
 
   const nextClasses = applyResolvedMixedTeachingPlans(scheduleStore.classes || [], resolutions)
+  const mixedAssignmentLedger = buildMixedTeachingAssignmentLedger({
+    resolutions,
+    teachers: nextTeachers,
+  })
 
   const rowMap = new Map()
   for (const row of parsedRows.value) {
@@ -595,6 +601,26 @@ const commitImport = async ({ resolutions = [] }) => {
     statusMessage.value = `❌ 無法套用班級配課：${materialized.error || '未知錯誤'}`
     if (resolutions.length > 0) {
       mixedApplyError.value = `無法套用班級配課：${materialized.error || '未知錯誤'}`
+      showMixedDialog.value = true
+    }
+    return
+  }
+
+  const assignmentValidation = validateImportedTeacherAssignments({
+    parsedRows: parsedRows.value,
+    teachers: nextTeachers,
+    assignmentLedger: [
+      ...mixedAssignmentLedger,
+      ...(materialized.assignmentLedger || []),
+    ],
+  })
+
+  if (!assignmentValidation.valid) {
+    const detail = assignmentValidation.errors.join('；')
+    statusType.value = 'error'
+    statusMessage.value = `❌ 無法套用班級配課：匯入教師尚未完整分配至班級。${detail}`
+    if (resolutions.length > 0) {
+      mixedApplyError.value = `匯入教師配課檢核未通過：${detail}`
       showMixedDialog.value = true
     }
     return

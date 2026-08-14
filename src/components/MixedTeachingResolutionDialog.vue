@@ -14,9 +14,8 @@
 
           <p class="plan-summary">
             偵測到 {{ plan.grade }}年級 {{ plan.subject }} 同時由導師及科任／行政教師授課。該科目共需
-            {{ plan.totalDemandPeriods }}堂，其中科任／行政教師已配置
-            {{ plan.importedSubjectAdminPeriods ?? plan.importedPeriods }}堂，剩餘
-            {{ plan.homeroomPeriods ?? plan.defaultRolePeriods }}堂應由導師授課。請選擇班級分配方式。
+            {{ plan.totalDemandPeriods }}堂，其中導師已配置 {{ getHomeroomPeriods(plan) }}堂，
+            科任／行政教師已配置 {{ getSubjectAdminPeriods(plan) }}堂。請選擇班級分配方式。
           </p>
 
           <div class="mode-selector">
@@ -81,8 +80,8 @@
                 class="assignment-tag"
               >
                 <span class="class-name">{{ item.className }}</span>
-                <span class="teacher-info" :class="item.teacherType">
-                  {{ item.teacherName || (item.teacherType === 'homeroom' ? '導師' : '科任／行政') }} ({{ item.periods }}堂)
+                <span class="teacher-info" :class="[item.teacherType, { 'unassigned-teacher': !item.teacherName }]">
+                  {{ item.teacherName || '未指定教師（資料錯誤）' }} ({{ item.periods }}堂)
                 </span>
               </div>
             </div>
@@ -108,11 +107,15 @@
                 <input
                   type="checkbox"
                   :checked="isExceptionSelected(plan, block.className)"
+                  :disabled="isForcedAssignment(plan, block.className)"
                   :data-testid="'class-checkbox-' + block.className"
                   :data-testid-alt="'class-checkbox-' + bIdx"
                   @change="setException(plan, block.className, $event.target.checked)"
                 />
-                <span>{{ block.className }} ({{ block.periods }}堂)</span>
+                <span>
+                  {{ block.className }} ({{ block.periods }}堂)
+                  <small v-if="isForcedAssignment(plan, block.className)" class="forced-exception-note">已由匯入指定</small>
+                </span>
               </label>
             </div>
 
@@ -238,11 +241,28 @@ watch(
 )
 
 function isHomeroomDefault(plan) {
+  if (plan.defaultRoleGroup) return plan.defaultRoleGroup === 'homeroom'
   return (
-    plan.defaultRoleGroup === 'homeroom' ||
     plan.defaultTeacher === 'homeroom' ||
     (plan.defaultTeacher !== 'subject' && plan.defaultTeacher !== 'admin')
   )
+}
+
+function getHomeroomPeriods(plan) {
+  const explicit = Number(plan.homeroomPeriods)
+  if (Number.isFinite(explicit)) return explicit
+  const subjectAdmin = Number(plan.subjectAdminPeriods ?? plan.importedSubjectAdminPeriods)
+  return Number.isFinite(subjectAdmin) ? Number(plan.totalDemandPeriods || 0) - subjectAdmin : 0
+}
+
+function getSubjectAdminPeriods(plan) {
+  const explicit = Number(plan.subjectAdminPeriods)
+  if (Number.isFinite(explicit)) return explicit
+  if (!isHomeroomDefault(plan)) {
+    return Number(plan.totalDemandPeriods || 0) - getHomeroomPeriods(plan)
+  }
+  const imported = Number(plan.importedSubjectAdminPeriods ?? plan.importedPeriods)
+  return Number.isFinite(imported) ? imported : 0
 }
 
 function getTargetQuota(plan) {
@@ -258,12 +278,33 @@ function getSelectedExceptions(plan) {
   return planExceptions.value[key] || []
 }
 
+function getForcedExceptionClassNames(plan) {
+  return Array.isArray(plan.forcedExceptionClassNames) ? plan.forcedExceptionClassNames : []
+}
+
+function isForcedException(plan, className) {
+  return getForcedExceptionClassNames(plan).includes(className)
+}
+
+function getForcedDefaultClassNames(plan) {
+  return Array.isArray(plan.forcedDefaultClassNames) ? plan.forcedDefaultClassNames : []
+}
+
+function isForcedDefault(plan, className) {
+  return getForcedDefaultClassNames(plan).includes(className)
+}
+
+function isForcedAssignment(plan, className) {
+  return isForcedException(plan, className) || isForcedDefault(plan, className)
+}
+
 function isExceptionSelected(plan, className) {
   const selected = getSelectedExceptions(plan)
-  return selected.includes(className)
+  return isForcedException(plan, className) || selected.includes(className)
 }
 
 function setException(plan, className, isChecked) {
+  if (isForcedAssignment(plan, className)) return
   const key = getKey(plan)
   const current = getSelectedExceptions(plan)
   let updated
@@ -283,7 +324,10 @@ function setException(plan, className, isChecked) {
 }
 
 function getSelectedPeriods(plan) {
-  const selected = getSelectedExceptions(plan)
+  const selected = Array.from(new Set([
+    ...getForcedExceptionClassNames(plan),
+    ...getSelectedExceptions(plan),
+  ]))
   const classMap = new Map((plan.classBlocks || []).map((b) => [b.className, b.periods]))
   return selected.reduce((sum, name) => sum + (classMap.get(name) || 0), 0)
 }
@@ -506,6 +550,20 @@ function handleCancel() {
   gap: 6px;
   font-size: 13px;
   cursor: pointer;
+}
+
+.class-checkbox-item input:disabled + span {
+  color: #6b7280;
+}
+
+.forced-exception-note {
+  margin-left: 4px;
+  color: #2563eb;
+}
+
+.unassigned-teacher {
+  color: #b91c1c;
+  font-weight: 600;
 }
 
 .periods-counter {

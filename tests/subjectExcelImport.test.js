@@ -1005,4 +1005,201 @@ describe('SubjectExcelImport.vue (Task 4 Component Tests)', () => {
     await nextTick()
     expect(preview()).not.toEqual(firstRandomPreview)
   })
+
+  it('21. Mixed 6th-grade science preview reports both role totals and names every imported teacher', () => {
+    const plan = {
+      key: '6::自然科學',
+      grade: 6,
+      subject: '自然科學',
+      defaultRoleGroup: 'subject-admin',
+      totalDemandPeriods: 44,
+      homeroomPeriods: 4,
+      subjectAdminPeriods: 40,
+      importedSubjectAdminPeriods: 40,
+      importedHomeroomPeriods: 4,
+      implicitDefaultPeriods: 0,
+      namedTeacherQuotas: [
+        { teacherName: '自然科任甲', teacherType: 'subject', periods: 20 },
+        { teacherName: '自然科任乙', teacherType: 'admin', periods: 20 },
+        { teacherName: '施懿珊', teacherType: 'homeroom', periods: 4 },
+      ],
+      classBlocks: Array.from({ length: 11 }, (_, index) => ({
+        className: `6年${index + 1}班`,
+        periods: 4,
+        homeroomTeacherName: index === 7 ? '施懿珊' : `六年${index + 1}班導師`,
+      })),
+    }
+
+    const wrapper = mount(MixedTeachingResolutionDialog, {
+      props: { visible: true, plans: [plan] },
+    })
+
+    expect(wrapper.text()).toContain('導師已配置 4堂')
+    expect(wrapper.text()).toContain('科任／行政教師已配置 40堂')
+    expect(wrapper.text()).toContain('自然科任甲 (4堂)')
+    expect(wrapper.text()).toContain('自然科任乙 (4堂)')
+    expect(wrapper.text()).toContain('施懿珊 (4堂)')
+    expect(wrapper.text()).not.toContain('科任／行政 (4堂)')
+  })
+
+  it('22. Mixed manual mode keeps an imported forced exception class selected and counts it without operator input', async () => {
+    const plan = {
+      key: '6::自然科學',
+      grade: 6,
+      subject: '自然科學',
+      defaultRoleGroup: 'subject-admin',
+      totalDemandPeriods: 44,
+      homeroomPeriods: 4,
+      subjectAdminPeriods: 40,
+      importedHomeroomPeriods: 4,
+      exceptionRoleNamedPeriods: 4,
+      forcedExceptionClassNames: ['6年8班'],
+      exceptionTeacherQuotas: [
+        { teacherName: '施懿珊', teacherType: 'homeroom', periods: 4, allocatedClassNames: ['6年8班'] },
+      ],
+      defaultRoleTeacherQuotas: [
+        { teacherName: '自然科任甲', teacherType: 'subject', periods: 40 },
+      ],
+      namedTeacherQuotas: [
+        { teacherName: '自然科任甲', teacherType: 'subject', periods: 40 },
+        { teacherName: '施懿珊', teacherType: 'homeroom', periods: 4, allocatedClassNames: ['6年8班'] },
+      ],
+      classBlocks: Array.from({ length: 11 }, (_, index) => ({
+        className: `6年${index + 1}班`,
+        periods: 4,
+        homeroomTeacherName: index === 7 ? '施懿珊' : `六年${index + 1}班導師`,
+      })),
+    }
+    const wrapper = mount(MixedTeachingResolutionDialog, {
+      props: { visible: true, plans: [plan] },
+    })
+
+    await wrapper.get('[data-testid="mode-manual"]').setValue()
+    await nextTick()
+
+    const forcedCheckbox = wrapper.get('[data-testid="class-checkbox-6年8班"]')
+    expect(forcedCheckbox.element.checked).toBe(true)
+    expect(forcedCheckbox.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('已由匯入指定')
+    expect(wrapper.text()).toContain('已分配例外節數：4 / 4 堂')
+  })
+
+  it('22b. Mixed manual mode disables a forced default-role class without selecting it as an exception', async () => {
+    const plan = {
+      key: '4::美勞', grade: 4, subject: '美勞', defaultRoleGroup: 'subject-admin',
+      totalDemandPeriods: 6, homeroomPeriods: 2, subjectAdminPeriods: 4,
+      importedHomeroomPeriods: 2, exceptionRoleNamedPeriods: 2,
+      forcedDefaultClassNames: ['4年1班'],
+      exceptionTeacherQuotas: [{ teacherName: '王導', teacherType: 'homeroom', periods: 2 }],
+      defaultRoleTeacherQuotas: [{ teacherName: '甲師', teacherType: 'subject', periods: 4, allocatedClassNames: ['4年1班'] }],
+      namedTeacherQuotas: [{ teacherName: '甲師', teacherType: 'subject', periods: 4, allocatedClassNames: ['4年1班'] }, { teacherName: '王導', teacherType: 'homeroom', periods: 2 }],
+      classBlocks: Array.from({ length: 3 }, (_, index) => ({ className: `4年${index + 1}班`, periods: 2, homeroomTeacherName: index === 0 ? '王導' : `四年${index + 1}班導師` })),
+    }
+    const wrapper = mount(MixedTeachingResolutionDialog, { props: { visible: true, plans: [plan] } })
+    await wrapper.get('[data-testid="mode-manual"]').setValue()
+    await nextTick()
+
+    const fixedDefault = wrapper.get('[data-testid="class-checkbox-4年1班"]')
+    expect(fixedDefault.attributes('disabled')).toBeDefined()
+    expect(fixedDefault.element.checked).toBe(false)
+    expect(wrapper.text()).toContain('已由匯入指定')
+  })
+
+  it('23. Mixed confirmation blocks before mutation when the confirmed assignments do not cover an imported teacher formula', async () => {
+    const store = useScheduleStore()
+    const initialTeachers = [
+      { id: 301, name: '健康科任', type: 'subject', assignment_rules: [] },
+    ]
+    const initialClasses = [
+      {
+        name: '201班',
+        grade: 2,
+        homeroom_teacher: '二年一班導師',
+        course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '二年一班導師' }],
+      },
+      {
+        name: '202班',
+        grade: 2,
+        homeroom_teacher: '二年二班導師',
+        course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom', teacher: '二年二班導師' }],
+      },
+    ]
+    store.teachers = JSON.parse(JSON.stringify(initialTeachers))
+    store.classes = JSON.parse(JSON.stringify(initialClasses))
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+
+    const wrapper = mount(SubjectExcelImport)
+    await triggerFileUpload(wrapper, buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [301, '專任', '健康科任', '健康科任', '2健*1', 1],
+    ]))
+    await wrapper.find('#confirm-overwrite').setValue(true)
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+
+    const dialog = wrapper.findComponent(MixedTeachingResolutionDialog)
+    dialog.vm.$emit('confirm', {
+      resolutions: [{
+        grade: 2,
+        subject: '健康',
+        resolution: { subject: '健康', assignments: [] },
+      }],
+    })
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="mixed-dialog-content"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="mixed-apply-error"]').text()).toContain('健康科任')
+    expect(wrapper.find('[data-testid="mixed-apply-error"]').text()).toContain('應配 1 節，實際已配 0 節')
+    expect(store.teachers).toEqual(initialTeachers)
+    expect(store.classes).toEqual(initialClasses)
+    expect(syncSpy).not.toHaveBeenCalled()
+  })
+
+  it('24. Mixed sixth-grade science writes every named teacher to classes without changing homeroom_teacher', async () => {
+    const store = useScheduleStore()
+    const initialTeachers = [
+      { id: 401, name: '自然科任甲', type: 'subject', assignment_rules: [] },
+      { id: 402, name: '自然行政乙', type: 'admin', assignment_rules: [] },
+      { id: 403, name: '施懿珊', type: 'homeroom', assignedClass: '608班', assignment_rules: [] },
+    ]
+    const initialClasses = Array.from({ length: 11 }, (_, index) => {
+      const classNumber = index + 1
+      return {
+        name: `60${classNumber}班`,
+        grade: 6,
+        homeroom_teacher: classNumber === 8 ? '施懿珊' : `六年${classNumber}班導師`,
+        course_requirements: [{ subject: '自然科學', periods: 4, defaultTeacher: 'subject' }],
+      }
+    })
+    const originalHomerooms = initialClasses.map((cls) => cls.homeroom_teacher)
+    store.teachers = JSON.parse(JSON.stringify(initialTeachers))
+    store.classes = JSON.parse(JSON.stringify(initialClasses))
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockResolvedValue(true)
+
+    const wrapper = mount(SubjectExcelImport)
+    await triggerFileUpload(wrapper, buildWorkbookBuffer([
+      ['115學年教師授課鐘點一覽表', '', '', '', '', ''],
+      ['編號', '', '職    稱', '姓  名', '', '節數'],
+      [401, '專任', '自然科任', '自然科任甲', '6自*5', 20],
+      [402, '行政', '自然行政', '自然行政乙', '6自*5', 20],
+      [403, '導師', '自然超鐘點', '施懿珊', '608', 4],
+    ]))
+    await wrapper.find('#confirm-overwrite').setValue(true)
+    await wrapper.find('#confirm-homeroom').setValue(true)
+    await wrapper.find('#apply-import-btn').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-testid="mixed-dialog-content"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="mixed-confirm"]').trigger('click')
+    await nextTick()
+
+    expect(syncSpy).toHaveBeenCalledTimes(1)
+    expect(store.classes.map((cls) => cls.homeroom_teacher)).toEqual(originalHomerooms)
+    const naturalAssignments = store.classes.map((cls) => cls.course_requirements[0])
+    expect(naturalAssignments.every((req) => req.teacher && req.teacher_name)).toBe(true)
+    expect(naturalAssignments.map((req) => req.teacher)).toContain('自然科任甲')
+    expect(naturalAssignments.map((req) => req.teacher)).toContain('自然行政乙')
+    expect(naturalAssignments.map((req) => req.teacher)).toContain('施懿珊')
+  })
 })

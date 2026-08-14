@@ -488,6 +488,22 @@ function getImportedRulePriority(rule) {
   return 2
 }
 
+function freezeAssignmentLedger(entries = []) {
+  return Object.freeze(entries.map((entry) => Object.freeze({ ...entry })))
+}
+
+function createAssignmentLedgerEntry(teacher, grade, subject, periods, className) {
+  return {
+    teacherId: teacher?.id ?? null,
+    teacherName: String(teacher?.name || '').trim(),
+    grade: Number(grade),
+    subject: String(subject || '').trim(),
+    periods: Number(periods) || 0,
+    className,
+    source: 'subject-excel-import',
+  }
+}
+
 /**
  * 📦 專屬匯入規則物化器 (Materialize Imported Assignment Rules)
  * 僅根據傳入的 teachers 之 assignment_rules 物化分配，絕不執行 runSmartSubjectAssignment / Phase B fallback。
@@ -496,7 +512,7 @@ function getImportedRulePriority(rule) {
  * @param {Array} params.classes 班級陣列
  * @param {Array} params.teachers 教師陣列
  * @param {Array} [params.confirmedHomeroomTeacherIds] 已確認導師 ID 陣列
- * @returns {{ success: boolean, classes: Array, assignedCount: number, error: string|null }}
+ * @returns {{ success: boolean, classes: Array, assignedCount: number, assignmentLedger: ReadonlyArray, error: string|null }}
  */
 export function materializeImportedAssignmentRules({
   classes = [],
@@ -508,6 +524,7 @@ export function materializeImportedAssignmentRules({
       success: false,
       classes: classes || [],
       assignedCount: 0,
+      assignmentLedger: freezeAssignmentLedger(),
       error: '班級或教師資料格式不正確',
     }
   }
@@ -571,12 +588,14 @@ export function materializeImportedAssignmentRules({
       success: false,
       classes, // 傳回未變更之原始 classes
       assignedCount: 0,
+      assignmentLedger: freezeAssignmentLedger(),
       error: preflight.error,
     }
   }
 
   // 5. 執行 Exact Rules 物化
   let totalAssignedCount = 0
+  const assignmentLedger = []
 
   const orderedRuleEntries = eligibleTeachers
     .flatMap((teacher, teacherIndex) => (Array.isArray(teacher.assignment_rules)
@@ -672,6 +691,7 @@ export function materializeImportedAssignmentRules({
               req.assignmentSource = 'subject-excel-import'
               ruleAssigned = Math.round((ruleAssigned + P) * 100) / 100
               totalAssignedCount = Math.round((totalAssignedCount + P) * 100) / 100
+              assignmentLedger.push(createAssignmentLedgerEntry(t, targetGrade, targetSubject, P, cls.name))
             } else {
               // 拆分需求 (Splitting)
               const baseId = req.id ? String(req.id).split('_split_')[0] : `req_${Date.now()}`
@@ -696,6 +716,7 @@ export function materializeImportedAssignmentRules({
               cls.course_requirements.splice(i, 1, chunk1, chunk2)
               ruleAssigned = Math.round((ruleAssigned + needed) * 100) / 100
               totalAssignedCount = Math.round((totalAssignedCount + needed) * 100) / 100
+              assignmentLedger.push(createAssignmentLedgerEntry(t, targetGrade, targetSubject, needed, cls.name))
               i++ // 跳過未分配的 remainder chunk
             }
           }
@@ -708,6 +729,7 @@ export function materializeImportedAssignmentRules({
           success: false,
           classes, // 傳回未變更之原始 classes
           assignedCount: 0,
+          assignmentLedger: freezeAssignmentLedger(),
           error: `[需求不符] 教師「${t.name}」科目「${targetSubject}」要求指派 ${targetPeriods} 節，但實際僅可指派 ${ruleAssigned} 節`,
         }
       }
@@ -717,6 +739,7 @@ export function materializeImportedAssignmentRules({
     success: true,
     classes: clonedClasses,
     assignedCount: totalAssignedCount,
+    assignmentLedger: freezeAssignmentLedger(assignmentLedger),
     error: null,
   }
 }

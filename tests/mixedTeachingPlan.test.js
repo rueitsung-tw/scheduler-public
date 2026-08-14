@@ -3,6 +3,8 @@ import {
   buildMixedTeachingPlans,
   resolveMixedTeachingPlan,
   applyResolvedMixedTeachingPlans,
+  buildMixedTeachingAssignmentLedger,
+  validateImportedTeacherAssignments,
 } from '../src/utils/mixedTeachingPlan.js'
 
 describe('mixedTeachingPlan utils', () => {
@@ -378,6 +380,11 @@ describe('mixedTeachingPlan utils', () => {
         teacherName: '王導',
         rules: [{ grade: 4, systemSubject: '美勞', periods: 2 }],
       },
+      {
+        teacherId: 21,
+        teacherName: '甲師',
+        rules: [{ grade: 4, systemSubject: '美勞', periods: 4 }],
+      },
     ]
 
     const { plans, blockers } = buildMixedTeachingPlans({
@@ -411,9 +418,9 @@ describe('mixedTeachingPlan utils', () => {
       periods: 2,
     })
 
-    const defaultAssigned = res.resolution.assignments.filter((a) => a.teacherType === 'subject-admin')
+    const defaultAssigned = res.resolution.assignments.filter((a) => a.teacherName === '甲師')
     expect(defaultAssigned).toHaveLength(2)
-    expect(defaultAssigned.every((a) => a.teacherName === '')).toBe(true)
+    expect(defaultAssigned.every((a) => a.teacherName === '甲師')).toBe(true)
 
     // 套用決議至班級需求，驗證套用後的結果
     const updatedClasses = applyResolvedMixedTeachingPlans(reverseClasses, [res.resolution])
@@ -423,13 +430,13 @@ describe('mixedTeachingPlan utils', () => {
     expect(importedReqs).toHaveLength(1)
     expect(updatedClasses.find((c) => c.name === '4年1班').course_requirements[0].teacher).toBe('王導')
 
-    // 2. 留在預設群組的班級 (4年2班, 4年3班) 之 teacher 為 ''，且 defaultTeacher 維持 'subject'
+    // 2. 留在預設群組的班級由具名科任授課，且 defaultTeacher 維持 'subject'
     const defaultClass1Req = updatedClasses.find((c) => c.name === '4年2班').course_requirements[0]
     const defaultClass2Req = updatedClasses.find((c) => c.name === '4年3班').course_requirements[0]
 
-    expect(defaultClass1Req.teacher).toBe('')
+    expect(defaultClass1Req.teacher).toBe('甲師')
     expect(defaultClass1Req.defaultTeacher).toBe('subject')
-    expect(defaultClass2Req.teacher).toBe('')
+    expect(defaultClass2Req.teacher).toBe('甲師')
     expect(defaultClass2Req.defaultTeacher).toBe('subject')
 
     // 3. 任何 requirement 皆不得拿到字串 'subject' 或 'admin' 作為 teacher
@@ -451,6 +458,11 @@ describe('mixedTeachingPlan utils', () => {
         teacherName: '王導',
         rules: [{ grade: 4, systemSubject: '美勞', periods: 2 }],
       },
+      {
+        teacherId: 21,
+        teacherName: '甲師',
+        rules: [{ grade: 4, systemSubject: '美勞', periods: 4 }],
+      },
     ]
 
     const { plans } = buildMixedTeachingPlans({
@@ -471,16 +483,16 @@ describe('mixedTeachingPlan utils', () => {
       teacherType: 'homeroom',
     })
 
-    const defaultAssignedManual = res.resolution.assignments.filter((a) => a.teacherType === 'subject-admin')
+    const defaultAssignedManual = res.resolution.assignments.filter((a) => a.teacherName === '甲師')
     expect(defaultAssignedManual).toHaveLength(2)
-    expect(defaultAssignedManual.every((a) => a.teacherName === '')).toBe(true)
+    expect(defaultAssignedManual.every((a) => a.teacherName === '甲師')).toBe(true)
 
     const updatedClassesManual = applyResolvedMixedTeachingPlans(reverseClasses, [res.resolution])
 
     // 1. 匯入導師配額精確：只有 4年2班 分配給 '王導'
     expect(updatedClassesManual.find((c) => c.name === '4年2班').course_requirements[0].teacher).toBe('王導')
-    expect(updatedClassesManual.find((c) => c.name === '4年1班').course_requirements[0].teacher).toBe('')
-    expect(updatedClassesManual.find((c) => c.name === '4年3班').course_requirements[0].teacher).toBe('')
+    expect(updatedClassesManual.find((c) => c.name === '4年1班').course_requirements[0].teacher).toBe('甲師')
+    expect(updatedClassesManual.find((c) => c.name === '4年3班').course_requirements[0].teacher).toBe('甲師')
 
     // 2. 不得拿到 'subject' 或 'admin' 作為 teacher
     const invalidTeacherReqsManual = updatedClassesManual
@@ -631,5 +643,241 @@ describe('mixedTeachingPlan utils', () => {
 
     const jiaAssigns = res.resolution.assignments.filter((a) => a.teacherName === '甲師')
     expect(jiaAssigns.map((a) => a.className)).toEqual(['5年1班', '5年2班'])
+  })
+
+  it('allocates every named teacher in reverse mixed teaching without blank subject-admin assignments', () => {
+    const naturalTeachers = [
+      { id: 201, name: '自然甲', type: 'subject' },
+      { id: 202, name: '自然乙', type: 'admin' },
+      { id: 203, name: '施懿珊', type: 'homeroom', assignedClass: '6年8班' },
+    ]
+    const naturalClasses = Array.from({ length: 11 }, (_, index) => ({
+      name: `6年${index + 1}班`,
+      grade: 6,
+      homeroom_teacher: index === 7 ? '施懿珊' : `六導${index + 1}`,
+      course_requirements: [{ id: `n${index + 1}`, subject: '自然科學', periods: 4, defaultTeacher: 'subject' }],
+    }))
+    const parsedRows = [
+      { teacherId: 201, teacherName: '自然甲', rules: [{ grade: 6, systemSubject: '自然科學', periods: 20 }] },
+      { teacherId: 202, teacherName: '自然乙', rules: [{ grade: 6, systemSubject: '自然科學', periods: 20 }] },
+      { teacherId: 203, teacherName: '施懿珊', rules: [{ grade: 6, systemSubject: '自然科學', periods: 4 }] },
+    ]
+
+    const { plans, blockers } = buildMixedTeachingPlans({
+      parsedRows,
+      teachers: naturalTeachers,
+      classes: naturalClasses,
+    })
+
+    expect(blockers).toEqual([])
+    expect(plans).toHaveLength(1)
+    const [plan] = plans
+    expect(plan.defaultRoleTeacherQuotas.map((q) => q.teacherName)).toEqual(['自然甲', '自然乙'])
+    expect(plan.exceptionTeacherQuotas).toMatchObject([{ teacherName: '施懿珊', periods: 4 }])
+    expect(plan.allNamedPeriods).toBe(44)
+    expect(plan.implicitDefaultPeriods).toBe(0)
+
+    const result = resolveMixedTeachingPlan(plan, { mode: 'auto' })
+    expect(result.valid).toBe(true)
+    expect(result.resolution.assignments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ className: '6年8班', teacherName: '施懿珊', periods: 4 }),
+      expect.objectContaining({ teacherName: '自然甲', periods: 4 }),
+      expect.objectContaining({ teacherName: '自然乙', periods: 4 }),
+    ]))
+    expect(result.resolution.assignments.every((assignment) => assignment.teacherName)).toBe(true)
+  })
+
+  it('blocks reverse mixed teaching when subject-admin residual has no named teacher', () => {
+    const classes = [
+      { name: '4年1班', grade: 4, homeroom_teacher: '王導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+      { name: '4年2班', grade: 4, homeroom_teacher: '趙導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+    ]
+    const { plans } = buildMixedTeachingPlans({
+      parsedRows: [{ teacherId: 103, teacherName: '王導', rules: [{ grade: 4, systemSubject: '美勞', periods: 2 }] }],
+      teachers: sampleTeachers,
+      classes,
+    })
+
+    const result = resolveMixedTeachingPlan(plans[0], { mode: 'auto' })
+    expect(result).toMatchObject({ valid: false })
+    expect(result.errors).toContain('科任／行政剩餘 2 堂未指定教師')
+  })
+
+  it('keeps a class-specific homeroom exception fixed in manual mode without requiring it in the selection', () => {
+    const classes = [
+      { name: '4年1班', grade: 4, homeroom_teacher: '王導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+      { name: '4年2班', grade: 4, homeroom_teacher: '趙導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+      { name: '4年3班', grade: 4, homeroom_teacher: '孫導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+      { name: '4年4班', grade: 4, homeroom_teacher: '陳導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+    ]
+    const teachers = [
+      { id: 21, name: '甲師', type: 'subject' },
+      { id: 103, name: '王導', type: 'homeroom' },
+      { id: 104, name: '趙導', type: 'homeroom' },
+    ]
+    const parsedRows = [
+      { teacherId: 21, teacherName: '甲師', rules: [{ grade: 4, systemSubject: '美勞', periods: 4 }] },
+      {
+        teacherId: 103,
+        teacherName: '王導',
+        rules: [{ grade: 4, systemSubject: '美勞', periods: 2, sourceKind: 'class-specific', targetClassNames: ['4年1班'] }],
+      },
+      { teacherId: 104, teacherName: '趙導', rules: [{ grade: 4, systemSubject: '美勞', periods: 2 }] },
+    ]
+    const { plans } = buildMixedTeachingPlans({ parsedRows, teachers, classes })
+
+    const result = resolveMixedTeachingPlan(plans[0], {
+      mode: 'manual',
+      exceptionClassNames: ['4年3班'],
+    })
+
+    expect(result.valid).toBe(true)
+    expect(result.resolution.assignments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ className: '4年1班', teacherName: '王導' }),
+      expect.objectContaining({ className: '4年3班', teacherName: '趙導' }),
+    ]))
+  })
+
+  it('keeps a class-specific default-role teacher fixed when manual mode selects exceptions', () => {
+    const classes = [
+      { name: '4年1班', grade: 4, homeroom_teacher: '王導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+      { name: '4年2班', grade: 4, homeroom_teacher: '趙導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+      { name: '4年3班', grade: 4, homeroom_teacher: '孫導', course_requirements: [{ subject: '美勞', periods: 2, defaultTeacher: 'subject' }] },
+    ]
+    const teachers = [
+      { id: 21, name: '甲師', type: 'subject' },
+      { id: 103, name: '王導', type: 'homeroom' },
+    ]
+    const parsedRows = [
+      { teacherId: 21, teacherName: '甲師', rules: [{ grade: 4, systemSubject: '美勞', periods: 4, sourceKind: 'class-specific', targetClassNames: ['4年1班'] }] },
+      { teacherId: 103, teacherName: '王導', rules: [{ grade: 4, systemSubject: '美勞', periods: 2 }] },
+    ]
+    const { plans } = buildMixedTeachingPlans({ parsedRows, teachers, classes })
+
+    expect(plans[0].forcedDefaultClassNames).toEqual(['4年1班'])
+    const result = resolveMixedTeachingPlan(plans[0], {
+      mode: 'manual',
+      // A stale/malicious UI selection must not move the fixed default-role class into exceptions.
+      exceptionClassNames: ['4年1班', '4年2班'],
+    })
+
+    expect(result.valid).toBe(true)
+    expect(result.resolution.assignments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ className: '4年1班', teacherName: '甲師' }),
+      expect.objectContaining({ className: '4年2班', teacherName: '王導' }),
+    ]))
+  })
+
+  it('keeps same-name teachers separated by id in plans and ledgers', () => {
+    const classes = [
+      { name: '4年1班', grade: 4, course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom' }] },
+      { name: '4年2班', grade: 4, course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom' }] },
+      { name: '4年3班', grade: 4, course_requirements: [{ subject: '健康', periods: 1, defaultTeacher: 'homeroom' }] },
+    ]
+    const teachers = [
+      { id: 21, name: '同名教師', type: 'subject' },
+      { id: 22, name: '同名教師', type: 'subject' },
+      { id: 103, name: '王導', type: 'homeroom' },
+    ]
+    const parsedRows = [
+      { teacherId: 21, teacherName: '同名教師', rules: [{ grade: 4, systemSubject: '健康', periods: 1 }] },
+      { teacherId: 22, teacherName: '同名教師', rules: [{ grade: 4, systemSubject: '健康', periods: 1 }] },
+      { teacherId: 103, teacherName: '王導', rules: [{ grade: 4, systemSubject: '健康', periods: 1 }] },
+    ]
+    const { plans } = buildMixedTeachingPlans({ parsedRows, teachers, classes })
+    expect(plans[0].exceptionTeacherQuotas).toEqual(expect.arrayContaining([
+      expect.objectContaining({ teacherId: 21, periods: 1 }),
+      expect.objectContaining({ teacherId: 22, periods: 1 }),
+    ]))
+
+    const ledger = buildMixedTeachingAssignmentLedger({
+      teachers,
+      resolutions: [{ grade: 4, subject: '健康', resolution: { assignments: [
+        { className: '4年1班', teacherId: 21, teacherName: '同名教師', periods: 1 },
+        { className: '4年2班', teacherId: 22, teacherName: '同名教師', periods: 1 },
+      ] } }],
+    })
+    expect(ledger).toEqual(expect.arrayContaining([
+      expect.objectContaining({ teacherId: 21, className: '4年1班' }),
+      expect.objectContaining({ teacherId: 22, className: '4年2班' }),
+    ]))
+  })
+
+  it('validates every non-empty imported teacher rule against this import ledger by teacher identity', () => {
+    const parsedRows = [
+      { teacherId: 201, teacherName: '自然甲', rules: [{ grade: 6, systemSubject: '自然科學', periods: 20 }] },
+      { teacherId: 202, teacherName: '自然乙', rules: [{ grade: 6, systemSubject: '自然科學', periods: 20 }] },
+      { teacherId: 203, teacherName: '施懿珊', rules: [{ grade: 6, systemSubject: '自然科學', periods: 4 }] },
+      { teacherId: 204, teacherName: '空白配課', rules: [] },
+    ]
+    const teachers = [
+      { id: 201, name: '自然甲' },
+      { id: 202, name: '自然乙' },
+      { id: 203, name: '施懿珊' },
+      { id: 204, name: '空白配課' },
+    ]
+    const assignmentLedger = [
+      ...Array.from({ length: 5 }, (_, index) => ({ teacherId: 201, teacherName: '自然甲', grade: 6, subject: '自然科學', periods: 4, className: `6年${index + 1}班` })),
+      ...Array.from({ length: 5 }, (_, index) => ({ teacherId: 202, teacherName: '自然乙', grade: 6, subject: '自然科學', periods: 4, className: `6年${index + 6}班` })),
+      { teacherId: 203, teacherName: '施懿珊', grade: 6, subject: '自然科學', periods: 4, className: '6年8班' },
+    ]
+
+    expect(validateImportedTeacherAssignments({ parsedRows, teachers, assignmentLedger })).toEqual({ valid: true, errors: [] })
+  })
+
+  it('aggregates multiple imported rules for the same teacher, grade, and subject before validating the ledger', () => {
+    const parsedRows = [{
+      teacherId: 201,
+      teacherName: '自然甲',
+      rules: [
+        { grade: 5, systemSubject: '自然科學', periods: 20 },
+        { grade: 5, systemSubject: '自然科學', periods: 4 },
+      ],
+    }]
+    const teachers = [{ id: 201, name: '自然甲' }]
+    const fullLedger = [{ teacherId: 201, teacherName: '自然甲', grade: 5, subject: '自然科學', periods: 24, className: '5年1班' }]
+    const shortLedger = [{ teacherId: 201, teacherName: '自然甲', grade: 5, subject: '自然科學', periods: 20, className: '5年1班' }]
+
+    expect(validateImportedTeacherAssignments({ parsedRows, teachers, assignmentLedger: fullLedger }))
+      .toEqual({ valid: true, errors: [] })
+
+    expect(validateImportedTeacherAssignments({ parsedRows, teachers, assignmentLedger: shortLedger })).toEqual({
+      valid: false,
+      errors: ['教師「自然甲」5 年級科目「自然科學」應配 24 節，實際已配 20 節'],
+    })
+  })
+
+  it('does not let an old same-name class assignment satisfy this import ledger validation', () => {
+    const parsedRows = [{ teacherId: 201, teacherName: '自然甲', rules: [{ grade: 6, systemSubject: '自然科學', periods: 20 }] }]
+    const teachers = [{ id: 201, name: '自然甲' }]
+    const staleClasses = [{
+      name: '6年1班',
+      course_requirements: [{ subject: '自然科學', periods: 20, teacher: '自然甲' }],
+    }]
+
+    const result = validateImportedTeacherAssignments({ parsedRows, teachers, assignmentLedger: [] })
+
+    expect(staleClasses[0].course_requirements[0].teacher).toBe('自然甲')
+    expect(result).toMatchObject({ valid: false })
+    expect(result.errors).toEqual([expect.stringContaining('自然甲')])
+    expect(result.errors).toEqual([expect.stringContaining('應配 20 節，實際已配 0 節')])
+  })
+
+  it('builds mixed ledgers from resolutions without changing homeroom_teacher', () => {
+    const classes = [{
+      name: '6年8班', grade: 6, homeroom_teacher: '施懿珊',
+      course_requirements: [{ subject: '自然科學', periods: 4, teacher: '' }],
+    }]
+    const resolutions = [{
+      grade: 6, subject: '自然科學',
+      resolution: { assignments: [{ className: '6年8班', teacherName: '施懿珊', periods: 4 }] },
+    }]
+
+    const ledger = buildMixedTeachingAssignmentLedger({ resolutions, teachers: [{ id: 203, name: '施懿珊' }] })
+    const applied = applyResolvedMixedTeachingPlans(classes, resolutions)
+
+    expect(ledger).toEqual([expect.objectContaining({ teacherId: 203, teacherName: '施懿珊', grade: 6, subject: '自然科學', periods: 4 })])
+    expect(applied[0].homeroom_teacher).toBe('施懿珊')
+    expect(classes[0].homeroom_teacher).toBe('施懿珊')
   })
 })

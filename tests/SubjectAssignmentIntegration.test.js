@@ -1801,4 +1801,26 @@ describe('materializeImportedAssignmentRules (Task 4 Materialization)', () => {
     expect(result.classes.find((cls) => cls.name === '5年1班').course_requirements[0].teacher).toBe('全班教師')
     expect(result.classes.find((cls) => cls.name === '5年2班').course_requirements[0].teacher).toBe('批次教師')
   })
+
+  it('R. returns an immutable ledger for assignments created by this import only', () => {
+    const classes = [{
+      name: '6年1班', grade: 6, homeroom_teacher: '六導1',
+      course_requirements: [{ id: 'science-601', subject: '自然科學', periods: 4, teacher: '' }],
+    }]
+    const teachers = [{
+      id: 201, name: '自然甲', type: 'subject',
+      assignment_rules: [{ grade: 6, subject: '自然科學', periods: 4, candidateClassNames: ['6年1班'] }],
+    }]
+
+    const result = materializeImportedAssignmentRules({ classes, teachers })
+
+    expect(result.success).toBe(true)
+    expect(result.assignmentLedger).toEqual([expect.objectContaining({
+      teacherId: 201, teacherName: '自然甲', grade: 6, subject: '自然科學', periods: 4, className: '6年1班',
+    })])
+    expect(Object.isFrozen(result.assignmentLedger)).toBe(true)
+    expect(Object.isFrozen(result.assignmentLedger[0])).toBe(true)
+    expect(result.classes[0].homeroom_teacher).toBe('六導1')
+    expect(classes[0].homeroom_teacher).toBe('六導1')
+  })
 })

@@ -84,6 +84,64 @@ function allocateClassesToQuotas(quotas = [], availableBlocks = []) {
   return { success, assignmentMap: result }
 }
 
+function isRoleInGroup(teacherType, roleGroup) {
+  const isHomeroom = teacherType === 'homeroom'
+  return roleGroup === 'homeroom' ? isHomeroom : !isHomeroom
+}
+
+function getTeacherIdentityKey(teacherId, teacherName) {
+  return teacherId != null && String(teacherId).trim() !== ''
+    ? `id:${String(teacherId)}`
+    : `name:${normalizeTeacherName(teacherName)}`
+}
+
+function allocateNamedQuotas(quotas = [], availableBlocks = [], assignmentMap = new Map()) {
+  const errors = []
+  const blockByName = new Map(availableBlocks.map((block) => [block.className, block]))
+  const assignedNames = new Set(assignmentMap.keys())
+  const remainingQuotas = []
+
+  for (const quota of quotas) {
+    const explicitClassNames = Array.isArray(quota.allocatedClassNames) ? quota.allocatedClassNames : []
+    const ownClass = explicitClassNames.length === 0 && quota.teacherType === 'homeroom'
+      ? availableBlocks.find((block) => block.homeroomTeacherName === quota.teacherName && block.periods <= quota.periods)
+      : null
+    const allocatedClassNames = ownClass ? [ownClass.className] : explicitClassNames
+    let allocatedPeriods = 0
+    for (const className of allocatedClassNames) {
+      const block = blockByName.get(className)
+      if (!block) {
+        errors.push(`系統找不到班級「${className}」對應的班級需求`)
+        continue
+      }
+      if (assignedNames.has(className)) {
+        errors.push(`班級「${className}」被重複指定授課教師`)
+        continue
+      }
+      assignmentMap.set(className, quota)
+      assignedNames.add(className)
+      allocatedPeriods += block.periods
+    }
+
+    if (allocatedPeriods > quota.periods) {
+      errors.push(`教師「${quota.teacherName}」指定班級節數超過匯入配額`)
+      continue
+    }
+    if (allocatedPeriods < quota.periods) {
+      remainingQuotas.push({ ...quota, periods: quota.periods - allocatedPeriods, allocatedClassNames: [] })
+    }
+  }
+
+  if (errors.length > 0) return { success: false, assignmentMap, errors }
+
+  const freeBlocks = availableBlocks.filter((block) => !assignedNames.has(block.className))
+  const allocated = allocateClassesToQuotas(remainingQuotas, freeBlocks)
+  if (!allocated.success) return { success: false, assignmentMap, errors: [] }
+
+  for (const [className, quota] of allocated.assignmentMap) assignmentMap.set(className, quota)
+  return { success: true, assignmentMap, errors: [] }
+}
+
 /**
  * 建立純混合配課規劃
  *
@@ -118,16 +176,19 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
         groupedRules.set(key, {
           grade,
           subject,
-          teacherQuotasMap: new Map(), // teacherName -> quota
+          teacherQuotasMap: new Map(), // teacher identity -> quota
         })
       }
       const group = groupedRules.get(key)
-      const currentPeriods = group.teacherQuotasMap.get(row.teacherName)?.periods || 0
+      const teacherId = teacher?.id ?? row.teacherId ?? null
+      const teacherName = normalizeTeacherName(teacher?.name) || normalizeTeacherName(row.teacherName)
+      const teacherKey = getTeacherIdentityKey(teacherId, teacherName)
+      const currentPeriods = group.teacherQuotasMap.get(teacherKey)?.periods || 0
       const newPeriods = currentPeriods + Number(rule.periods || 0)
 
-      group.teacherQuotasMap.set(row.teacherName, {
-        teacherId: teacher?.id ?? row.teacherId ?? null,
-        teacherName: row.teacherName,
+      group.teacherQuotasMap.set(teacherKey, {
+        teacherId,
+        teacherName,
         teacherType,
         periods: newPeriods,
       })
@@ -136,8 +197,9 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
         group.rawRuleItems = []
       }
       group.rawRuleItems.push({
-        teacherName: row.teacherName,
-        teacherId: teacher?.id ?? row.teacherId ?? null,
+        teacherName,
+        teacherId,
+        teacherKey,
         teacherType,
         rule,
       })
@@ -196,17 +258,13 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
     const defaultRoleGroup = isDefaultHomeroom ? 'homeroom' : 'subject-admin'
     const exceptionRoleGroup = isDefaultHomeroom ? 'subject-admin' : 'homeroom'
 
-    // 依據預設角色群組，篩選非預設群組 (例外群組) 的匯入教師配額
     const allQuotas = Array.from(teacherQuotasMap.values())
-    const importedTeacherQuotas = allQuotas.filter((q) => {
-      if (isDefaultHomeroom) {
-        return q.teacherType !== 'homeroom'
-      } else {
-        return q.teacherType === 'homeroom'
-      }
-    })
-
-    const totalImportedPeriods = importedTeacherQuotas.reduce((sum, q) => sum + q.periods, 0)
+    const defaultRoleTeacherQuotas = allQuotas.filter((q) => isRoleInGroup(q.teacherType, defaultRoleGroup))
+    const exceptionTeacherQuotas = allQuotas.filter((q) => isRoleInGroup(q.teacherType, exceptionRoleGroup))
+    const namedTeacherQuotas = [...defaultRoleTeacherQuotas, ...exceptionTeacherQuotas]
+    const defaultRoleNamedPeriods = defaultRoleTeacherQuotas.reduce((sum, q) => sum + q.periods, 0)
+    const exceptionRoleNamedPeriods = exceptionTeacherQuotas.reduce((sum, q) => sum + q.periods, 0)
+    const allNamedPeriods = defaultRoleNamedPeriods + exceptionRoleNamedPeriods
 
     // 檢查 Basic Blockers
     if (totalDemandPeriods === 0) {
@@ -219,12 +277,12 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
       continue
     }
 
-    if (totalImportedPeriods > totalDemandPeriods) {
+    if (allNamedPeriods > totalDemandPeriods) {
       blockers.push({
         key,
         grade,
         subject,
-        cause: `${grade} 年級科目「${subject}」匯入節數（${totalImportedPeriods} 堂）超過總需求（${totalDemandPeriods} 堂）`,
+        cause: `${grade} 年級科目「${subject}」匯入節數（${allNamedPeriods} 堂）超過總需求（${totalDemandPeriods} 堂）`,
       })
       continue
     }
@@ -240,8 +298,8 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
     }
 
     // 進行標的班級預約 (Pass 1: class-specific, Pass 2: all-eligible, Pass 3: grade-batch)
-    const reservedMap = new Map() // className -> teacherName
-    const teacherClassMap = new Map() // teacherName -> Set<className>
+    const reservedMap = new Map() // className -> teacher identity
+    const teacherClassMap = new Map() // teacher identity -> Set<className>
     let groupBlockerCause = null
     let hasTargetSpecs = false
 
@@ -252,7 +310,7 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
 
       // Pass 1: Reserve class-specific targets first
       for (const item of rawRuleItems) {
-        const { teacherName, rule } = item
+        const { teacherKey, rule } = item
         if (!rule || rule.sourceKind !== 'class-specific') continue
         const targets = Array.isArray(rule.targetClassNames) ? rule.targetClassNames : []
 
@@ -264,7 +322,7 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
           }
           if (reservedMap.has(clsName)) {
             const prevTeacher = reservedMap.get(clsName)
-            if (prevTeacher !== teacherName) {
+            if (prevTeacher !== teacherKey) {
               groupBlockerCause = `班級「${clsName}」科目「${subject}」指定標的與其他匯入分配衝突`
               break
             }
@@ -274,9 +332,9 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
             break
           }
 
-          reservedMap.set(clsName, teacherName)
-          if (!teacherClassMap.has(teacherName)) teacherClassMap.set(teacherName, new Set())
-          teacherClassMap.get(teacherName).add(clsName)
+          reservedMap.set(clsName, teacherKey)
+          if (!teacherClassMap.has(teacherKey)) teacherClassMap.set(teacherKey, new Set())
+          teacherClassMap.get(teacherKey).add(clsName)
         }
         if (groupBlockerCause) break
       }
@@ -284,7 +342,7 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
       // Pass 2: Reserve all-eligible targets
       if (!groupBlockerCause) {
         for (const item of rawRuleItems) {
-          const { teacherName, rule } = item
+          const { teacherKey, rule } = item
           if (!rule || rule.sourceKind !== 'all-eligible') continue
           const targets = Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0
             ? rule.targetClassNames
@@ -295,7 +353,7 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
             if (!targetBlock) continue
             if (reservedMap.has(clsName)) {
               const prevTeacher = reservedMap.get(clsName)
-              if (prevTeacher !== teacherName) {
+              if (prevTeacher !== teacherKey) {
                 groupBlockerCause = `班級「${clsName}」科目「${subject}」指定標的與其他匯入分配衝突`
                 break
               }
@@ -305,9 +363,9 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
               break
             }
 
-            reservedMap.set(clsName, teacherName)
-            if (!teacherClassMap.has(teacherName)) teacherClassMap.set(teacherName, new Set())
-            teacherClassMap.get(teacherName).add(clsName)
+            reservedMap.set(clsName, teacherKey)
+            if (!teacherClassMap.has(teacherKey)) teacherClassMap.set(teacherKey, new Set())
+            teacherClassMap.get(teacherKey).add(clsName)
           }
           if (groupBlockerCause) break
         }
@@ -316,7 +374,7 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
       // Pass 3: Reserve grade-batch targets from remaining unreserved candidates in natural class order
       if (!groupBlockerCause) {
         for (const item of rawRuleItems) {
-          const { teacherName, rule } = item
+          const { teacherKey, rule } = item
           if (!rule || rule.sourceKind !== 'grade-batch') continue
           const requiredCount = Number(rule.classCount || 0)
           if (requiredCount <= 0) continue
@@ -344,9 +402,9 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
 
           const chosen = candidates.slice(0, requiredCount)
           for (const clsName of chosen) {
-            reservedMap.set(clsName, teacherName)
-            if (!teacherClassMap.has(teacherName)) teacherClassMap.set(teacherName, new Set())
-            teacherClassMap.get(teacherName).add(clsName)
+            reservedMap.set(clsName, teacherKey)
+            if (!teacherClassMap.has(teacherKey)) teacherClassMap.set(teacherKey, new Set())
+            teacherClassMap.get(teacherKey).add(clsName)
           }
         }
       }
@@ -363,21 +421,33 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
     }
 
     if (hasTargetSpecs) {
-      for (const q of importedTeacherQuotas) {
-        const assignedSet = teacherClassMap.get(q.teacherName)
+      for (const q of namedTeacherQuotas) {
+        const assignedSet = teacherClassMap.get(getTeacherIdentityKey(q.teacherId, q.teacherName))
         if (assignedSet) {
           q.allocatedClassNames = Array.from(assignedSet)
         }
       }
     }
 
-    const defaultRolePeriods = totalDemandPeriods - totalImportedPeriods
-    const homeroomPeriods = isDefaultHomeroom ? defaultRolePeriods : totalImportedPeriods
-    const importedSubjectAdminPeriods = isDefaultHomeroom ? totalImportedPeriods : 0
-    const importedHomeroomPeriods = isDefaultHomeroom ? 0 : totalImportedPeriods
+    const implicitDefaultPeriods = totalDemandPeriods - allNamedPeriods
+    const defaultRolePeriods = defaultRoleNamedPeriods + implicitDefaultPeriods
+    const homeroomPeriods = defaultRoleGroup === 'homeroom'
+      ? defaultRolePeriods
+      : exceptionRoleNamedPeriods
+    const subjectAdminPeriods = defaultRoleGroup === 'subject-admin'
+      ? defaultRolePeriods
+      : exceptionRoleNamedPeriods
+    const importedSubjectAdminPeriods = subjectAdminPeriods
+    const importedHomeroomPeriods = homeroomPeriods
+    const forcedExceptionClassNames = Array.from(new Set(
+      exceptionTeacherQuotas.flatMap((quota) => Array.isArray(quota.allocatedClassNames) ? quota.allocatedClassNames : [])
+    ))
+    const forcedDefaultClassNames = Array.from(new Set(
+      defaultRoleTeacherQuotas.flatMap((quota) => Array.isArray(quota.allocatedClassNames) ? quota.allocatedClassNames : [])
+    ))
 
     // 建立 MixedTeachingPlan (僅當兩個角色群組各自承擔正節數時)
-    if (totalImportedPeriods > 0 && defaultRolePeriods > 0) {
+    if (homeroomPeriods > 0 && subjectAdminPeriods > 0) {
       plans.push({
         key,
         grade,
@@ -386,12 +456,23 @@ export function buildMixedTeachingPlans({ parsedRows = [], teachers = [], classe
         defaultRoleGroup,
         exceptionRoleGroup,
         totalDemandPeriods,
-        importedPeriods: totalImportedPeriods,
+        importedPeriods: exceptionRoleNamedPeriods,
         importedSubjectAdminPeriods,
         importedHomeroomPeriods,
         defaultRolePeriods,
         homeroomPeriods,
-        importedTeacherQuotas,
+        subjectAdminPeriods,
+        defaultRoleTeacherQuotas,
+        exceptionTeacherQuotas,
+        namedTeacherQuotas,
+        defaultRoleNamedPeriods,
+        exceptionRoleNamedPeriods,
+        allNamedPeriods,
+        implicitDefaultPeriods,
+        forcedExceptionClassNames,
+        forcedDefaultClassNames,
+        // 保留舊介面：混合視窗的手動例外班級仍以此配額為準。
+        importedTeacherQuotas: exceptionTeacherQuotas,
         classBlocks,
         resolution: null,
       })
@@ -420,90 +501,76 @@ export function resolveMixedTeachingPlan(
   }
 
   const errors = []
-  const targetExceptionClassNames = exceptionClassNames ?? subjectAdminClassNames ?? []
+  const requestedExceptionClassNames = exceptionClassNames ?? subjectAdminClassNames ?? []
+  const namedTeacherQuotas = plan.namedTeacherQuotas ?? plan.importedTeacherQuotas ?? []
+  const exceptionTeacherQuotas = plan.exceptionTeacherQuotas ?? plan.importedTeacherQuotas ?? []
+  const defaultRoleTeacherQuotas = plan.defaultRoleTeacherQuotas ?? []
+  const forcedExceptionClassNames = plan.forcedExceptionClassNames ?? Array.from(new Set(
+    exceptionTeacherQuotas.flatMap((quota) => Array.isArray(quota.allocatedClassNames) ? quota.allocatedClassNames : [])
+  ))
+  const forcedDefaultClassNames = plan.forcedDefaultClassNames ?? Array.from(new Set(
+    defaultRoleTeacherQuotas.flatMap((quota) => Array.isArray(quota.allocatedClassNames) ? quota.allocatedClassNames : [])
+  ))
+  // A fixed default-role target belongs to the default allocation even if a stale UI submits it as an exception.
+  const targetExceptionClassNames = requestedExceptionClassNames.filter((name) => !forcedDefaultClassNames.includes(name))
 
-  if (mode === 'auto') {
-    const hasPreAllocated = plan.importedTeacherQuotas?.some((q) => Array.isArray(q.allocatedClassNames))
-
-    let success = false
-    let assignmentMap = new Map()
-
-    if (hasPreAllocated) {
-      success = true
-      for (const quota of plan.importedTeacherQuotas) {
-        if (Array.isArray(quota.allocatedClassNames)) {
-          for (const clsName of quota.allocatedClassNames) {
-            assignmentMap.set(clsName, quota)
-          }
-        }
-      }
-    } else {
-      const strategy = autoAllocation?.strategy === 'random' ? 'random' : 'class-order'
-      const availableBlocks = strategy === 'random'
-        ? shuffleClassBlocks(plan.classBlocks, autoAllocation?.seed)
-        : plan.classBlocks
-      const res = allocateClassesToQuotas(plan.importedTeacherQuotas, availableBlocks)
-      success = res.success
-      assignmentMap = res.assignmentMap
-    }
-
-    if (!success) {
-      return {
-        valid: false,
-        resolution: null,
-        errors: ['目前節數無法依每班完整課程節數分配，請檢查匯入資料。'],
-      }
-    }
-
+  function buildAssignments(assignmentMap) {
     const assignments = []
     for (const block of plan.classBlocks) {
       const quota = assignmentMap.get(block.className)
       if (quota) {
-        if (quota.teacherType === 'homeroom' && !quota.teacherName) {
-          return {
-            valid: false,
-            resolution: null,
-            errors: [`班級「${block.className}」未設定導師，無法分配導師混合節數`],
-          }
-        }
+        if (!quota.teacherName) return { error: `班級「${block.className}」未指定授課教師` }
         assignments.push({
           className: block.className,
           teacherName: quota.teacherName,
+          teacherId: quota.teacherId ?? null,
           teacherType: quota.teacherType,
           periods: block.periods,
         })
-      } else {
-        if (plan.defaultRoleGroup === 'homeroom') {
-          if (!block.homeroomTeacherName) {
-            return {
-              valid: false,
-              resolution: null,
-              errors: [`班級「${block.className}」未設定導師，無法分配導師混合節數`],
-            }
-          }
-          assignments.push({
-            className: block.className,
-            teacherName: block.homeroomTeacherName,
-            teacherType: 'homeroom',
-            periods: block.periods,
-          })
-        } else {
-          assignments.push({
-            className: block.className,
-            teacherName: '',
-            teacherType: 'subject-admin',
-            periods: block.periods,
-          })
-        }
+        continue
+      }
+
+      if (plan.defaultRoleGroup === 'homeroom') {
+        if (!block.homeroomTeacherName) return { error: `班級「${block.className}」未設定導師，無法分配導師混合節數` }
+        assignments.push({
+          className: block.className,
+          teacherName: block.homeroomTeacherName,
+          teacherId: null,
+          teacherType: 'homeroom',
+          periods: block.periods,
+        })
+        continue
+      }
+
+      return { error: `科任／行政剩餘 ${plan.implicitDefaultPeriods ?? block.periods} 堂未指定教師` }
+    }
+    return { assignments }
+  }
+
+  if (mode === 'auto') {
+    const strategy = autoAllocation?.strategy === 'random' ? 'random' : 'class-order'
+    const availableBlocks = strategy === 'random'
+      ? shuffleClassBlocks(plan.classBlocks, autoAllocation?.seed)
+      : plan.classBlocks
+    const allocation = allocateNamedQuotas(namedTeacherQuotas, availableBlocks)
+
+    if (!allocation.success) {
+      return {
+        valid: false,
+        resolution: null,
+        errors: allocation.errors.length > 0 ? allocation.errors : ['目前節數無法依每班完整課程節數分配，請檢查匯入資料。'],
       }
     }
+
+    const built = buildAssignments(allocation.assignmentMap)
+    if (built.error) return { valid: false, resolution: null, errors: [built.error] }
 
     return {
       valid: true,
       resolution: {
         mode: 'auto',
         subject: plan.subject,
-        assignments,
+        assignments: built.assignments,
       },
       errors: [],
     }
@@ -516,17 +583,21 @@ export function resolveMixedTeachingPlan(
     }
 
     // 2. 無效班級檢查
+    const effectiveExceptionClassNames = [
+      ...forcedExceptionClassNames,
+      ...targetExceptionClassNames.filter((name) => !forcedExceptionClassNames.includes(name)),
+    ]
     const validClassMap = new Map(plan.classBlocks.map((b) => [b.className, b]))
-    for (const name of targetExceptionClassNames) {
+    for (const name of effectiveExceptionClassNames) {
       if (!validClassMap.has(name)) {
         errors.push(`含有非該年級之無效班級「${name}」`)
       }
     }
 
     // 3. 節數加總檢查
-    const selectedBlocks = targetExceptionClassNames.map((name) => validClassMap.get(name)).filter(Boolean)
+    const selectedBlocks = effectiveExceptionClassNames.map((name) => validClassMap.get(name)).filter(Boolean)
     const selectedPeriods = selectedBlocks.reduce((sum, b) => sum + b.periods, 0)
-    const targetImportedPeriods = plan.importedPeriods ?? plan.importedSubjectAdminPeriods ?? 0
+    const targetImportedPeriods = plan.exceptionRoleNamedPeriods ?? plan.importedPeriods ?? plan.importedSubjectAdminPeriods ?? 0
 
     if (selectedPeriods < targetImportedPeriods) {
       const label = plan.defaultRoleGroup === 'homeroom' ? '科任／行政' : '導師'
@@ -536,69 +607,151 @@ export function resolveMixedTeachingPlan(
       errors.push(`${label}分配節數超過匯入配額`)
     }
 
-    // 4. 整班可換算性檢查
-    const { success, assignmentMap } = allocateClassesToQuotas(plan.importedTeacherQuotas, selectedBlocks)
-    if (!success && errors.length === 0) {
+    // 4. 例外群組只從使用者指定的班級選取；預設群組分配其餘班級。
+    const selectedNames = new Set(effectiveExceptionClassNames)
+    const exceptionAllocation = allocateNamedQuotas(exceptionTeacherQuotas, selectedBlocks)
+    const defaultBlocks = plan.classBlocks.filter((block) => !selectedNames.has(block.className))
+    const defaultAllocation = allocateNamedQuotas(defaultRoleTeacherQuotas, defaultBlocks, exceptionAllocation.assignmentMap)
+    if ((!exceptionAllocation.success || !defaultAllocation.success) && errors.length === 0) {
       errors.push('目前節數無法依每班完整課程節數分配，請檢查匯入資料。')
     }
+    errors.push(...exceptionAllocation.errors, ...defaultAllocation.errors)
 
     if (errors.length > 0) {
       return { valid: false, resolution: null, errors }
     }
 
-    const assignments = []
-    for (const block of plan.classBlocks) {
-      const quota = assignmentMap.get(block.className)
-      if (quota) {
-        if (quota.teacherType === 'homeroom' && !quota.teacherName) {
-          errors.push(`班級「${block.className}」未設定導師，無法分配導師混合節數`)
-        } else {
-          assignments.push({
-            className: block.className,
-            teacherName: quota.teacherName,
-            teacherType: quota.teacherType,
-            periods: block.periods,
-          })
-        }
-      } else {
-        if (plan.defaultRoleGroup === 'homeroom') {
-          if (!block.homeroomTeacherName) {
-            errors.push(`班級「${block.className}」未設定導師，無法分配導師混合節數`)
-          } else {
-            assignments.push({
-              className: block.className,
-              teacherName: block.homeroomTeacherName,
-              teacherType: 'homeroom',
-              periods: block.periods,
-            })
-          }
-        } else {
-          assignments.push({
-            className: block.className,
-            teacherName: '',
-            teacherType: 'subject-admin',
-            periods: block.periods,
-          })
-        }
-      }
-    }
-
-    if (errors.length > 0) {
-      return { valid: false, resolution: null, errors }
-    }
+    const built = buildAssignments(defaultAllocation.assignmentMap)
+    if (built.error) errors.push(built.error)
+    if (errors.length > 0) return { valid: false, resolution: null, errors }
 
     return {
       valid: true,
       resolution: {
         mode: 'manual',
         subject: plan.subject,
-        assignments,
+        forcedExceptionClassNames,
+        forcedDefaultClassNames,
+        assignments: built.assignments,
       },
       errors: [],
     }
   }
 
   return { valid: false, resolution: null, errors: ['未知的模式'] }
+}
+
+function normalizeTeacherName(value) {
+  return String(value || '').trim()
+}
+
+function findTeacherIdentity(row, teachers = []) {
+  const rowId = row?.teacherId
+  const rowName = normalizeTeacherName(row?.teacherName)
+  const byId = rowId != null
+    ? teachers.find((teacher) => String(teacher?.id) === String(rowId))
+    : null
+  const byName = rowName
+    ? teachers.find((teacher) => normalizeTeacherName(teacher?.name) === rowName)
+    : null
+  const teacher = byId ?? byName
+  return {
+    teacherId: teacher?.id ?? rowId ?? null,
+    teacherName: normalizeTeacherName(teacher?.name) || rowName,
+  }
+}
+
+function isSameLedgerTeacher(entry, identity) {
+  if (identity.teacherId != null && entry?.teacherId != null) {
+    return String(entry.teacherId) === String(identity.teacherId)
+  }
+  return normalizeTeacherName(entry?.teacherName) === identity.teacherName
+}
+
+/**
+ * 由已確認的混合配課決議建立「本次匯入」實際落班帳本。
+ * 此帳本不讀取 classes，避免前次同名教師既有配課被誤算為本次匯入成果。
+ */
+export function buildMixedTeachingAssignmentLedger({ resolutions = [], teachers = [] } = {}) {
+  if (!Array.isArray(resolutions)) return []
+
+  return resolutions.flatMap((item) => {
+    const resolution = item?.resolution || item
+    const grade = Number(item?.grade ?? resolution?.grade)
+    const subject = String(item?.subject || resolution?.subject || '').trim()
+    if (!resolution || !Array.isArray(resolution.assignments) || grade <= 0 || !subject) return []
+
+    return resolution.assignments
+      .filter((assignment) => normalizeTeacherName(assignment?.teacherName) && Number(assignment?.periods) > 0)
+      .map((assignment) => {
+        const teacher = assignment.teacherId != null
+          ? teachers.find((candidate) => String(candidate?.id) === String(assignment.teacherId))
+          : teachers.find((candidate) => normalizeTeacherName(candidate?.name) === normalizeTeacherName(assignment.teacherName))
+        return Object.freeze({
+          teacherId: teacher?.id ?? assignment.teacherId ?? null,
+          teacherName: normalizeTeacherName(assignment.teacherName),
+          grade,
+          subject,
+          periods: Number(assignment.periods),
+          className: assignment.className,
+          source: 'mixed-import',
+        })
+      })
+  })
+}
+
+/**
+ * 檢核本次 Excel 所有具規則教師，是否真的以相同身分、年級、科目與節數落到班級。
+ * 空白或「-」公式不會產生 parsed rule，故不在本檢核範圍。
+ */
+export function validateImportedTeacherAssignments({ parsedRows = [], teachers = [], assignmentLedger = [] } = {}) {
+  const errors = []
+  if (!Array.isArray(parsedRows)) return { valid: true, errors }
+  const ledger = Array.isArray(assignmentLedger) ? assignmentLedger : []
+  const expectedAssignments = []
+
+  for (const row of parsedRows) {
+    const identity = findTeacherIdentity(row, teachers)
+    for (const rule of Array.isArray(row?.rules) ? row.rules : []) {
+      const grade = Number(rule?.grade)
+      const subject = String(rule?.systemSubject || rule?.subject || '').trim()
+      const expectedPeriods = Number(rule?.periods) || 0
+      if (grade <= 0 || !subject || expectedPeriods <= 0) continue
+
+      const sameIdentity = (candidate) => (
+        candidate.identity.teacherId != null && identity.teacherId != null
+          ? String(candidate.identity.teacherId) === String(identity.teacherId)
+          : candidate.identity.teacherName === identity.teacherName
+      )
+      const aggregate = expectedAssignments.find((candidate) => (
+        sameIdentity(candidate) &&
+        candidate.grade === grade &&
+        isSubjectMatch(candidate.subject, subject)
+      ))
+
+      if (aggregate) {
+        aggregate.expectedPeriods += expectedPeriods
+      } else {
+        expectedAssignments.push({ identity, grade, subject, expectedPeriods })
+      }
+    }
+  }
+
+  for (const { identity, grade, subject, expectedPeriods } of expectedAssignments) {
+    const assignedPeriods = ledger
+      .filter((entry) => (
+        isSameLedgerTeacher(entry, identity) &&
+        Number(entry?.grade) === grade &&
+        isSubjectMatch(entry?.subject, subject)
+      ))
+      .reduce((sum, entry) => sum + (Number(entry?.periods) || 0), 0)
+
+    if (Math.abs(assignedPeriods - expectedPeriods) > 1e-6) {
+      errors.push(`教師「${identity.teacherName}」${grade} 年級科目「${subject}」應配 ${expectedPeriods} 節，實際已配 ${assignedPeriods} 節`)
+    }
+  }
+
+  return { valid: errors.length === 0, errors }
 }
 
 /**
