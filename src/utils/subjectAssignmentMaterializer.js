@@ -47,11 +47,14 @@ export function isTeacherEligibleForRules(t, confirmedHomeroomTeacherIds = []) {
  * 掃描 classes，若包含由先前自動配課產生的 _split_ 拆分項，且該拆分項未手動鎖定/覆寫，
  * 將其重新合併為單一基底需求項目。
  */
-export function consolidateSplitRequirements(classes) {
+export function consolidateSplitRequirements(classes, options = {}) {
   if (!Array.isArray(classes)) return
+
+  const { targetBaseIds = null, targetPairs = null } = options || {}
 
   classes.forEach(cls => {
     if (!Array.isArray(cls.course_requirements)) return
+    const clsGrade = getGradeFromClassName(cls.name, cls.grade)
 
     const newReqs = []
     const splitGroups = new Map() // baseId -> array of split chunks
@@ -69,6 +72,23 @@ export function consolidateSplitRequirements(classes) {
     })
 
     splitGroups.forEach((chunks, baseId) => {
+      // If targetBaseIds is specified, only consolidate baseIds in the set
+      if (targetBaseIds instanceof Set && !targetBaseIds.has(baseId)) {
+        newReqs.push(...chunks)
+        return
+      }
+
+      // If targetPairs is specified, only consolidate if chunk subject/grade matches targetPairs
+      if (Array.isArray(targetPairs) && targetPairs.length > 0) {
+        const subjectMatch = chunks.some(c =>
+          targetPairs.some(p => p.grade === clsGrade && isSubjectMatch(c.subject, p.subject))
+        )
+        if (!subjectMatch) {
+          newReqs.push(...chunks)
+          return
+        }
+      }
+
       // Check if any chunk in group is manually modified (not auto-assigned or locked) or confirmed mixed-import with teacher
       const hasManualOverride = chunks.some(
         c => c.isLocked || (c.teacher && !c.isAutoAssigned) || (c.assignmentSource === 'mixed-import' && c.teacher)
@@ -81,18 +101,46 @@ export function consolidateSplitRequirements(classes) {
         // Re-consolidate into base requirement
         const firstChunk = chunks[0]
         const totalPeriods = chunks.reduce((sum, c) => sum + (Number(c.periods) || 0), 0)
-        newReqs.push({
+        const consolidatedReq = {
           ...firstChunk,
           id: baseId,
           periods: totalPeriods,
           teacher: '',
           isAutoAssigned: false
-        })
+        }
+        delete consolidatedReq.assignmentSource
+        newReqs.push(consolidatedReq)
       }
     })
 
     cls.course_requirements = newReqs
   })
+}
+
+/**
+ * 💡 班級名稱比對（支援 '505'、'505班'、'5年5班' 等形式）
+ */
+export function isClassNameMatch(a, b) {
+  if (!a || !b) return false
+  if (a === b) return true
+  const cleanA = String(a).trim().replace(/班$/, '')
+  const cleanB = String(b).trim().replace(/班$/, '')
+  return cleanA === cleanB
+}
+
+/**
+ * 💡 提取規則之班級目標/候選範圍清單
+ * 優先回傳 targetClassNames，其次回傳 candidateClassNames，兩者皆無時回傳 null
+ */
+export function getRuleScopeClassNames(rule) {
+  if (!rule) return null
+  if (Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0) {
+    return rule.targetClassNames
+  }
+  if (Array.isArray(rule.candidateClassNames) && rule.candidateClassNames.length > 0) {
+    return rule.candidateClassNames
+  }
+  return null
 }
 
 /**
@@ -118,21 +166,26 @@ export function preflightValidateDemand(classes, teachers, confirmedHomeroomTeac
       const targetClassNames = Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0
         ? rule.targetClassNames
         : null
+      const isExplicitTarget = Boolean(targetClassNames)
+      const scopeClassNames = targetClassNames || (Array.isArray(rule.candidateClassNames) && rule.candidateClassNames.length > 0 ? rule.candidateClassNames : null)
 
-      if (targetGrade <= 0 || targetPeriods <= 0 || !targetSubject || !targetClassNames) continue
+      if (targetGrade <= 0 || targetPeriods <= 0 || !targetSubject || !scopeClassNames) continue
 
       let alreadyAssignedToT = 0
       let availableUnassignedPeriods = 0
 
-      for (const targetName of targetClassNames) {
+      for (const targetName of scopeClassNames) {
         const cls = classes.find(
-          c => getGradeFromClassName(c.name, c.grade) === targetGrade && (c.name === targetName || String(c.name).replace(/班$/, '') === String(targetName).replace(/班$/, ''))
+          c => getGradeFromClassName(c.name, c.grade) === targetGrade && isClassNameMatch(c.name, targetName)
         )
         if (!cls) {
-          return {
-            valid: false,
-            error: `[需求不符] 年級 ${targetGrade} 科目「${targetSubject}」指定標的班級「${targetName}」不存在`
+          if (isExplicitTarget) {
+            return {
+              valid: false,
+              error: `[需求不符] 年級 ${targetGrade} 科目「${targetSubject}」指定標的班級「${targetName}」不存在`
+            }
           }
+          continue
         }
 
         const reqs = cls.course_requirements || []
@@ -141,22 +194,26 @@ export function preflightValidateDemand(classes, teachers, confirmedHomeroomTeac
         )
 
         if (matchingReqs.length === 0) {
-          return {
-            valid: false,
-            error: `[需求不符] 班級「${targetName}」無科目「${targetSubject}」之課程需求`
+          if (isExplicitTarget) {
+            return {
+              valid: false,
+              error: `[需求不符] 班級「${targetName}」無科目「${targetSubject}」之課程需求`
+            }
           }
+          continue
         }
 
         for (const req of matchingReqs) {
           const p = Number(req.periods) || 0
           if (req.teacher && req.teacher.trim() === t.name.trim()) {
             alreadyAssignedToT += p
-          } else if (req.isLocked) {
+          } else if (isExplicitTarget && req.isLocked) {
             return {
               valid: false,
               error: `[需求不符] 班級「${targetName}」科目「${targetSubject}」已鎖定，無法套用匯入分配`
             }
           } else if (
+            isExplicitTarget &&
             req.teacher &&
             req.teacher.trim() !== '' &&
             (!req.isAutoAssigned || req.assignmentSource === 'mixed-import')
@@ -165,7 +222,7 @@ export function preflightValidateDemand(classes, teachers, confirmedHomeroomTeac
               valid: false,
               error: `[需求不符] 班級「${targetName}」科目「${targetSubject}」已指派給「${req.teacher}」，與「${t.name}」的匯入規則衝突`
             }
-          } else {
+          } else if (!req.isLocked && (!req.teacher || req.teacher.trim() === '')) {
             availableUnassignedPeriods += p
           }
         }
@@ -175,7 +232,7 @@ export function preflightValidateDemand(classes, teachers, confirmedHomeroomTeac
       if (neededPeriods > 0 && availableUnassignedPeriods < neededPeriods) {
         return {
           valid: false,
-          error: `[需求不符] 班級「${targetClassNames.join('、')}」科目「${targetSubject}」可分派需求節數不足（需要 ${neededPeriods} 節，實際可用 ${availableUnassignedPeriods} 節）`
+          error: `[需求不符] 班級「${scopeClassNames.join('、')}」科目「${targetSubject}」可分派需求節數不足（需要 ${neededPeriods} 節，實際可用 ${availableUnassignedPeriods} 節）`
         }
       }
     }
@@ -290,16 +347,24 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
       let ruleAssigned = alreadyAssigned
       if (ruleAssigned >= targetPeriods) return
 
-      // Collect eligible classes restricted to targetClassNames if present, otherwise sorted by natural class name
+      // Collect eligible classes restricted to targetClassNames or candidateClassNames if present, otherwise sorted by natural class name
       const targetClassNames = Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0
         ? rule.targetClassNames
+        : null
+      const candidateClassNames = Array.isArray(rule.candidateClassNames) && rule.candidateClassNames.length > 0
+        ? rule.candidateClassNames
         : null
 
       let sortedClasses = [...classes]
       if (targetClassNames) {
         sortedClasses = sortedClasses.filter(c =>
           targetClassNames.includes(c.name) ||
-          targetClassNames.some(tn => String(tn).replace(/班$/, '') === String(c.name).replace(/班$/, ''))
+          targetClassNames.some(tn => isClassNameMatch(c.name, tn))
+        )
+      } else if (candidateClassNames) {
+        sortedClasses = sortedClasses.filter(c =>
+          candidateClassNames.includes(c.name) ||
+          candidateClassNames.some(tn => isClassNameMatch(c.name, tn))
         )
       } else {
         sortedClasses.sort((a, b) => String(a.name).localeCompare(String(b.name)))
@@ -360,6 +425,229 @@ export function materializeExactRules(classes, teachers, confirmedHomeroomTeache
   })
 
   return assignedCount
+}
+
+/**
+ * 📦 專屬匯入規則物化器 (Materialize Imported Assignment Rules)
+ * 僅根據傳入的 teachers 之 assignment_rules 物化分配，絕不執行 runSmartSubjectAssignment / Phase B fallback。
+ *
+ * @param {Object} params
+ * @param {Array} params.classes 班級陣列
+ * @param {Array} params.teachers 教師陣列
+ * @param {Array} [params.confirmedHomeroomTeacherIds] 已確認導師 ID 陣列
+ * @returns {{ success: boolean, classes: Array, assignedCount: number, error: string|null }}
+ */
+export function materializeImportedAssignmentRules({
+  classes = [],
+  teachers = [],
+  confirmedHomeroomTeacherIds = [],
+} = {}) {
+  if (!Array.isArray(classes) || !Array.isArray(teachers)) {
+    return {
+      success: false,
+      classes: classes || [],
+      assignedCount: 0,
+      error: '班級或教師資料格式不正確',
+    }
+  }
+
+  // 1. 深拷貝輸入資料，確保若失敗時絕不污染呼叫端物件
+  const clonedClasses = JSON.parse(JSON.stringify(classes))
+  const clonedTeachers = JSON.parse(JSON.stringify(teachers))
+
+  const eligibleTeachers = clonedTeachers.filter((t) =>
+    isTeacherEligibleForRules(t, confirmedHomeroomTeacherIds)
+  )
+
+  // 2. 收集本次匯入所涉及的 (grade, subject) 組合
+  const importedPairs = []
+  eligibleTeachers.forEach((t) => {
+    if (Array.isArray(t.assignment_rules)) {
+      t.assignment_rules.forEach((rule) => {
+        const g = Number(rule.grade)
+        const s = String(rule.subject || '').trim()
+        if (g > 0 && s) {
+          importedPairs.push({ grade: g, subject: s })
+        }
+      })
+    }
+  })
+
+  // 3. 在深拷貝上，針對本次匯入涉及的年級＋科目，重設既有 assignmentSource === 'subject-excel-import' 的需求
+  // 嚴格保留 isLocked, 手動指定 (isAutoAssigned: false 或無 assignmentSource), 及 mixed-import
+  const resetBaseIds = new Set()
+  clonedClasses.forEach((cls) => {
+    const clsGrade = getGradeFromClassName(cls.name, cls.grade)
+    if (Array.isArray(cls.course_requirements)) {
+      cls.course_requirements.forEach((req) => {
+        const isTargetPair = importedPairs.some(
+          (p) => p.grade === clsGrade && isSubjectMatch(req.subject, p.subject)
+        )
+        if (isTargetPair && req.assignmentSource === 'subject-excel-import' && !req.isLocked) {
+          req.teacher = ''
+          req.isAutoAssigned = false
+          delete req.assignmentSource
+          if (req.id && String(req.id).includes('_split_')) {
+            resetBaseIds.add(String(req.id).split('_split_')[0])
+          }
+        }
+      })
+    }
+  })
+
+  // 將因本次匯入重設的 split chunks 重新合併為基底需求
+  // 限制 consolidate 只針對本次 importedPairs 範圍內、且確實被重設（即之前是 assignmentSource === 'subject-excel-import'）所涉及的 baseId 相關 split chunks
+  consolidateSplitRequirements(clonedClasses, {
+    targetBaseIds: resetBaseIds,
+    targetPairs: importedPairs,
+  })
+
+  // 4. 需求預檢擋寫 (Preflight Allocation Guard)
+  const preflight = preflightValidateDemand(clonedClasses, eligibleTeachers, confirmedHomeroomTeacherIds)
+  if (!preflight.valid) {
+    return {
+      success: false,
+      classes, // 傳回未變更之原始 classes
+      assignedCount: 0,
+      error: preflight.error,
+    }
+  }
+
+  // 5. 執行 Exact Rules 物化
+  let totalAssignedCount = 0
+
+  for (const t of eligibleTeachers) {
+    if (!Array.isArray(t.assignment_rules)) continue
+
+    for (const rule of t.assignment_rules) {
+      const targetGrade = Number(rule.grade)
+      const targetSubject = String(rule.subject || '').trim()
+      const targetPeriods = Number(rule.periods) || 0
+      if (targetGrade <= 0 || targetPeriods <= 0 || !targetSubject) continue
+
+      // 班級規則優先順序：targetClassNames 是明確班級；否則 candidateClassNames 是批次候選；兩者皆無時為自然排序
+      const targetClassNames = Array.isArray(rule.targetClassNames) && rule.targetClassNames.length > 0
+        ? rule.targetClassNames
+        : null
+      const candidateClassNames = Array.isArray(rule.candidateClassNames) && rule.candidateClassNames.length > 0
+        ? rule.candidateClassNames
+        : null
+
+      let candidateClasses = []
+      if (targetClassNames) {
+        candidateClasses = targetClassNames
+          .map((name) =>
+            clonedClasses.find(
+              (c) => getGradeFromClassName(c.name, c.grade) === targetGrade && isClassNameMatch(c.name, name)
+            )
+          )
+          .filter(Boolean)
+      } else if (candidateClassNames) {
+        candidateClasses = candidateClassNames
+          .map((name) =>
+            clonedClasses.find(
+              (c) => getGradeFromClassName(c.name, c.grade) === targetGrade && isClassNameMatch(c.name, name)
+            )
+          )
+          .filter(Boolean)
+      } else {
+        candidateClasses = clonedClasses
+          .filter((c) => getGradeFromClassName(c.name, c.grade) === targetGrade)
+          .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      }
+
+      // 計算該 scope 範圍內該教師已滿足的節數作為起始 ruleAssigned
+      let alreadyAssigned = 0
+      candidateClasses.forEach((cls) => {
+        const clsGrade = getGradeFromClassName(cls.name, cls.grade)
+        if (clsGrade === targetGrade && Array.isArray(cls.course_requirements)) {
+          cls.course_requirements.forEach((req) => {
+            if (
+              req.teacher &&
+              req.teacher.trim() === t.name.trim() &&
+              isSubjectMatch(req.subject, targetSubject)
+            ) {
+              alreadyAssigned = Math.round((alreadyAssigned + (Number(req.periods) || 0)) * 100) / 100
+            }
+          })
+        }
+      })
+
+      let ruleAssigned = alreadyAssigned
+      if (ruleAssigned >= targetPeriods - 1e-6) continue
+
+      for (const cls of candidateClasses) {
+        if (ruleAssigned >= targetPeriods - 1e-6) break
+        if (!Array.isArray(cls.course_requirements)) continue
+
+        const clsGrade = getGradeFromClassName(cls.name, cls.grade)
+        if (clsGrade !== targetGrade) continue
+
+        for (let i = 0; i < cls.course_requirements.length; i++) {
+          if (ruleAssigned >= targetPeriods - 1e-6) break
+
+          const req = cls.course_requirements[i]
+          if (
+            !req.isLocked &&
+            (!req.teacher || req.teacher.trim() === '') &&
+            isSubjectApplicableToGrade(req.subject, clsGrade) &&
+            isSubjectMatch(req.subject, targetSubject)
+          ) {
+            const needed = Math.round((targetPeriods - ruleAssigned) * 100) / 100
+            const P = Number(req.periods) || 0
+
+            if (P <= needed + 1e-6) {
+              req.teacher = t.name
+              req.isAutoAssigned = true
+              req.assignmentSource = 'subject-excel-import'
+              ruleAssigned = Math.round((ruleAssigned + P) * 100) / 100
+              totalAssignedCount = Math.round((totalAssignedCount + P) * 100) / 100
+            } else {
+              // 拆分需求 (Splitting)
+              const baseId = req.id ? String(req.id).split('_split_')[0] : `req_${Date.now()}`
+              const chunk1 = {
+                ...req,
+                id: `${baseId}_split_${t.name}_1`,
+                periods: needed,
+                teacher: t.name,
+                isAutoAssigned: true,
+                assignmentSource: 'subject-excel-import',
+              }
+              const chunk2 = {
+                ...req,
+                id: `${baseId}_split_remainder_2`,
+                periods: Math.round((P - needed) * 100) / 100,
+                teacher: '',
+                isAutoAssigned: false,
+              }
+              delete chunk2.assignmentSource
+              cls.course_requirements.splice(i, 1, chunk1, chunk2)
+              ruleAssigned = Math.round((ruleAssigned + needed) * 100) / 100
+              totalAssignedCount = Math.round((totalAssignedCount + needed) * 100) / 100
+              i++ // 跳過未分配的 remainder chunk
+            }
+          }
+        }
+      }
+
+      // 6. 物化後檢驗該教師在規則範圍內指派節數是否完整達到 rule.periods
+      if (ruleAssigned + 1e-6 < targetPeriods) {
+        return {
+          success: false,
+          classes, // 傳回未變更之原始 classes
+          assignedCount: 0,
+          error: `[需求不符] 教師「${t.name}」科目「${targetSubject}」要求指派 ${targetPeriods} 節，但實際僅可指派 ${ruleAssigned} 節`,
+        }
+      }
+    }
+  }
+
+  return {
+    success: true,
+    classes: clonedClasses,
+    assignedCount: totalAssignedCount,
+    error: null,
+  }
 }
 
 /**

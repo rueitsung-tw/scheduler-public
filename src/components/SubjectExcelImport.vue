@@ -257,6 +257,7 @@ import {
   buildDiffComparison,
   applyImportToTeachers,
 } from '../utils/subjectAssignmentExcelParser'
+import { materializeImportedAssignmentRules } from '../utils/subjectAssignmentMaterializer'
 import MixedTeachingResolutionDialog from './MixedTeachingResolutionDialog.vue'
 import {
   buildMixedTeachingPlans,
@@ -537,11 +538,39 @@ const commitImport = async ({ resolutions = [] }) => {
 
   const nextClasses = applyResolvedMixedTeachingPlans(scheduleStore.classes || [], resolutions)
 
+  const rowMap = new Map()
+  for (const row of parsedRows.value) {
+    if (row.teacherId != null) {
+      rowMap.set(String(row.teacherId), row)
+    }
+    if (row.teacherName) {
+      rowMap.set(String(row.teacherName).trim(), row)
+    }
+  }
+
+  const participatingTeachers = nextTeachers.filter((t) => {
+    const byId = t.id != null && rowMap.has(String(t.id))
+    const byName = t.name && rowMap.has(String(t.name).trim())
+    return byId || byName
+  })
+
+  const materialized = materializeImportedAssignmentRules({
+    classes: nextClasses,
+    teachers: participatingTeachers,
+    confirmedHomeroomTeacherIds,
+  })
+
+  if (!materialized.success) {
+    statusType.value = 'error'
+    statusMessage.value = `❌ 無法套用班級配課：${materialized.error || '未知錯誤'}`
+    return
+  }
+
   const prevTeachers = scheduleStore.teachers
   const prevClasses = scheduleStore.classes
 
   scheduleStore.teachers = nextTeachers
-  scheduleStore.classes = nextClasses
+  scheduleStore.classes = materialized.classes
   scheduleStore.markScheduleDirty()
 
   try {
@@ -553,7 +582,7 @@ const commitImport = async ({ resolutions = [] }) => {
     pendingMixedPlans.value = []
     scheduleStore.pendingMixedPlans = []
     statusType.value = 'success'
-    statusMessage.value = '🎉 科任配課資料已成功套用並儲存至雲端！'
+    statusMessage.value = `🎉 科任配課資料已成功套用並儲存至雲端！（已指派 ${materialized.assignedCount} 節班級課程）`
   } catch (err) {
     scheduleStore.teachers = prevTeachers
     scheduleStore.classes = prevClasses

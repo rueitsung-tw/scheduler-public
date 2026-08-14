@@ -513,6 +513,9 @@ export function deriveTeacherFieldsFromRules(rules = []) {
     excelCode: r.excelCode || '',
     classCount: Number(r.classCount || 0),
     periodsPerClass: Number(r.periodsPerClass || 0),
+    sourceKind: r.sourceKind || '',
+    targetClassNames: Array.isArray(r.targetClassNames) ? [...r.targetClassNames] : [],
+    candidateClassNames: Array.isArray(r.candidateClassNames) ? [...r.candidateClassNames] : [],
   }))
 
   const quotaMap = new Map()
@@ -558,6 +561,9 @@ function normalizeRulesForComparison(rules = []) {
     subject: String(r.subject || r.systemSubject || '').trim(),
     periods: Number(r.periods),
     excelCode: String(r.excelCode || '').trim(),
+    sourceKind: String(r.sourceKind || '').trim(),
+    targetClassNames: Array.isArray(r.targetClassNames) ? [...r.targetClassNames].sort() : [],
+    candidateClassNames: Array.isArray(r.candidateClassNames) ? [...r.candidateClassNames].sort() : [],
   }))
 }
 
