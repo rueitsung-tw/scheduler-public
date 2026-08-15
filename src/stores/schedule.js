@@ -1068,6 +1068,28 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     if (index !== -1) { specialCourses.value.splice(index, 1); markScheduleDirty(); }
   };
 
+  // ── Block Schedule Import ──
+
+  function withSpecialCourseIdAndTeacherName(course) {
+    const uniqueId = Date.now().toString() + '-' + Math.random().toString(36).substring(2, 9)
+    return {
+      ...course,
+      id: uniqueId,
+      teacher_name: course.teacher || course.teacher_name || '',
+    }
+  }
+
+  const applyBlockScheduleImport = ({ courses = [], replaceIds = [], clearExisting = false }) => {
+    const retained = clearExisting
+      ? []
+      : specialCourses.value.filter((course) => !replaceIds.includes(course.id))
+    specialCourses.value = [
+      ...retained,
+      ...courses.map((course) => withSpecialCourseIdAndTeacherName(course)),
+    ]
+    markScheduleDirty()
+  }
+
   const checkTeacherConflict = (teacherName, day, period) => {
     const specialConflict = specialCourses.value.find(sc => sc.teacher_name === teacherName && sc.day === day && sc.period === period);
     if (specialConflict) return `教師在此時段有特殊課程：${specialConflict.name}`;
@@ -1975,7 +1997,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     // 新增：進度狀態欄位
     enginePhase, engineMessage, engineStartedAt, engineFinishedAt,
     engineElapsedSeconds, engineLastUpdated, enginePollingActive, engineNetworkRetry,
-    getSubjectColor, saveClass, markScheduleDirty, addSpecialCourse, deleteSpecialCourse, checkTeacherConflict,
+    getSubjectColor, saveClass, markScheduleDirty, addSpecialCourse, deleteSpecialCourse, applyBlockScheduleImport, checkTeacherConflict,
     addClassroom, deleteClassroom, updateClassroom, clearTeacher,
     editingTeacherId, setEditingTeacherId, addTeacher, deleteTeacher, updateTeacher,
     checkQuotaExceed, countUsedPeriodsInternal,

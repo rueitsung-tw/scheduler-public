@@ -498,6 +498,9 @@ app.post('/api/save-all', async (req, res) => {
         }
         // 更新特殊課程
         if (specialCourses && Array.isArray(specialCourses)) {
+            const nullableSourceMetadata = (value) => (
+                typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+            );
             await prisma.specialCourse.deleteMany({});
             for (const sc of specialCourses) {
                 await prisma.specialCourse.create({
@@ -510,7 +513,10 @@ app.post('/api/save-all', async (req, res) => {
                         lockedSlots: JSON.stringify(sc.lockedSlots || []),
                         isAutoTime: sc.isAutoTime || false,
                         isAutoClass: sc.isAutoClass || false,
-                        autoClassConfig: JSON.stringify(sc.autoClassConfig || null)
+                        autoClassConfig: JSON.stringify(sc.autoClassConfig || null),
+                        projectName: nullableSourceMetadata(sc.projectName),
+                        sourceGroup: nullableSourceMetadata(sc.sourceGroup),
+                        sourceKind: nullableSourceMetadata(sc.sourceKind)
                     }
                 });
             }
@@ -658,6 +664,9 @@ app.get('/api/schedule', async (req, res) => {
             })),
             specialCourses: specialCourses.map(sc => ({
                 ...sc,
+                projectName: typeof sc.projectName === 'string' && sc.projectName.trim() !== '' ? sc.projectName.trim() : null,
+                sourceGroup: typeof sc.sourceGroup === 'string' && sc.sourceGroup.trim() !== '' ? sc.sourceGroup.trim() : null,
+                sourceKind: typeof sc.sourceKind === 'string' && sc.sourceKind.trim() !== '' ? sc.sourceKind.trim() : null,
                 targetClasses: JSON.parse(sc.targetClasses || '[]'),
                 lockedSlots: JSON.parse(sc.lockedSlots || '[]'),
                 autoClassConfig: JSON.parse(sc.autoClassConfig || 'null')
