@@ -66,6 +66,9 @@ model SpecialCourse {
   isAutoTime      Boolean  @default(false)
   isAutoClass     Boolean  @default(false)
   autoClassConfig String?  // AI 湊班設定 (JSON 物件)
+  projectName     String?  // 匯入來源的專案名稱
+  sourceGroup     String?  // 匯入來源的群組名稱
+  sourceKind      String?  // 匯入來源類型
 }
 
 // 5. 課程需求與配課表 
