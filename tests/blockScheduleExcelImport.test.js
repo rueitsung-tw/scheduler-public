@@ -4,25 +4,24 @@ import { describe, expect, it } from 'vitest'
 import { parseBlockScheduleWorkbook, buildBlockScheduleImportPlan } from '../src/utils/blockScheduleExcelImport.js'
 
 const classes = [
-  { name: '3年4班', course_requirements: [{ subject: '國語文' }, { subject: '數學' }] },
-  { name: '3年5班', course_requirements: [{ subject: '國語文' }, { subject: '數學' }] },
+  { name: '3年4班', course_requirements: [{ subject: '語文-國語' }, { subject: '數學' }] },
+  { name: '3年5班', course_requirements: [{ subject: '語文-國語' }, { subject: '數學' }] },
   { name: '3年6班', course_requirements: [{ subject: '數學' }] },
   { name: '3年8班', course_requirements: [{ subject: '數學' }] },
   { name: '3年9班', course_requirements: [{ subject: '數學' }] },
-  { name: '5年4班', course_requirements: [{ subject: '國語文' }, { subject: '數學' }] },
-  { name: '5年9班', course_requirements: [{ subject: '國語文' }, { subject: '數學' }] },
+  { name: '5年4班', course_requirements: [{ subject: '語文-國語' }, { subject: '數學' }] },
+  { name: '5年9班', course_requirements: [{ subject: '語文-國語' }, { subject: '數學' }] },
 ]
 
 const teachers = [
-  { id: 'li-full', name: '李靖', type: 'special_ed_resource' },
-  { id: 'li-suffix', name: '特教李靖', type: 'special_ed_resource' },
-  { id: 'guo-full', name: '郭嘉', type: 'special_ed_resource' },
-  { id: 'guo-suffix', name: '特教郭嘉', type: 'special_ed_resource' },
-  { id: 'agent-1', name: '代理1', type: 'special_ed_resource' },
-  { id: 'agent-1-suffix', name: '特教代理1', type: 'special_ed_resource' },
-  { id: 'agent-2', name: '代理2', type: 'special_ed_resource' },
-  { id: 'agent-2-suffix', name: '特教代理2', type: 'special_ed_resource' },
-  { id: 'other', name: '李靖', type: 'subject' },
+  { id: 'li-full', name: '李靖', type: 'subject' },
+  { id: 'li-suffix', name: '特教李靖', type: 'subject' },
+  { id: 'guo-full', name: '郭嘉', type: 'subject' },
+  { id: 'guo-suffix', name: '特教郭嘉', type: 'subject' },
+  { id: 'agent-1', name: '代理1', type: 'subject' },
+  { id: 'agent-1-suffix', name: '特教代理1', type: 'subject' },
+  { id: 'agent-2', name: '代理2', type: 'subject' },
+  { id: 'agent-2-suffix', name: '特教代理2', type: 'subject' },
 ]
 
 function workbookBuffer(rows, merges = []) {
@@ -87,8 +86,8 @@ describe('parseBlockScheduleWorkbook', () => {
       teacher: course.teacher,
       teacherId: course.teacherId,
     }))).toEqual([
-      { classes: ['5年4班', '5年9班'], targetClasses: ['5年4班', '5年9班'], targetSubject: '國語文', sourceGroup: '國1', teacher: '李靖', teacherId: 'li-full' },
-      { classes: ['5年4班', '5年9班'], targetClasses: ['5年4班', '5年9班'], targetSubject: '國語文', sourceGroup: '國2', teacher: '郭嘉', teacherId: 'guo-full' },
+      { classes: ['5年4班', '5年9班'], targetClasses: ['5年4班', '5年9班'], targetSubject: '語文-國語', sourceGroup: '國1', teacher: '李靖', teacherId: 'li-full' },
+      { classes: ['5年4班', '5年9班'], targetClasses: ['5年4班', '5年9班'], targetSubject: '語文-國語', sourceGroup: '國2', teacher: '郭嘉', teacherId: 'guo-full' },
     ])
   })
 
@@ -104,7 +103,7 @@ describe('parseBlockScheduleWorkbook', () => {
     expect(result.entries.map(({ course }) => [course.targetSubject, course.teacher, course.lockedSlots[0]])).toEqual([
       ['數學', '代理1', { day: 2, period: 3 }],
       ['數學', '代理2', { day: 2, period: 3 }],
-      ['國語文', '李靖', { day: 2, period: 4 }],
+      ['語文-國語', '李靖', { day: 2, period: 4 }],
     ])
   })
 
@@ -141,7 +140,7 @@ describe('parseBlockScheduleWorkbook', () => {
 
     expect(result.blockers).toEqual([])
     expect(result.entries.map(({ course }) => course.teacherId)).toEqual(['li-full', 'agent-1'])
-    expect(result.entries.map(({ course }) => course.targetSubject)).toEqual(['國語文', '數學'])
+    expect(result.entries.map(({ course }) => course.targetSubject)).toEqual(['語文-國語', '數學'])
     expect(result.warnings).toEqual([expect.objectContaining({ cell: 'C2', code: 'CORRECTION_SUFFIX' })])
   })
 
@@ -184,12 +183,12 @@ describe('parseBlockScheduleWorkbook', () => {
 describe('buildBlockScheduleImportPlan', () => {
   it('only flags an exact learning-center identity as replaceable', () => {
     const existing = [
-      { id: 'e1', name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國1', teacher: '李靖', teacher_name: '李靖' },
-      { id: 'e2', name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國2', teacher: '郭嘉', teacher_name: '郭嘉' },
+      { id: 'e1', name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國1', teacher: '李靖', teacher_name: '李靖' },
+      { id: 'e2', name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國2', teacher: '郭嘉', teacher_name: '郭嘉' },
     ]
     const incoming = [
-      { course: { name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國1', teacher: '李靖' } },
-      { course: { name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國2', teacher: '郭嘉' } },
+      { course: { name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國1', teacher: '李靖' } },
+      { course: { name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班', '5年9班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國2', teacher: '郭嘉' } },
     ]
     const plan = buildBlockScheduleImportPlan(incoming, existing)
     expect(plan.replacements).toHaveLength(2)
@@ -204,7 +203,7 @@ describe('buildBlockScheduleImportPlan', () => {
       { id: 'e1', name: '創思中心', targetSubject: '數學', targetClasses: ['3年4班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', sourceGroup: null, teacher: null, teacher_name: '' },
     ]
     const incoming = [
-      { course: { name: '創思中心', targetSubject: '國語文', targetClasses: ['3年4班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', sourceGroup: null, teacher: null } },
+      { course: { name: '創思中心', targetSubject: '語文-國語', targetClasses: ['3年4班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', sourceGroup: null, teacher: null } },
     ]
     const plan = buildBlockScheduleImportPlan(incoming, existing)
     expect(plan.replacements).toHaveLength(0)
@@ -219,7 +218,7 @@ describe('buildBlockScheduleImportPlan', () => {
       { id: 'e1', name: '創思中心', targetSubject: '數學', targetClasses: ['3年4班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', sourceGroup: null, teacher: null, teacher_name: '' },
     ]
     const incoming = [
-      { course: { name: '創思中心', targetSubject: '國語文', targetClasses: ['3年5班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', sourceGroup: null, teacher: null } },
+      { course: { name: '創思中心', targetSubject: '語文-國語', targetClasses: ['3年5班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', sourceGroup: null, teacher: null } },
     ]
     const plan = buildBlockScheduleImportPlan(incoming, existing)
     expect(plan.appendable).toHaveLength(1)
@@ -242,10 +241,10 @@ describe('buildBlockScheduleImportPlan', () => {
     // Different sourceGroup means different identity (not a replacement),
     // but same-slot same-class overlap should still produce a warning.
     const existing = [
-      { id: 'e1', name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國1', teacher: '李靖', teacher_name: '李靖' },
+      { id: 'e1', name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國1', teacher: '李靖', teacher_name: '李靖' },
     ]
     const incoming = [
-      { course: { name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國2', teacher: '郭嘉' } },
+      { course: { name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', sourceGroup: '國2', teacher: '郭嘉' } },
     ]
     const plan = buildBlockScheduleImportPlan(incoming, existing)
     expect(plan.replacements).toHaveLength(0)
@@ -281,7 +280,7 @@ describe('buildBlockScheduleImportPlan', () => {
     expect(course).toMatchObject({ type: 'pullout', isAutoTime: false, isAutoClass: false })
     expect(course.lockedSlots).toEqual([{ day: 1, period: 1 }])
     expect(course.targetClasses.length).toBeGreaterThan(0)
-    expect(course.targetSubject).toBe('國語文')
+    expect(course.targetSubject).toBe('語文-國語')
     // Gifted course contract
     const gifted = parse([
       ['星期', '節次', '區塊'],

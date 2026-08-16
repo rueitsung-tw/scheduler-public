@@ -24,7 +24,7 @@ describe('applyBlockScheduleImport', () => {
   it('replaces only selected IDs and retains the rest', () => {
     const store = getStore()
     store.specialCourses = [
-      { id: 'keep-me', name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖', teacher_name: '李靖' },
+      { id: 'keep-me', name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖', teacher_name: '李靖' },
       { id: 'replace-me', name: '學習中心', targetSubject: '數學', targetClasses: ['3年4班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', teacher: null, teacher_name: '' },
     ]
     const courses = [
@@ -40,7 +40,7 @@ describe('applyBlockScheduleImport', () => {
   it('clears all existing third-track rules when clearExisting is true', () => {
     const store = getStore()
     store.specialCourses = [
-      { id: 'a', name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖', teacher_name: '李靖' },
+      { id: 'a', name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖', teacher_name: '李靖' },
       { id: 'b', name: '創思中心', targetSubject: '數學', targetClasses: ['3年4班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', teacher: null, teacher_name: '' },
     ]
     const courses = [
@@ -55,7 +55,7 @@ describe('applyBlockScheduleImport', () => {
     const store = getStore()
     store.specialCourses = []
     const courses = [
-      { name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖' },
+      { name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖' },
     ]
     store.applyBlockScheduleImport({ courses, replaceIds: [], clearExisting: false })
     expect(store.specialCourses[0].teacher_name).toBe('李靖')
@@ -68,7 +68,7 @@ describe('applyBlockScheduleImport', () => {
     store.specialCourses = []
     const courses = [
       { name: '創思中心', targetSubject: '數學', targetClasses: ['3年4班', '3年8班'], lockedSlots: [{ day: 3, period: 2 }], sourceKind: 'gifted', teacher: null, isAutoTime: false, isAutoClass: false },
-      { name: '學習中心', targetSubject: '國語文', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖', isAutoTime: false, isAutoClass: false },
+      { name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年4班'], lockedSlots: [{ day: 1, period: 1 }], sourceKind: 'learning_center', teacher: '李靖', isAutoTime: false, isAutoClass: false },
     ]
     store.applyBlockScheduleImport({ courses, replaceIds: [], clearExisting: false })
     expect(store.specialCourses).toHaveLength(2)

@@ -37,12 +37,12 @@ describe('SpecialCourseView block schedule import', () => {
 
   const seedStore = () => {
     const store = useScheduleStore()
-    store.standardDomainSettings = [{ name: '國語文' }, { name: '數學' }]
+    store.standardDomainSettings = [{ name: '語文-國語' }, { name: '數學' }]
     store.classes = [
       {
         name: '3年3班',
         grade: 3,
-        course_requirements: [{ subject: '國語文' }, { subject: '數學' }],
+        course_requirements: [{ subject: '語文-國語' }, { subject: '數學' }],
       },
     ]
     store.teachers = [
@@ -73,7 +73,7 @@ describe('SpecialCourseView block schedule import', () => {
       {
         id: 'warn-1',
         name: '學習中心',
-        targetSubject: '國語文',
+        targetSubject: '語文-國語',
         targetClasses: ['3年3班'],
         lockedSlots: [{ day: 1, period: 2 }],
         sourceKind: 'learning_center',
@@ -84,7 +84,7 @@ describe('SpecialCourseView block schedule import', () => {
       {
         id: 'replace-1',
         name: '學習中心',
-        targetSubject: '國語文',
+        targetSubject: '語文-國語',
         targetClasses: ['3年3班'],
         lockedSlots: [{ day: 1, period: 3 }],
         sourceKind: 'learning_center',
@@ -123,7 +123,7 @@ describe('SpecialCourseView block schedule import', () => {
 
     const confirmButton = wrapper.get('[data-testid="confirm-block-schedule-import"]')
     expect(confirmButton.attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-testid="blocker-section"]').text()).toContain('找不到特教資源教師')
+    expect(wrapper.get('[data-testid="blocker-section"]').text()).toContain('找不到教師')
 
     await confirmButton.trigger('click')
     expect(applySpy).not.toHaveBeenCalled()
@@ -136,7 +136,7 @@ describe('SpecialCourseView block schedule import', () => {
       {
         id: 'old-1',
         name: '學習中心',
-        targetSubject: '國語文',
+        targetSubject: '語文-國語',
         targetClasses: ['3年3班'],
         lockedSlots: [{ day: 1, period: 1 }],
         sourceKind: 'learning_center',
@@ -181,7 +181,7 @@ describe('SpecialCourseView block schedule import', () => {
       {
         id: 'dup-a',
         name: '學習中心',
-        targetSubject: '國語文',
+        targetSubject: '語文-國語',
         targetClasses: ['3年3班'],
         lockedSlots: [{ day: 1, period: 3 }],
         sourceKind: 'learning_center',
@@ -192,7 +192,7 @@ describe('SpecialCourseView block schedule import', () => {
       {
         id: 'dup-b',
         name: '學習中心',
-        targetSubject: '國語文',
+        targetSubject: '語文-國語',
         targetClasses: ['3年3班'],
         lockedSlots: [{ day: 1, period: 3 }],
         sourceKind: 'learning_center',

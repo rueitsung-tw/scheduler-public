@@ -5,10 +5,11 @@ import { normalizeSubject } from './subjectCanonical.js'
 const DAY_MAP = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5 }
 const PERIOD_MAP = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7 }
 const SUBJECT_ALIASES = {
-  國: '國語文',
-  國語: '國語文',
-  國1: '國語文',
-  國2: '國語文',
+  國: '語文-國語',
+  國語: '語文-國語',
+  國語文: '語文-國語',
+  國1: '語文-國語',
+  國2: '語文-國語',
   數: '數學',
   數1: '數學',
   數2: '數學',
@@ -92,19 +93,34 @@ function hasSubjectRequirement(classItem, targetSubject) {
 }
 
 function resolveTeacher(rawName, teachers, blockers, cell) {
-  const candidates = teachers.filter((teacher) => teacher?.type === 'special_ed_resource')
-  const exact = candidates.filter((teacher) => teacher.name === rawName)
-  const matches = exact.length > 0 ? exact : candidates.filter((teacher) => teacher.name?.endsWith(rawName))
-
-  if (matches.length === 0) {
-    addIssue(blockers, 'MISSING_TEACHER', `找不到特教資源教師「${rawName}」`, cell)
-    return null
-  }
-  if (matches.length > 1) {
+  // Stage 1: Exact match against all teachers
+  const exact = teachers.filter((t) => t?.name === rawName)
+  if (exact.length === 1) return exact[0]
+  if (exact.length > 1) {
     addIssue(blockers, 'AMBIGUOUS_TEACHER', `教師「${rawName}」有多個符合項目`, cell)
     return null
   }
-  return matches[0]
+
+  // Stage 2: Suffix match (e.g. "文迪" → "謝文迪")
+  const suffixMatches = teachers.filter((t) => t?.name?.endsWith(rawName))
+  if (suffixMatches.length === 1) return suffixMatches[0]
+  if (suffixMatches.length > 1) {
+    addIssue(blockers, 'AMBIGUOUS_TEACHER', `教師「${rawName}」有多個符合項目`, cell)
+    return null
+  }
+
+  // Stage 3: Contains match (only for single-character names, e.g. "謝" → "謝文迪")
+  if (rawName.length === 1) {
+    const includesMatches = teachers.filter((t) => t?.name?.includes(rawName))
+    if (includesMatches.length === 1) return includesMatches[0]
+    if (includesMatches.length > 1) {
+      addIssue(blockers, 'AMBIGUOUS_TEACHER', `教師「${rawName}」有多個符合項目`, cell)
+      return null
+    }
+  }
+
+  addIssue(blockers, 'MISSING_TEACHER', `找不到教師「${rawName}」`, cell)
+  return null
 }
 
 function parseLine(rawLine, options, blockers, warnings, cell) {
