@@ -15,6 +15,10 @@
 > 私人開發工作區中的本機資料庫、debug payload、未公開筆記與其他敏感內容不會同步到這裡。
 > 公開同步規則請參考 [PUBLIC_REPO_INDEX.md](./PUBLIC_REPO_INDEX.md) 與 [public-repo.manifest.json](./public-repo.manifest.json)。
 
+## ⚠️ 實驗性質警語
+
+本軟體目前仍屬實驗性質，演算法與功能尚在持續更新與驗證中。由於排課條件十分複雜，且每新增一項個人要求，都可能影響既有約束並造成原有演算法失效或排課失敗，因此請勿將目前的排課結果視為絕對正確。建議搭配 Gemini 3.5、GPT-5.5 等模型進行根因分析，協助釐清衝突條件與改善排課設定。
+
 ---
 
 ## 🛠️ 核心技術棧 (Technology Stack)
