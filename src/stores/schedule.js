@@ -110,6 +110,87 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       : []
   );
 
+  const normalizeValidationReportDetails = (reportObj) => {
+    if (!reportObj || typeof reportObj !== 'object') return [];
+    const details = [];
+
+    const formatEntryMessage = (item, defaultCategory) => {
+      if (!item) return null;
+      if (typeof item === 'string') {
+        const msg = item.trim();
+        return msg ? { level: 'warn', category: defaultCategory, message: msg, displayText: `[WARN] ${msg}` } : null;
+      }
+      if (typeof item === 'object') {
+        if (item.message) {
+          const level = (item.level || 'warn').toLowerCase();
+          return {
+            level,
+            category: item.category || defaultCategory,
+            message: item.message,
+            displayText: item.displayText || `[${level.toUpperCase()}] ${item.message}`,
+            ...item,
+          };
+        }
+        if (item.displayText) {
+          return {
+            level: 'warn',
+            category: defaultCategory,
+            message: item.displayText,
+            displayText: item.displayText,
+            ...item,
+          };
+        }
+        const parts = [];
+        if (item.className || item.class_id) parts.push(`班級: ${item.className || item.class_id}`);
+        if (item.teacher || item.teacher_name) parts.push(`教師: ${item.teacher || item.teacher_name}`);
+        if (item.subject || item.subject_name) parts.push(`科目: ${item.subject || item.subject_name}`);
+        if (item.room || item.room_name) parts.push(`教室: ${item.room || item.room_name}`);
+        if (item.day && item.period) parts.push(`時段: 星期${item.day}第${item.period}節`);
+        if (item.reason) parts.push(`原因: ${item.reason}`);
+        if (item.issue || item.description) parts.push(item.issue || item.description);
+
+        const composed = parts.join(' - ');
+        if (composed) {
+          return {
+            level: 'warn',
+            category: defaultCategory,
+            message: composed,
+            displayText: `[WARN] ${composed}`,
+          };
+        }
+      }
+      return null;
+    };
+
+    const categoriesMap = [
+      { key: 'unassigned_special_rooms', category: 'SPECIAL_ROOM' },
+      { key: 'room_conflicts', category: 'ROOM_OVERLOAD' },
+      { key: 'room_overloads', category: 'ROOM_OVERLOAD' },
+      { key: 'teacher_conflicts', category: 'TEACHER_CONFLICT' },
+      { key: 'class_slot_conflicts', category: 'CLASS_CONFLICT' },
+    ];
+
+    categoriesMap.forEach(({ key, category }) => {
+      const list = reportObj[key];
+      if (Array.isArray(list)) {
+        list.forEach((item) => {
+          const entry = formatEntryMessage(item, category);
+          if (entry) details.push(entry);
+        });
+      }
+    });
+
+    const blocking = reportObj.grade_time_rule_diagnostics?.blockingIssues;
+    if (Array.isArray(blocking)) {
+      blocking.forEach((item) => {
+        const entry = formatEntryMessage(item, 'GRADE_TIME_RULE');
+        if (entry) details.push(entry);
+      });
+    }
+
+    return normalizeDiagnosticWarningDetails(details);
+  };
+
   const isDiagnosticWarningLine = (line) => {
     const normalized = normalizeDiagnosticLine(line);
     if (!normalized) return false;
@@ -1430,45 +1511,18 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         // 重置網路重試計數
         engineNetworkRetry.value = 0;
 
-        if (data.status === 'COMPLETED') {
-          stopPolling();
-          clearActiveJob();
-          engineFinishedAt.value = data.finishedAt;
+        const processFailedResult = async (resultObj, fallbackMsg, dataObj) => {
+          const solverStatus = resultObj?.solverStatus || resultObj?.status || 'ERROR';
+          engineStatus.value = 'ERROR';
+          enginePhase.value = 'FAILED';
 
-          // 🚨 [狀態分類] 區分 INFEASIBLE / INVALID_INPUT / INVALID_VALIDATION / UNKNOWN_TIMEOUT / ERROR
-          // 🛡️ solverStatus > status，因為 status 可能是後端 DB 層級的状态（COMPLETED/FAILED）
-          let resultObj = data.result;
-          if (typeof resultObj === 'string') {
-            try { resultObj = JSON.parse(resultObj); } catch { resultObj = {}; }
-          }
-          
-          // 🆕 Movable Locks Result Processing
-          if (resultObj?.requiresUserReview === true && resultObj?.movedLockedLessons?.length > 0) {
-            movableLocksReviewData.value = {
-              movedLockedLessons: resultObj.movedLockedLessons,
-              movableLockSummary: resultObj.movableLockSummary || null,
-              requiresUserReview: true
-            };
-            syncMovableLockDecisionsWithResult(resultObj);
-          } else {
-            movableLocksReviewData.value = null;
-            resetMovableLockReviewDecisions();
-          }
-
-          const solverStatus = resultObj?.solverStatus || resultObj?.status;
-          const scheduleEmpty = !resultObj?.schedule || (Array.isArray(resultObj.schedule) && resultObj.schedule.length === 0);
-
-          // 🛡️ INVALID_INPUT：輸入超載（如總節數超過年級容量）
           if (solverStatus === 'INVALID_INPUT') {
-            engineStatus.value = 'ERROR';
-            enginePhase.value = 'FAILED';
             engineErrorMessage.value = resultObj?.error || resultObj?.message || '輸入資料超載，請檢查班級總節數是否超過年級上限';
 
-            // 附帶 classLoadTrace 供前端診斷
             if (resultObj?.classLoadTrace) {
               engineDiagnosticWarningDetails.value = resultObj.classLoadTrace
-                .filter(t => t.validationError)
-                .map(t => ({
+                .filter((t) => t.validationError)
+                .map((t) => ({
                   category: 'CLASS_LOAD',
                   className: t.className,
                   grade: t.grade,
@@ -1479,96 +1533,120 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
                 }));
             }
 
-            // 🔧 修復 B (RC-CONF-01 輔因)：接收 gradeCapacityMap 並轉換為 gradeMaxPeriods
-            // solver 輸出格式: { "grade1": 29, "grade1_arts": 29, "grade2": 29, ... }
-            // 前端格式: { 1: 29, 2: 29, ... }
             if (resultObj?.gradeCapacityMap && typeof resultObj.gradeCapacityMap === 'object') {
               const gcm = resultObj.gradeCapacityMap;
               const gradeMap = {};
               for (const [key, val] of Object.entries(gcm)) {
-                // 解析 key: "grade1" → grade=1, "grade3_arts" → grade=3
                 const match = key.match(/^grade(\d+)/);
                 if (match) {
                   const gradeNum = parseInt(match[1], 10);
-                  // 以非 arts 版本為基礎（一般班容量），arts 版本通常相同
                   if (!key.includes('_arts')) {
                     gradeMap[gradeNum] = val;
                   }
                 }
               }
               schoolInfo.value.gradeMaxPeriods = gradeMap;
-              console.log(`[schedule.js] 🔧 已從 gradeCapacityMap 更新 gradeMaxPeriods:`, gradeMap);
+              console.log('[schedule.js] 🔧 已從 gradeCapacityMap 更新 gradeMaxPeriods:', gradeMap);
             }
-
-            if (data.startedAt && data.finishedAt) {
-              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
-            }
-            reject(new Error(engineErrorMessage.value));
-
-          // 🛡️ INVALID_VALIDATION：求解成功但驗證失敗（如 unassigned_special_rooms）
           } else if (solverStatus === 'INVALID' || solverStatus === 'INVALID_VALIDATION') {
-            engineStatus.value = 'ERROR';
-            enginePhase.value = 'FAILED';
             engineErrorMessage.value = resultObj?.message || '求解結果未通過驗證，請檢查 debug_schedule_validation_report.json';
 
-            // 讀取 validation report
-            try {
-              const valResp = await fetch(`${API_BASE}/debug/validation-report`);
-              if (valResp.ok) {
-                const valReport = await valResp.json();
-                engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(valReport);
+            let details = [];
+            if (resultObj?.validationReport && typeof resultObj.validationReport === 'object') {
+              details = normalizeValidationReportDetails(resultObj.validationReport);
+            }
+            if (details.length === 0) {
+              try {
+                const valResp = await fetch(`${API_BASE}/debug/validation-report`);
+                if (valResp.ok) {
+                  const valReport = await valResp.json();
+                  details = normalizeValidationReportDetails(valReport);
+                }
+              } catch (_) {
+                // 靜默失敗
               }
-            } catch {
-              // 靜默失敗，不影響主流程
             }
-
-            if (data.startedAt && data.finishedAt) {
-              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
-            }
-            reject(new Error(engineErrorMessage.value));
-
-          // ⏱️ UNKNOWN_TIMEOUT：求解逾時
-          } else if (solverStatus === 'UNKNOWN_TIMEOUT') {
-            engineStatus.value = 'ERROR';
-            enginePhase.value = 'FAILED';
+            engineDiagnosticWarningDetails.value = details;
+          } else if (solverStatus === 'TIMEOUT_NO_SOLUTION' || solverStatus === 'UNKNOWN_TIMEOUT') {
             engineErrorMessage.value = resultObj?.message || '排課引擎逾時未完成——建議增加時間上限或放寬部分條件';
 
             engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(resultObj?.diagnosticWarnings);
             if (resultObj && Array.isArray(resultObj.aiAnalysis)) {
               engineAiAnalysis.value = resultObj.aiAnalysis;
             }
-
-            if (data.startedAt && data.finishedAt) {
-              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
-            }
-            reject(new Error(engineErrorMessage.value));
-
-          // 🚨 INFEASIBLE：求解器證明無解
-          //    只有當 solverStatus 明確是 INFEASIBLE，或狀態完全未知（null/undefined）且 schedule 為空時才走這裡
-          } else if (solverStatus === 'INFEASIBLE' || (!solverStatus && scheduleEmpty)) {
-            engineStatus.value = 'ERROR';
-            enginePhase.value = 'FAILED';
+          } else if (solverStatus === 'INFEASIBLE') {
             engineErrorMessage.value = resultObj?.message || resultObj?.error || '排課引擎無法找到可行解 (INFEASIBLE)';
 
-            // 🔍 捕獲診斷資料；優先使用結構化 diagnosticWarnings
             engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(resultObj?.diagnosticWarnings);
             if (resultObj && Array.isArray(resultObj.aiAnalysis)) {
               engineAiAnalysis.value = resultObj.aiAnalysis;
             }
 
-            // 🔍 若尚無可辨識警示，讀取 debug_infeasible_report.txt 萃取警示
             if (engineDiagnosticWarnings.value.length === 0) {
               engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
             }
+          } else {
+            engineErrorMessage.value = resultObj?.error || resultObj?.message || fallbackMsg || '排課引擎執行失敗';
 
-            if (data.startedAt && data.finishedAt) {
-              engineElapsedSeconds.value = calculateElapsed(data.startedAt);
+            engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(resultObj?.diagnosticWarnings);
+            if (resultObj && Array.isArray(resultObj.aiAnalysis)) {
+              engineAiAnalysis.value = resultObj.aiAnalysis;
             }
+
+            if (engineDiagnosticWarnings.value.length === 0) {
+              engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
+            }
+          }
+
+          if (dataObj?.startedAt && dataObj?.finishedAt) {
+            engineElapsedSeconds.value = calculateElapsed(dataObj.startedAt);
+          }
+        };
+
+        if (data.status === 'COMPLETED') {
+          stopPolling();
+          clearActiveJob();
+          engineFinishedAt.value = data.finishedAt;
+
+          let resultObj = data.result;
+          if (typeof resultObj === 'string') {
+            try { resultObj = JSON.parse(resultObj); } catch { resultObj = {}; }
+          }
+
+          // 🆕 Movable Locks Result Processing
+          if (resultObj?.requiresUserReview === true && resultObj?.movedLockedLessons?.length > 0) {
+            movableLocksReviewData.value = {
+              movedLockedLessons: resultObj.movedLockedLessons,
+              movableLockSummary: resultObj.movableLockSummary || null,
+              requiresUserReview: true,
+            };
+            syncMovableLockDecisionsWithResult(resultObj);
+          } else {
+            movableLocksReviewData.value = null;
+            resetMovableLockReviewDecisions();
+          }
+
+          const solverStatus = resultObj?.solverStatus || resultObj?.status;
+          const scheduleEmpty = !resultObj?.schedule || (Array.isArray(resultObj.schedule) && resultObj.schedule.length === 0);
+
+          const isFailedSolverStatus = [
+            'INVALID_INPUT',
+            'INVALID',
+            'INVALID_VALIDATION',
+            'TIMEOUT_NO_SOLUTION',
+            'UNKNOWN_TIMEOUT',
+            'INFEASIBLE',
+            'MODEL_INVALID',
+            'INVALID_GRADE_TIME_RULE_CONFIGURATION',
+            'ERROR',
+          ].includes(solverStatus) || (!solverStatus && scheduleEmpty);
+
+          if (isFailedSolverStatus) {
+            await processFailedResult(resultObj, data.progressMessage, data);
             reject(new Error(engineErrorMessage.value));
           } else {
             // ✅ 真正完成
             engineStatus.value = 'COMPLETED';
-            // 🚀 核心修復：排課完成後，強制從資料庫抓取最新產出的 timetable
             await loadFromDB(true);
             if (data.startedAt && data.finishedAt) {
               engineElapsedSeconds.value = calculateElapsed(data.startedAt);
@@ -1578,28 +1656,18 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         } else if (data.status === 'FAILED') {
           stopPolling();
           clearActiveJob();
-          engineStatus.value = 'ERROR';
           engineFinishedAt.value = data.finishedAt;
-          // 🔍 P1-B: data.result 可能是 JSON 字串（server.js 中 JSON.stringify(failedResult)），需先解析
+
           let failedResultObj = data.result;
           if (typeof failedResultObj === 'string') {
             try { failedResultObj = JSON.parse(failedResultObj); } catch { failedResultObj = {}; }
           }
-          const errDetail = failedResultObj?.error || failedResultObj?.message || data.progressMessage || '排課引擎執行失敗';
-          engineErrorMessage.value = errDetail;
-          // 🔍 捕獲診斷分析資料
-          engineDiagnosticWarningDetails.value = normalizeDiagnosticWarningDetails(failedResultObj?.diagnosticWarnings);
-          if (failedResultObj && Array.isArray(failedResultObj.aiAnalysis)) {
-            engineAiAnalysis.value = failedResultObj.aiAnalysis;
-          }
-          if (engineDiagnosticWarnings.value.length === 0) {
-            engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
-          }
-          reject(new Error(errDetail));
+
+          await processFailedResult(failedResultObj, data.progressMessage, data);
+          reject(new Error(engineErrorMessage.value));
         } else {
-          // PROCESSING / QUEUED / SOLVING / FINALIZING 中，繼續輪詢
           saveActiveJob(jobId);
-          pollTimer = setTimeout(check, 5000); // 每 5 秒輪詢一次
+          pollTimer = setTimeout(check, 5000);
         }
       };
 

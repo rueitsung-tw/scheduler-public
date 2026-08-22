@@ -22,7 +22,7 @@
     "format": "prettier --write --experimental-cli src/",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:fast": "vitest run --exclude tests/nativeLanguagePreallocationRealScenarios.test.js",
+    "test:fast": "vitest run --exclude tests/nativeLanguagePreallocationRealScenarios.test.js --exclude tests/clineHarnessLifecycle.test.js --exclude tests/clineHarnessPerformance.test.js && vitest run tests/clineHarnessLifecycle.test.js && vitest run tests/clineHarnessPerformance.test.js",
     "test:solver": "vitest run tests/nativeLanguagePreallocationRealScenarios.test.js",
     "test:all": "npm run test:fast && npm run test:solver"
   },

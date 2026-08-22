@@ -14,6 +14,19 @@ describe('Movable Locks Settings UI & Policy Selector', () => {
     vi.restoreAllMocks()
   })
 
+  function mountAiSettingsView(options = {}) {
+    return mount(AiSettingsView, {
+      ...options,
+      global: {
+        ...options.global,
+        stubs: {
+          RouterLink: true,
+          ...(options.global?.stubs || {})
+        }
+      }
+    })
+  }
+
   it('1. 預設 disabled：主開關未開且 isMovableLocksActive === false', () => {
     const store = useScheduleStore()
     expect(store.movableLocksPolicy.movableLocksEnabled).toBe(false)
@@ -36,13 +49,7 @@ describe('Movable Locks Settings UI & Policy Selector', () => {
     expect(store.isMovableLocksActive).toBe(false)
 
     // Component mount check for warning banner
-    const wrapper = mount(AiSettingsView, {
-      global: {
-        stubs: {
-          // stub axios or store calls if needed
-        }
-      }
-    })
+    const wrapper = mountAiSettingsView()
 
     const warningBanner = wrapper.find('.movable-locks-warning-banner')
     expect(warningBanner.exists()).toBe(true)
@@ -62,7 +69,7 @@ describe('Movable Locks Settings UI & Policy Selector', () => {
     expect(store.isMovableLocksActive).toBe(true)
 
     // Component mount check for active badge
-    const wrapper = mount(AiSettingsView)
+    const wrapper = mountAiSettingsView()
     const activeBadge = wrapper.find('.status-badge')
     expect(activeBadge.exists()).toBe(true)
     expect(activeBadge.text()).toContain('提案功能已生效 (Active)')

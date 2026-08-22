@@ -1,0 +1,33 @@
+{
+  "name": "@cline-bridge/agy-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for Antigravity (AGY) CLI - enables Cline to delegate tasks to AGY agents",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "agy-mcp-server": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "keywords": [
+    "mcp",
+    "antigravity",
+    "agy",
+    "cline-bridge",
+    "agent-delegation"
+  ],
+  "license": "MIT"
+}

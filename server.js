@@ -3159,6 +3159,21 @@ app.get('/api/debug-infeasible-report', async (req, res) => {
     }
 });
 
+app.get('/api/debug/validation-report', async (req, res) => {
+    try {
+        const reportPath = path.join(__dirname, 'debug_schedule_validation_report.json');
+        if (fs.existsSync(reportPath)) {
+            const report = tryReadJsonFile(reportPath);
+            if (report) {
+                return res.json(report);
+            }
+        }
+        return res.json({ success: false, message: '無驗證報告' });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: '讀取驗證報告失敗', details: error.message });
+    }
+});
+
 app.get('/api/ai-infeasible-analysis-bundle', async (req, res) => {
     try {
         const requestedJobId = normalizeDiagnosticReportLine(req.query?.jobId);
@@ -3615,9 +3630,17 @@ async function runSchedulingWorker(jobId, payload) {
             }
         });
 
+        let pythonStderr = '';
         const pythonProcess = spawnPython('solver.py', [inputPath, outputPath], 'Solver');
         pythonProcess.stdout.on('data', (data) => console.log(`[Python 輸出]: ${data}`));
-        pythonProcess.stderr.on('data', (data) => console.error(`[Python 錯誤]: ${data}`));
+        pythonProcess.stderr.on('data', (data) => {
+            const str = data.toString();
+            console.error(`[Python 錯誤]: ${str}`);
+            pythonStderr += str;
+            if (pythonStderr.length > 4000) {
+                pythonStderr = pythonStderr.slice(-4000);
+            }
+        });
 
         pythonProcess.on('close', async (code) => {
             try {
@@ -3808,10 +3831,12 @@ async function runSchedulingWorker(jobId, payload) {
                     //    其次讀 status，最後才 fallback 到 null（表示完全沒有輸出）
                     let classLoadTrace = null;
                     let gradeCapacityMap = null;
+                    let validationReport = null;
                     let solverMetadata = {};
                     if (outputJson) {
                         classLoadTrace = outputJson?.classLoadTrace || null;
                         gradeCapacityMap = outputJson?.gradeCapacityMap || null;
+                        validationReport = outputJson?.validationReport || null;
                         solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
                         solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
                         solverMetadata.solvePass = outputJson?.solvePass || null;
@@ -3824,6 +3849,7 @@ async function runSchedulingWorker(jobId, payload) {
                             classLoadTrace = outputJson?.classLoadTrace || null;
                             // 🔧 修復 B (RC-CONF-01 輔因)：讀取 gradeCapacityMap 過渡方案
                             gradeCapacityMap = outputJson?.gradeCapacityMap || null;
+                            validationReport = outputJson?.validationReport || null;
                             solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
                             solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
                             solverMetadata.solvePass = outputJson?.solvePass || null;
@@ -3833,16 +3859,45 @@ async function runSchedulingWorker(jobId, payload) {
                         }
                     }
 
-                    const solverFailureMessage = outputJson?.message || {
+                    if (!validationReport) {
+                        const valReportPath = path.join(__dirname, 'debug_schedule_validation_report.json');
+                        if (fs.existsSync(valReportPath)) {
+                            try {
+                                validationReport = tryReadJsonFile(valReportPath);
+                            } catch (e) {
+                                console.warn(`[Validation Report] 無法解析 debug_schedule_validation_report.json: ${e.message}`);
+                            }
+                        }
+                    }
+
+                    const statusMessageMap = {
                         TIMEOUT_NO_SOLUTION: '求解逾時，未找到任何可行解',
                         UNKNOWN_TIMEOUT: '求解逾時，未找到可接受的可行解',
                         INFEASIBLE: '無法產出符合條件的課表',
                         INVALID_VALIDATION: '求解結果未通過硬限制驗證',
                         MODEL_INVALID: '模型構建錯誤',
                         INVALID_INPUT: '輸入資料驗證失敗',
-                    }[actualSolverStatus];
+                        INVALID_GRADE_TIME_RULE_CONFIGURATION: '年級時間規則設定無效，請檢查共備時段或彈性節次配置',
+                    };
 
-                    const errorMsg = solverFailureMessage || (code === null ? 'Python 進程被強制終止' : `Exit code ${code}`);
+                    const rawErrMsg = (typeof outputJson?.error === 'string' && outputJson.error.trim())
+                        ? outputJson.error.trim()
+                        : (typeof outputJson?.message === 'string' && outputJson.message.trim())
+                            ? outputJson.message.trim()
+                            : statusMessageMap[actualSolverStatus] || null;
+
+                    let errorMsg = rawErrMsg;
+                    if (!errorMsg) {
+                        if (code === null) {
+                            errorMsg = 'Python 進程被強制終止';
+                        } else if (code === 0) {
+                            errorMsg = '排課引擎異常結束但未產出結果檔案';
+                        } else {
+                            const stderrLines = pythonStderr ? pythonStderr.trim().split('\n').filter(l => l.trim()) : [];
+                            const lastStderr = stderrLines.length > 0 ? stderrLines[stderrLines.length - 1].trim() : '';
+                            errorMsg = lastStderr ? `排課引擎異常終止 (Exit code ${code}): ${lastStderr}` : `Exit code ${code}`;
+                        }
+                    }
 
                     // 規則式診斷分析：讀取 debug_infeasible_report.txt 並萃取警示摘要
                     let aiAnalysis = buildGenericInfeasibleAnalysis();
@@ -3882,7 +3937,19 @@ async function runSchedulingWorker(jobId, payload) {
                         ...solverMetadata
                     };
 
-                    const validStatuses = ['INVALID_INPUT', 'INVALID_VALIDATION', 'INFEASIBLE', 'UNKNOWN_TIMEOUT', 'TIMEOUT_NO_SOLUTION', 'MODEL_INVALID'];
+                    if (validationReport) {
+                        failedResult.validationReport = validationReport;
+                    }
+
+                    const validStatuses = [
+                        'INVALID_INPUT',
+                        'INVALID_VALIDATION',
+                        'INFEASIBLE',
+                        'UNKNOWN_TIMEOUT',
+                        'TIMEOUT_NO_SOLUTION',
+                        'MODEL_INVALID',
+                        'INVALID_GRADE_TIME_RULE_CONFIGURATION'
+                    ];
                     if (validStatuses.includes(effectiveSolverStatus)) {
                         failedResult.status = effectiveSolverStatus;
                         failedResult.solverStatus = effectiveSolverStatus;
