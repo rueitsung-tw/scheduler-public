@@ -131,6 +131,13 @@ function parseLine(rawLine, options, blockers, warnings, cell) {
     addIssue(warnings, 'CORRECTION_SUFFIX', '已忽略行尾「修正」註記', cell)
   }
 
+  let sharedEventId = null
+  const eventMatch = line.match(/(?:#([A-Za-z0-9_-]+)|\[(?:事件:|event:|id:)?([A-Za-z0-9_-]+)\])\s*$/)
+  if (eventMatch) {
+    sharedEventId = eventMatch[1] || eventMatch[2]
+    line = line.replace(/(?:#([A-Za-z0-9_-]+)|\[(?:事件:|event:|id:)?([A-Za-z0-9_-]+)\])\s*$/, '').trim()
+  }
+
   const arrow = line.match(/^((?:\d{3}|\d+年\d+班)(?:[、,，/\s]+(?:\d{3}|\d+年\d+班))*)\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9-]*)\s*(?:→|->)\s*(.*)$/)
   if (arrow) {
     const projectName = text(arrow[3])
@@ -145,6 +152,7 @@ function parseLine(rawLine, options, blockers, warnings, cell) {
       sourceGroup: null,
       projectName,
       teacher: null,
+      sharedEventId,
     }
   }
 
@@ -165,6 +173,7 @@ function parseLine(rawLine, options, blockers, warnings, cell) {
     sourceKind: 'learning_center',
     projectName: null,
     teacher: resolveTeacher(teacherName, options.teachers, blockers, cell),
+    sharedEventId,
   }
 }
 
@@ -271,6 +280,7 @@ export function parseBlockScheduleWorkbook(arrayBuffer, {
           sourceKind: parsed.sourceKind,
           sourceGroup: parsed.sourceKind === 'learning_center' ? sourceGroup : null,
           projectName: parsed.projectName,
+          sharedEventId: parsed.sharedEventId || null,
           teacher: parsed.teacher?.name || null,
           teacherId: parsed.teacher?.id || null,
           classes: classNames,
@@ -303,6 +313,7 @@ export function specialCourseImportIdentity(course) {
       .map(({ day, period }) => ({ day: Number(day), period: Number(period) }))
       .sort((a, b) => a.day - b.day || a.period - b.period),
     sourceKind: course.sourceKind || '',
+    sharedEventId: course.sharedEventId || null,
   }
   if (course.sourceKind === 'learning_center') {
     return JSON.stringify({
@@ -318,6 +329,9 @@ export function specialCourseImportIdentity(course) {
  * Check if two courses have overlapping slots on shared classes.
  */
 function hasSlotOverlap(a, b) {
+  if (a.sharedEventId && b.sharedEventId && a.sharedEventId === b.sharedEventId) {
+    return false
+  }
   const aClasses = new Set(a.targetClasses || [])
   const bClasses = new Set(b.targetClasses || [])
   const sharedClasses = [...aClasses].filter((c) => bClasses.has(c))
@@ -346,6 +360,75 @@ export function buildBlockScheduleImportPlan(entries, existingSpecialCourses = [
   for (const entry of entries) {
     if (entry.blockers) {
       blockers.push(...entry.blockers)
+    }
+  }
+
+  // Validate consistency of sharedEventId across incoming entries
+  const sharedGroups = new Map()
+  for (const entry of entries) {
+    const eventId = entry.course?.sharedEventId
+    if (eventId) {
+      if (!sharedGroups.has(eventId)) sharedGroups.set(eventId, [])
+      sharedGroups.get(eventId).push(entry)
+    }
+  }
+
+  for (const [eventId, groupEntries] of sharedGroups) {
+    if (groupEntries.length > 1) {
+      const first = groupEntries[0].course
+      const firstTeacher = first.teacher || first.teacher_name || ''
+      const firstSlotsStr = JSON.stringify(
+        (first.lockedSlots || [])
+          .map((s) => ({ day: Number(s.day), period: Number(s.period) }))
+          .sort((a, b) => a.day - b.day || a.period - b.period)
+      )
+      const firstType = `${first.type || ''}:${first.sourceKind || ''}:${first.name || ''}`
+
+      for (let i = 1; i < groupEntries.length; i++) {
+        const item = groupEntries[i].course
+        const itemTeacher = item.teacher || item.teacher_name || ''
+        const itemSlotsStr = JSON.stringify(
+          (item.lockedSlots || [])
+            .map((s) => ({ day: Number(s.day), period: Number(s.period) }))
+            .sort((a, b) => a.day - b.day || a.period - b.period)
+        )
+        const itemType = `${item.type || ''}:${item.sourceKind || ''}:${item.name || ''}`
+        const cell = groupEntries[i].source?.cellRef || groupEntries[i].source?.cell || ''
+
+        if (firstTeacher !== itemTeacher) {
+          addIssue(blockers, 'MISMATCHED_SHARED_EVENT_TEACHER', `共同事件「${eventId}」包含不一致的教師（「${firstTeacher}」與「${itemTeacher}」）`, cell)
+        }
+        if (firstSlotsStr !== itemSlotsStr) {
+          addIssue(blockers, 'MISMATCHED_SHARED_EVENT_SLOTS', `共同事件「${eventId}」包含不一致的鎖定時段`, cell)
+        }
+        if (firstType !== itemType) {
+          addIssue(blockers, 'MISMATCHED_SHARED_EVENT_TYPE', `共同事件「${eventId}」包含不一致的課程類型`, cell)
+        }
+      }
+
+      // Check if the same class is assigned multiple distinct subjects within the same sharedEventId
+      const classSubjectMap = new Map()
+      for (const groupEntry of groupEntries) {
+        const item = groupEntry.course
+        const subj = item.targetSubject || item.subject || ''
+        const classes = item.targetClasses || []
+        const cell = groupEntry.source?.cellRef || groupEntry.source?.cell || ''
+        for (const cls of classes) {
+          if (classSubjectMap.has(cls)) {
+            const prevSubj = classSubjectMap.get(cls)
+            if (prevSubj !== subj) {
+              addIssue(
+                warnings,
+                'MISMATCHED_SHARED_EVENT_SAME_CLASS_MULTI_SUBJECT',
+                `共同事件「${eventId}」之班級「${cls}」同時被指派不同科目（「${prevSubj}」與「${subj}」），請確認是否為有效同班抽離`,
+                cell
+              )
+            }
+          } else {
+            classSubjectMap.set(cls, subj)
+          }
+        }
+      }
     }
   }
 

@@ -360,7 +360,11 @@ def _entry_room_weight(entry):
 
 
 def _entries_match_same_resolved_special_course_event(entries, teacher_name, day, period, resolved_special_courses):
-    for sc in resolved_special_courses or []:
+    if not resolved_special_courses:
+        return False
+
+    # 1. 檢查單一 resolved special course
+    for sc in resolved_special_courses:
         sc_teacher = sc.get("teacher") or sc.get("teacher_name")
         if sc_teacher != teacher_name:
             continue
@@ -391,6 +395,48 @@ def _entries_match_same_resolved_special_course_event(entries, teacher_name, day
                 break
 
         if all_entries_match:
+            return True
+
+    # 2. 檢查具 sharedEventId 的共同授課事件分組
+    shared_groups = defaultdict(list)
+    for sc in resolved_special_courses:
+        shared_id = sc.get("sharedEventId")
+        if not shared_id:
+            continue
+        sc_teacher = sc.get("teacher") or sc.get("teacher_name")
+        if sc_teacher != teacher_name:
+            continue
+        slots = sc.get("lockedSlots") or []
+        if not any(slot.get("day") == day and slot.get("period") == period for slot in slots):
+            continue
+        shared_groups[str(shared_id).strip()].append(sc)
+
+    for shared_id, group_scs in shared_groups.items():
+        all_group_classes = set()
+        class_to_allowed_subjects = defaultdict(set)
+        for sc in group_scs:
+            t_classes = set(sc.get("targetClasses") or [])
+            all_group_classes |= t_classes
+            t_subj = sc.get("targetSubject") or sc.get("subject")
+            eff_subjs = sc.get("_effective_subjects") or {}
+            for c in t_classes:
+                if t_subj:
+                    class_to_allowed_subjects[c].add(t_subj)
+                if c in eff_subjs:
+                    class_to_allowed_subjects[c].add(eff_subjs[c])
+
+        all_entries_match = True
+        for entry in entries:
+            class_name = entry.get("className")
+            if class_name not in all_group_classes:
+                all_entries_match = False
+                break
+            allowed = class_to_allowed_subjects.get(class_name, set())
+            if entry.get("subject") not in allowed:
+                all_entries_match = False
+                break
+
+        if all_entries_match and all_group_classes:
             return True
 
     return False
@@ -2506,7 +2552,11 @@ def main():
                         "lockedSlots": locked_slots,
                         "isAutoTime": False,   # 固定時段
                         "isAutoClass": False,  # 固定班級
-                        "autoClassConfig": sc.get("autoClassConfig")
+                        "autoClassConfig": sc.get("autoClassConfig"),
+                        "sharedEventId": sc.get("sharedEventId"),
+                        "sourceGroup": sc.get("sourceGroup"),
+                        "sourceKind": sc.get("sourceKind"),
+                        "projectName": sc.get("projectName"),
                     }
                     result["specialCourses"].append(updated_sc)
 
@@ -2744,6 +2794,7 @@ def main():
                         "targetSubject": sc.get("targetSubject"),
                         "targetClasses": selected_classes,
                         "lockedSlots": locked_slots,
+                        "sharedEventId": sc.get("sharedEventId"),
                         "_effective_subjects": eff_subjs,
                     })
 

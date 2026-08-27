@@ -423,7 +423,7 @@ const rebuildImportPreview = (arrayBuffer) => {
   const plan = buildBlockScheduleImportPlan(parsed.entries, scheduleStore.specialCourses)
   importWorkbookBuffer.value = arrayBuffer
   importPlan.value = plan
-  importBlockers.value = parsed.blockers || []
+  importBlockers.value = [...(parsed.blockers || []), ...(plan.blockers || [])]
   importWarnings.value = [...(parsed.warnings || []), ...(plan.warnings || [])]
   selectedReplacementIds.value = plan.replacements.flatMap((replacement) =>
     replacement.existingCandidates.map((candidate) => candidate.id),

@@ -353,11 +353,17 @@ class SchedulePhase2Engine:
         # 預先計算特教教師在特殊課程中的時段佔用
         special_teacher_periods = defaultdict(int)
         if hasattr(self.model, "sc_decision_vars"):
+            seen_events = set()
             for sc_entry in self.model.sc_decision_vars:
                 sc = sc_entry["sc"]
                 teacher = sc.get("teacher", "")
                 if teacher:
-                    # 每個特殊課程佔用 1 個時段
+                    shared_id = sc.get("sharedEventId")
+                    if shared_id:
+                        event_sig = (teacher, str(shared_id).strip())
+                        if event_sig in seen_events:
+                            continue
+                        seen_events.add(event_sig)
                     special_teacher_periods[teacher] += 1
 
         for t_data in self.teachers_data:

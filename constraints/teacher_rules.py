@@ -365,12 +365,22 @@ def resolve_effective_special_course_subject(sc, class_name, preprocess_metadata
     if sc.get("name") != "學習中心":
         return subj
 
+    def _canonical(s):
+        s = str(s).strip()
+        if s in ("國", "國語", "國語文", "語文-國語", "國1", "國2"):
+            return "語文-國語"
+        if s in ("數", "數學", "數1", "數2"):
+            return "數學"
+        return s
+
+    canon_subj = _canonical(subj)
+
     trace_list = (preprocess_metadata or {}).get("homeroomBlockizationTrace", [])
     for trace in trace_list:
         if trace.get("className") != class_name:
             continue
-        merged = [m["subject"] for m in trace.get("mergedSubjects", [])]
-        if subj in merged:
+        merged = [_canonical(m.get("subject", "")) for m in trace.get("mergedSubjects", [])]
+        if canon_subj in merged:
             return "導師區塊"
     return subj
 
@@ -543,12 +553,15 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
         name = sc.get("name", "")
         teacher = sc.get("teacher", "")
         is_auto_class = sc.get("isAutoClass", False)
+        shared_event_id = sc.get("sharedEventId")
 
         if is_auto_class:
             cfg = sc.get("autoClassConfig") or {}
             grades = frozenset(cfg.get("grades") or [])
             count = cfg.get("count", 1)
             event_key = (name, teacher, "auto", grades, count)
+        elif shared_event_id:
+            event_key = (name, teacher, "shared", str(shared_event_id).strip())
         else:
             classes_key = frozenset(sc.get("targetClasses") or [])
             event_key = (name, teacher, "manual", classes_key)
@@ -574,6 +587,23 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                 )
             if select_c_vars:
                 model.Add(sum(select_c_vars.values()) == count)
+        elif mode == "shared":
+            # 🛡️ 求解前語意硬驗證：同一 sharedEventId 內，同一班級不可對應多個不同的有效科目
+            class_eff_map = {}
+            classes_set = set()
+            for sc in event_sc_list:
+                for c in sc.get("targetClasses") or []:
+                    classes_set.add(c)
+                    eff = resolve_effective_special_course_subject(sc, c, preprocess_metadata)
+                    if c in class_eff_map and class_eff_map[c] != eff:
+                        shared_id_str = str(rest[0]) if rest else ""
+                        raise ValueError(
+                            f"INVALID_SHARED_EVENT_SAME_CLASS_MULTI_SUBJECT: "
+                            f"班級「{c}」在共同事件「{shared_id_str}」中同時被指派多個不同的有效科目「{class_eff_map[c]}」與「{eff}」"
+                        )
+                    class_eff_map[c] = eff
+            classes_in_pool = sorted(list(classes_set))
+            select_c_vars = {c: 1 for c in classes_in_pool}
         else:
             classes_in_pool = list(rest[0])
             select_c_vars = {c: 1 for c in classes_in_pool}
@@ -683,19 +713,21 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
             for sc in sub_sc_list:
                 sc_id = sc.get("id")
                 subj = sc.get("targetSubject", "")
+                sc_target_classes = sc.get("targetClasses") or []
+                sc_classes = sc_target_classes if mode == "shared" and sc_target_classes else classes_in_pool
 
                 # ── 記錄 effective_subjects 資訊 ──
                 effective_subjects_map = {}
                 if subj:
                     effective_subjects_map = {
                         c: resolve_effective_special_course_subject(sc, c, preprocess_metadata)
-                        for c in classes_in_pool
+                        for c in sc_classes
                     }
 
                 sc_decision_vars.append({
                     "sc": sc,
                     "vars": sub_event_vars,  # [SEMANTIC FIX] 指向次分組 vars
-                    "classes_pool": classes_in_pool,
+                    "classes_pool": sc_classes,
                     "select_vars": select_c_vars,
                     "mode": mode,
                     "effective_subjects": effective_subjects_map,
@@ -707,7 +739,7 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                     _warned_missing = set()
 
                     for p in range(TOTAL_PERIODS):
-                        for c in classes_in_pool:
+                        for c in sc_classes:
                             effective_subj = resolve_effective_special_course_subject(
                                 sc, c, preprocess_metadata
                             )

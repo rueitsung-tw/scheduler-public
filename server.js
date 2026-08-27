@@ -516,7 +516,8 @@ app.post('/api/save-all', async (req, res) => {
                         autoClassConfig: JSON.stringify(sc.autoClassConfig || null),
                         projectName: nullableSourceMetadata(sc.projectName),
                         sourceGroup: nullableSourceMetadata(sc.sourceGroup),
-                        sourceKind: nullableSourceMetadata(sc.sourceKind)
+                        sourceKind: nullableSourceMetadata(sc.sourceKind),
+                        sharedEventId: nullableSourceMetadata(sc.sharedEventId)
                     }
                 });
             }
@@ -667,6 +668,7 @@ app.get('/api/schedule', async (req, res) => {
                 projectName: typeof sc.projectName === 'string' && sc.projectName.trim() !== '' ? sc.projectName.trim() : null,
                 sourceGroup: typeof sc.sourceGroup === 'string' && sc.sourceGroup.trim() !== '' ? sc.sourceGroup.trim() : null,
                 sourceKind: typeof sc.sourceKind === 'string' && sc.sourceKind.trim() !== '' ? sc.sourceKind.trim() : null,
+                sharedEventId: typeof sc.sharedEventId === 'string' && sc.sharedEventId.trim() !== '' ? sc.sharedEventId.trim() : null,
                 targetClasses: JSON.parse(sc.targetClasses || '[]'),
                 lockedSlots: JSON.parse(sc.lockedSlots || '[]'),
                 autoClassConfig: JSON.parse(sc.autoClassConfig || 'null')

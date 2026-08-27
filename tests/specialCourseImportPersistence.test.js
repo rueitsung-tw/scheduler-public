@@ -157,6 +157,38 @@ describe('Special-course source metadata persistence API', () => {
       sourceKind: null,
       projectName: null,
       sourceGroup: null,
+      sharedEventId: null,
     })
+  })
+
+  it('round-trips sharedEventId for multi-class shared learning-center events', async () => {
+    const courses = await saveAndLoad([
+      {
+        type: 'pullout',
+        name: '學習中心',
+        targetSubject: '數學',
+        teacher: '佑瑩',
+        targetClasses: ['4年2班', '4年6班'],
+        lockedSlots: [{ day: 4, period: 1 }],
+        sourceKind: 'learning_center',
+        sourceGroup: null,
+        sharedEventId: 'evt-77-80',
+      },
+      {
+        type: 'pullout',
+        name: '學習中心',
+        targetSubject: '數學',
+        teacher: '佑瑩',
+        targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'],
+        lockedSlots: [{ day: 4, period: 1 }],
+        sourceKind: 'learning_center',
+        sourceGroup: null,
+        sharedEventId: 'evt-77-80',
+      },
+    ])
+
+    expect(courses).toHaveLength(2)
+    expect(courses[0].sharedEventId).toBe('evt-77-80')
+    expect(courses[1].sharedEventId).toBe('evt-77-80')
   })
 })

@@ -293,4 +293,148 @@ describe('buildBlockScheduleImportPlan', () => {
     expect(giftedCourse.targetSubject).toBe('數學')
     expect(giftedCourse.teacher).toBeNull()
   })
+
+  it('parses explicit sharedEventId tag with #tag or [event:tag] syntax', () => {
+    const result = parse([
+      ['星期', '節次', '區塊'],
+      ['四', '一', '504、509國1 (李靖)#EVT-LC-01\n304、305數(郭嘉)[event:EVT-LC-02]'],
+    ])
+
+    expect(result.blockers).toEqual([])
+    expect(result.entries).toHaveLength(2)
+    expect(result.entries[0].course.sharedEventId).toBe('EVT-LC-01')
+    expect(result.entries[0].course.teacher).toBe('李靖')
+    expect(result.entries[1].course.sharedEventId).toBe('EVT-LC-02')
+    expect(result.entries[1].course.teacher).toBe('郭嘉')
+  })
+
+  it('handles 77/80-style multi-class shared events sharing the same sharedEventId', () => {
+    const result = parse([
+      ['星期', '節次', '區塊'],
+      ['四', '一', '304、305數(李靖)#EVT-77-80\n504、509數(李靖)#EVT-77-80'],
+    ])
+
+    expect(result.blockers).toEqual([])
+    expect(result.entries).toHaveLength(2)
+
+    const plan = buildBlockScheduleImportPlan(result.entries, [])
+    expect(plan.blockers).toEqual([])
+    expect(plan.appendable).toHaveLength(2)
+    expect(plan.appendable[0].course.sharedEventId).toBe('EVT-77-80')
+    expect(plan.appendable[1].course.sharedEventId).toBe('EVT-77-80')
+  })
+
+  it('flags blocker when entries sharing same sharedEventId have conflicting teachers', () => {
+    const incoming = [
+      {
+        course: {
+          name: '學習中心',
+          type: 'pullout',
+          sourceKind: 'learning_center',
+          targetSubject: '數學',
+          teacher: '李靖',
+          targetClasses: ['3年4班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: 'EVT-CONFLICT-TEACHER',
+        },
+        source: { cellRef: 'C2' },
+      },
+      {
+        course: {
+          name: '學習中心',
+          type: 'pullout',
+          sourceKind: 'learning_center',
+          targetSubject: '數學',
+          teacher: '郭嘉',
+          targetClasses: ['5年4班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: 'EVT-CONFLICT-TEACHER',
+        },
+        source: { cellRef: 'C3' },
+      },
+    ]
+
+    const plan = buildBlockScheduleImportPlan(incoming, [])
+    expect(plan.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'MISMATCHED_SHARED_EVENT_TEACHER',
+      }),
+    ]))
+  })
+
+  it('flags blocker when entries sharing same sharedEventId have conflicting locked slots', () => {
+    const incoming = [
+      {
+        course: {
+          name: '學習中心',
+          type: 'pullout',
+          sourceKind: 'learning_center',
+          targetSubject: '數學',
+          teacher: '李靖',
+          targetClasses: ['3年4班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: 'EVT-CONFLICT-SLOTS',
+        },
+        source: { cellRef: 'C2' },
+      },
+      {
+        course: {
+          name: '學習中心',
+          type: 'pullout',
+          sourceKind: 'learning_center',
+          targetSubject: '數學',
+          teacher: '李靖',
+          targetClasses: ['5年4班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: 'EVT-CONFLICT-SLOTS',
+        },
+        source: { cellRef: 'C3' },
+      },
+    ]
+
+    const plan = buildBlockScheduleImportPlan(incoming, [])
+    expect(plan.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'MISMATCHED_SHARED_EVENT_SLOTS',
+      }),
+    ]))
+  })
+
+  it('flags warning when entries sharing same sharedEventId assign multiple different subjects to the same class', () => {
+    const incoming = [
+      {
+        course: {
+          name: '學習中心',
+          type: 'pullout',
+          sourceKind: 'learning_center',
+          targetSubject: '數學',
+          teacher: '何采珍',
+          targetClasses: ['5年1班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: 'EVT-SAME-CLASS-MULTI-SUBJ',
+        },
+        source: { cellRef: 'C2' },
+      },
+      {
+        course: {
+          name: '學習中心',
+          type: 'pullout',
+          sourceKind: 'learning_center',
+          targetSubject: '語文-國語',
+          teacher: '何采珍',
+          targetClasses: ['5年1班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: 'EVT-SAME-CLASS-MULTI-SUBJ',
+        },
+        source: { cellRef: 'C3' },
+      },
+    ]
+
+    const plan = buildBlockScheduleImportPlan(incoming, [])
+    expect(plan.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'MISMATCHED_SHARED_EVENT_SAME_CLASS_MULTI_SUBJECT',
+      }),
+    ]))
+  })
 })
