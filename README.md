@@ -143,7 +143,7 @@ repository-root/
 
 | 元件 | 建議版本 |
 | :--- | :--- |
-| Node.js | `20.19.0` 以上，或 `22.12.0` 以上 |
+| Node.js | 建議使用 `22 LTS`；最低支援 `20.19.0` 或 `22.12.0` 以上 |
 | npm | 隨 Node.js 一起安裝 |
 | Python | `3.9+` |
 | 作業系統 | Windows 10/11 64-bit 或 Ubuntu 24.04+ |
@@ -162,10 +162,9 @@ repository-root/
 - 若使用較慢的儲存裝置，可能出現存檔延遲、寫入鎖等待，或讓使用者體感成「慢半拍」。
 
 ### Windows 安裝步驟
-1. 先安裝 PowerShell 7。
-   - Windows 預設的 Windows PowerShell 在處理 UTF-8 檔案與終端機編碼時較容易出現亂碼或相容性問題。
-   - 建議先安裝 PowerShell 7，再進行後續安裝與啟動步驟，以確保 UTF-8 檔案與指令執行更穩定。
-2. 安裝 Node.js 20.19+ 或 22.12+。
+1. 建議使用 PowerShell 7。
+   - PowerShell 7 對 UTF-8 檔案與終端機編碼的處理較穩定；不安裝也可以依照下列步驟執行。
+2. 安裝 Node.js 22 LTS（最低支援 `20.19.0` 或 `22.12.0` 以上）。
 3. 安裝 Python 3.9+，並確認 PowerShell 可以執行 `python --version`。
 4. 在專案根目錄執行：
 
@@ -173,10 +172,9 @@ repository-root/
 **👉 若您使用 PowerShell (推薦)**：
 ```powershell
 npm install
-python -m venv venv
 py -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 npx prisma db push
 ```
 **👉 若您使用 傳統命令提示字元 (cmd)**：
@@ -184,7 +182,7 @@ npx prisma db push
 npm install
 py -m venv venv
 venv\Scripts\activate.bat
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 npx prisma db push
 ```
 
@@ -240,7 +238,16 @@ npm run test:run
 
 ## ⚠️ 常見問題 (Troubleshooting)
 
-- 如果出現 native binding 錯誤，通常代表 `node_modules` 是從不同作業系統複製過來的，請刪除後重新 `npm install`。
+- 如果出現 `Cannot find native binding`、`ERR_DLOPEN_FAILED` 或 `not a valid Win32 application`，通常是 Rolldown 的 Windows 原生 optional dependency 未正確安裝、檔案損壞，或 `node_modules` 來自其他平台。請在 PowerShell 依序執行：
+
+  ```powershell
+  Remove-Item -Recurse -Force .\node_modules -ErrorAction SilentlyContinue
+  Remove-Item -Force .\package-lock.json -ErrorAction SilentlyContinue
+  npm cache verify
+  npm install --include=optional
+  ```
+
+  這是針對 native binding 錯誤的修復步驟，不是一般安裝流程；正常情況請保留 `package-lock.json` 並直接執行 `npm install`。若仍失敗，請確認 `node -p "process.arch"` 顯示 `x64`，並優先使用 Node.js 22 LTS。
 - 如果 Python 找不到，請確認專案內 `venv` 已建立，或系統 `python` / `python3` 已可直接執行。
 - 若在 Windows 與 Ubuntu 間切換開發，建議同時重建 `node_modules` 與 `venv`。
 - 公開 repo 不包含私人 debug 資料；若你需要同步新檔案到公開版，請先更新 `public-repo.manifest.json`。
