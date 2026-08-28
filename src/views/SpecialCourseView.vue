@@ -9,6 +9,17 @@
         <p>上傳教務處的區塊排課工作檔，系統會先拆成可追加、需確認取代與阻擋錯誤三種結果。</p>
       </div>
 
+      <section data-testid="learning-center-import-guidance" class="learning-center-guidance" aria-labelledby="learning-center-guidance-title">
+        <h4 id="learning-center-guidance-title">⚠️ 學習中心匯入前請確認</h4>
+        <ul>
+          <li><code>sharedEventId</code> 僅能用於教務已確認為同一實體的混齡／多班合併授課事件，不得以同一教師或同一時段自行推測。</li>
+          <li>不同或缺少 <code>sharedEventId</code> 的獨立課程，仍會依一般規則檢查教師同時段衝堂。</li>
+          <li>同一共同事件中，若同一班級對應不同有效科目，現有模型不支援班內不同學生子群，應在匯入時阻擋。</li>
+          <li>共同事件只表達同一堂課的授課關係，不會放寬班級、教室與教師可用時段限制。</li>
+          <li>導師區塊／國語的衝突，仍須依導師設定與有效科目判斷，不可僅因科目名稱相同就忽略警示。</li>
+        </ul>
+      </section>
+
       <div class="import-controls">
         <label class="import-control">
           <span>1. 選擇工作檔 (.xlsx)：</span>
@@ -646,4 +657,9 @@ select, input[type="text"], input[type="number"] { padding: 10px; border: 1px so
 .status-box.success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
 .status-box.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
 .status-box.warning { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.learning-center-guidance { margin: 14px 0; padding: 14px 16px; border: 1px solid #fbbf24; border-radius: 8px; background: #fffbeb; color: #78350f; }
+.learning-center-guidance h4 { margin: 0 0 8px; color: #92400e; }
+.learning-center-guidance ul { margin: 0; padding-left: 20px; }
+.learning-center-guidance li + li { margin-top: 6px; }
+.learning-center-guidance code { padding: 1px 4px; border-radius: 4px; background: #fef3c7; font-size: 0.95em; }
 </style>

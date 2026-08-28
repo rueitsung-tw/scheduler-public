@@ -110,6 +110,18 @@ describe('SpecialCourseView block schedule import', () => {
     expect(wrapper.get('[data-testid="block-schedule-unit-name"]').element.value).toBe('創思中心')
   })
 
+  it('shows learning-center import guidance and safety limitations', () => {
+    const wrapper = mount(SpecialCourseView)
+    const guidance = wrapper.get('[data-testid="learning-center-import-guidance"]')
+
+    expect(guidance.text()).toContain('sharedEventId')
+    expect(guidance.text()).toContain('不得以同一教師或同一時段自行推測')
+    expect(guidance.text()).toContain('同一班級對應不同有效科目')
+    expect(guidance.text()).toContain('班內不同學生子群')
+    expect(guidance.text()).toContain('不會放寬班級、教室與教師可用時段限制')
+    expect(guidance.text()).toContain('導師設定與有效科目')
+  })
+
   it('disables confirmation when blockers exist and does not apply or sync', async () => {
     const store = seedStore()
     const applySpy = vi.spyOn(store, 'applyBlockScheduleImport')
