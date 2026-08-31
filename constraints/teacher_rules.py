@@ -105,11 +105,12 @@ def apply_anti_collision(
     )
 
     for (c, per, t, s), var in schedule.items():
-        schedule_by_class_period[(c, per)].append(var)
+        if (c, t, s) not in sc_keys:
+            schedule_by_class_period[(c, per)].append(var)
         if t and (c, t, s) not in sc_keys:
             schedule_by_teacher_period[(t, per)].append(var)
 
-    # 班級維度：同時段只能有一門課
+    # 班級維度：普通課程同時段只能有一門課
     for p in range(TOTAL_PERIODS):
         for c_name in class_names:
             slot_vars = list(set(schedule_by_class_period.get((c_name, p), [])))
@@ -353,6 +354,103 @@ def apply_teacher_quota(model, classes_data, teachers_data, schoolInfo):
         print(f"  [CONSTRAINT] [Soft Quota] {t_name} 總上限: {safe_max_quota} (硬約束已移除，改用懲罰權重)")
 
 
+def normalize_special_course_entity(sc_or_name) -> str:
+    """
+    回傳正規化後的抽離實體名稱。
+    在目前沒有獨立 entityId 的架構下，一律以 exact name.strip() 作為實體識別。
+    不消費 sourceKind，不做別名或子字串映射。空白或無名稱回傳空字串。
+    """
+    if isinstance(sc_or_name, dict):
+        name = sc_or_name.get("name") or sc_or_name.get("scName") or ""
+    elif isinstance(sc_or_name, str):
+        name = sc_or_name
+    else:
+        name = ""
+    return str(name).strip()
+
+
+def can_parallel_special_course_pair(left: dict, right: dict, class_name: str) -> bool:
+    """
+    判斷同班同節的兩筆特殊課程 entry 是否允許並行。
+    1. 任一實體名稱為空白 -> False
+    2. 同一實體 -> 僅在 effective schedule subject 相同時放行 (同學習中心導師區塊)
+    3. 不同實體 -> 僅在教師不同時放行 (跨實體不同教師)；若教師相同則為衝堂拒絕
+    """
+    entity_l = normalize_special_course_entity(left)
+    entity_r = normalize_special_course_entity(right)
+
+    if not entity_l or not entity_r:
+        return False
+
+    eff_l = left.get("effectiveScheduleSubject") or left.get("targetSubject") or ""
+    eff_r = right.get("effectiveScheduleSubject") or right.get("targetSubject") or ""
+
+    if entity_l == entity_r:
+        # 同一抽離實體
+        return eff_l == eff_r
+
+    # 不同抽離實體 (跨實體)
+    t_l = str(left.get("teacher") or "").strip()
+    t_r = str(right.get("teacher") or "").strip()
+
+    # 若教師皆非空且相同 -> 教師衝堂保護，不放行
+    if t_l and t_r and t_l == t_r:
+        return False
+
+    # 不同教師跨實體 -> 放行
+    return True
+
+
+def classify_special_course_pair(left: dict, right: dict, class_name: str) -> str:
+    """
+    為診斷與驗證回傳明示的處置 disposition 標籤。
+    """
+    if can_parallel_special_course_pair(left, right, class_name):
+        entity_l = normalize_special_course_entity(left)
+        entity_r = normalize_special_course_entity(right)
+        if entity_l != entity_r:
+            return "allowed_cross_entity_parallel"
+        return "allowed_same_effective_subject"
+
+    entity_l = normalize_special_course_entity(left)
+    entity_r = normalize_special_course_entity(right)
+    if entity_l == entity_r:
+        return "conflict_different_effective_subject"
+
+    t_l = str(left.get("teacher") or "").strip()
+    t_r = str(right.get("teacher") or "").strip()
+    if t_l and t_r and t_l == t_r:
+        return "conflict_cross_entity_teacher_collision"
+
+    return "conflict_different_effective_subject"
+
+
+def validate_shared_event_entity_consistency(special_courses: list[dict]) -> list[dict]:
+    """
+    檢測是否有同一 sharedEventId 跨越不同抽離實體的資料語意錯誤。
+    """
+    special_courses = special_courses or []
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for sc in special_courses:
+        shared_id = (sc.get("sharedEventId") or "").strip()
+        if shared_id:
+            groups[shared_id].append(sc)
+
+    violations = []
+    for shared_id, sc_list in groups.items():
+        entities = set(normalize_special_course_entity(sc) for sc in sc_list if normalize_special_course_entity(sc))
+        if len(entities) > 1:
+            violations.append({
+                "code": "INVALID_SHARED_EVENT_MIXED_ENTITIES",
+                "sharedEventId": shared_id,
+                "entities": sorted(list(entities)),
+                "message": f"sharedEventId '{shared_id}' contains mixed entities: {sorted(list(entities))}",
+            })
+    return violations
+
+
 def resolve_effective_special_course_subject(sc, class_name, preprocess_metadata):
     """
     學習中心若 targetSubject 已被 homeroom blockization merge，
@@ -432,27 +530,42 @@ def classify_special_course_overlaps(resolved_special_courses):
         if len(entries) <= 1:
             continue
 
-        # 檢查是否所有 entry 都是學習中心且 effective subject 相同
-        eff_subjects = set(e["effectiveScheduleSubject"] for e in entries)
-        all_learning_center = all(e["scName"] == "學習中心" for e in entries)
+        all_pairs_allowed = True
+        has_cross_entity = False
+        has_teacher_collision = False
 
-        if all_learning_center and len(eff_subjects) <= 1:
-            # 同一 effective subject 的學習中心重疊 -> allowed
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                e1 = entries[i]
+                e2 = entries[j]
+                left_dict = {"name": e1["scName"], "teacher": e1["teacher"], "effectiveScheduleSubject": e1["effectiveScheduleSubject"]}
+                right_dict = {"name": e2["scName"], "teacher": e2["teacher"], "effectiveScheduleSubject": e2["effectiveScheduleSubject"]}
+
+                if not can_parallel_special_course_pair(left_dict, right_dict, cls_name):
+                    all_pairs_allowed = False
+                    if e1["teacher"] and e1["teacher"] == e2["teacher"]:
+                        has_teacher_collision = True
+                else:
+                    if normalize_special_course_entity(left_dict) != normalize_special_course_entity(right_dict):
+                        has_cross_entity = True
+
+        if all_pairs_allowed:
+            disposition = "allowed_cross_entity_parallel" if has_cross_entity else "allowed_same_effective_subject"
             allowed_overlaps.append({
                 "className": cls_name,
                 "day": day,
                 "period": period,
                 "entries": entries,
-                "disposition": "allowed_same_effective_subject",
+                "disposition": disposition,
             })
         else:
-            # 不同 effective subject -> conflict
+            disposition = "conflict_cross_entity_teacher_collision" if has_teacher_collision else "conflict_different_effective_subject"
             conflicts.append({
                 "className": cls_name,
                 "day": day,
                 "period": period,
                 "entries": entries,
-                "disposition": "conflict_different_effective_subject",
+                "disposition": disposition,
             })
 
     return {

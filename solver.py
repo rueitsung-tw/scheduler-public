@@ -58,6 +58,7 @@ from constraints.base_rules import (
     create_alternating_vars,
     apply_preallocation_locks,
     apply_hard_slot_constraints,
+    apply_class_slot_exclusivity,
 )
 from constraints.movable_locks import (
     get_movable_lock_policy,
@@ -278,6 +279,7 @@ def _validation_day_spread_subject(subject):
 
 def _collect_subject_day_spread_issues(schedule_entries):
     subject_day_slots = defaultdict(list)
+    class_subject_weekly_counts = defaultdict(int)
 
     for entry in schedule_entries or []:
         subject = str(entry.get("subject", "")).strip()
@@ -296,11 +298,15 @@ def _collect_subject_day_spread_issues(schedule_entries):
                 "subject": subject,
                 "teacherName": teacher_name,
             })
+            class_subject_weekly_counts[(class_name, canonical_subject, week)] += 1
 
+    import math
     issues = []
     for (class_name, canonical_subject, day, week), entries in subject_day_slots.items():
         periods = sorted({item["period"] for item in entries})
-        if len(periods) <= 1:
+        total_weekly = class_subject_weekly_counts.get((class_name, canonical_subject, week), 0)
+        max_allowed = max(1, math.ceil(total_weekly / float(DAYS)))
+        if len(periods) <= max_allowed:
             continue
         issues.append({
             "className": class_name,
@@ -607,8 +613,30 @@ def _validate_schedule_result(
             "classes": sorted({e.get("className", "") for e in entries}),
         })
 
+    subject_day_spread_issues = _collect_subject_day_spread_issues(schedule_entries)
+    science_same_day_shape_issues = _collect_science_same_day_shape_issues(schedule_entries)
+
+    # ── Special Course Overlap Validation ──
+    special_course_overlap_conflicts = []
+    special_course_allowed_overlaps = []
+    special_course_input_errors = []
+
+    if resolved_special_courses:
+        from constraints.teacher_rules import validate_shared_event_entity_consistency
+        special_course_input_errors = validate_shared_event_entity_consistency(resolved_special_courses)
+        overlap_analysis = classify_special_course_overlaps(resolved_special_courses)
+        special_course_overlap_conflicts = overlap_analysis.get("conflicts", [])
+        special_course_allowed_overlaps = overlap_analysis.get("allowed_overlaps", [])
+
+    allowed_special_slots = {
+        (item["className"], item["day"], item["period"])
+        for item in special_course_allowed_overlaps
+    }
+
     for (class_name, day, period, week), entries in class_slots.items():
         if len(entries) <= 1:
+            continue
+        if (class_name, day, period) in allowed_special_slots:
             continue
         class_slot_issues.append({
             "className": class_name,
@@ -670,20 +698,6 @@ def _validate_schedule_result(
         for subj, cnt in sorted(subject_counter.items(), key=lambda x: -x[1])
     ]
 
-    subject_day_spread_issues = _collect_subject_day_spread_issues(schedule_entries)
-    science_same_day_shape_issues = _collect_science_same_day_shape_issues(schedule_entries)
-
-    # ── Special Course Overlap Validation ──
-    special_course_overlap_conflicts = []
-    special_course_allowed_overlaps = []
-
-    if resolved_special_courses:
-        overlap_analysis = classify_special_course_overlaps(resolved_special_courses)
-        special_course_overlap_conflicts = overlap_analysis.get("conflicts", [])
-        special_course_allowed_overlaps = overlap_analysis.get("allowed_overlaps", [])
-
-
-
     return {
         "class_slot_conflicts": class_slot_issues,
         "teacher_conflicts": teacher_issues,
@@ -696,21 +710,12 @@ def _validate_schedule_result(
         "science_same_day_shape_issues": science_same_day_shape_issues,
         "special_course_overlap_conflicts": special_course_overlap_conflicts,
         "special_course_allowed_overlaps": special_course_allowed_overlaps,
+        "special_course_input_errors": special_course_input_errors,
     }
 
 
 def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
-    """Return True when hard errors exist.
-
-    unassigned_special_rooms is always a hard error because:
-    - PE (體育) is already excluded in _validate_schedule_result (capacity-type space)
-    - Other subjects with physical classrooms MUST have classroomId assigned
-    - If a subject has no physical classrooms but only classroomLimits, it should not
-      appear in unassigned_special_rooms (handled by _validate_schedule_result filtering)
-
-    special_course_overlap_conflicts is a hard error:
-    - Same class, same period, different effective subjects = real conflict
-    """
+    """Return True when hard errors exist."""
     if not isinstance(validation_report, dict):
         return False
 
@@ -724,14 +729,15 @@ def _has_hard_validation_errors(validation_report, allow_room_overloads=False):
         return True
     if validation_report.get("grade_subject_issues"):
         return True
-    if validation_report.get("subject_day_spread_issues"):
+    if any(item.get("canonicalSubject") == "本土語" for item in (validation_report.get("subject_day_spread_issues") or [])):
         return True
     if validation_report.get("science_same_day_shape_issues"):
         return True
     if not allow_room_overloads and validation_report.get("room_overloads"):
         return True
-    # Special course overlap conflicts are hard errors
     if validation_report.get("special_course_overlap_conflicts"):
+        return True
+    if validation_report.get("special_course_input_errors"):
         return True
 
     return False
@@ -1898,6 +1904,9 @@ def main():
         apply_special_course_locks(model, schedule, special_courses, classes_data, teachers_data, ai_settings,
                                    preprocess_metadata=data.get("preprocessMetadata"),
                                    movable_locks_policy=movable_locks_policy)
+
+        print("[CONSTRAINT] [核心約束] 加入班級時段排他性與跨實體條件解鎖...")
+        apply_class_slot_exclusivity(model, schedule, classes_data, special_courses, getattr(model, "sc_decision_vars", None))
 
         # ============================================================
         # Phase 3: 班級維度約束

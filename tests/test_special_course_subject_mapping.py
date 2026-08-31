@@ -845,5 +845,546 @@ class TestSameClassMultiSubjectGuardTask5:
         ) is False
 
 
+class TestCrossEntitySpecialCourseSemantics:
+    """Task 1: 測試跨抽離實體語意判定 helper。"""
+
+    def test_cross_entity_different_subject_different_teacher_is_allowed(self):
+        from constraints.teacher_rules import (
+            normalize_special_course_entity,
+            can_parallel_special_course_pair,
+            classify_special_course_pair,
+        )
+        left = {"name": "學習中心", "teacher": "何采珍", "effectiveScheduleSubject": "導師區塊"}
+        right = {"name": "創思中心", "teacher": "李創思", "effectiveScheduleSubject": "資訊表達"}
+
+        assert normalize_special_course_entity(left) == "學習中心"
+        assert normalize_special_course_entity(right) == "創思中心"
+        assert can_parallel_special_course_pair(left, right, "5年9班") is True
+        assert classify_special_course_pair(left, right, "5年9班") == "allowed_cross_entity_parallel"
+
+    def test_cross_entity_same_subject_different_teacher_is_allowed(self):
+        from constraints.teacher_rules import (
+            can_parallel_special_course_pair,
+            classify_special_course_pair,
+        )
+        left = {"name": "學習中心", "teacher": "何采珍", "effectiveScheduleSubject": "數學"}
+        right = {"name": "創思中心", "teacher": "李創思", "effectiveScheduleSubject": "數學"}
+
+        assert can_parallel_special_course_pair(left, right, "5年9班") is True
+        assert classify_special_course_pair(left, right, "5年9班") == "allowed_cross_entity_parallel"
+
+    def test_cross_entity_same_teacher_uses_confirmed_teacher_policy(self):
+        from constraints.teacher_rules import (
+            can_parallel_special_course_pair,
+            classify_special_course_pair,
+        )
+        # 同教師跨實體：在產品確認前不得放行 (維持教師衝堂保護)
+        left = {"name": "學習中心", "teacher": "何采珍", "effectiveScheduleSubject": "導師區塊"}
+        right = {"name": "創思中心", "teacher": "何采珍", "effectiveScheduleSubject": "資訊表達"}
+
+        assert can_parallel_special_course_pair(left, right, "5年9班") is False
+        assert classify_special_course_pair(left, right, "5年9班") in (
+            "conflict_different_effective_subject",
+            "conflict_cross_entity_teacher_collision",
+        )
+
+    def test_same_entity_different_effective_subject_is_not_allowed(self):
+        from constraints.teacher_rules import (
+            can_parallel_special_course_pair,
+            classify_special_course_pair,
+        )
+        left = {"name": "學習中心", "teacher": "何采珍", "effectiveScheduleSubject": "導師區塊"}
+        right = {"name": "學習中心", "teacher": "陳莉津", "effectiveScheduleSubject": "數學"}
+
+        assert can_parallel_special_course_pair(left, right, "5年9班") is False
+        assert classify_special_course_pair(left, right, "5年9班") == "conflict_different_effective_subject"
+
+    def test_shared_event_does_not_authorize_cross_entity_pair(self):
+        from constraints.teacher_rules import can_parallel_special_course_pair
+        left = {"name": "學習中心", "teacher": "何采珍", "effectiveScheduleSubject": "導師區塊", "sharedEventId": "evt-1"}
+        right = {"name": "創思中心", "teacher": "何采珍", "effectiveScheduleSubject": "資訊表達", "sharedEventId": "evt-1"}
+
+        # sharedEventId 跨實體同教師不得視為放行
+        assert can_parallel_special_course_pair(left, right, "5年9班") is False
+
+    def test_three_events_require_every_pair_to_be_legal(self):
+        from constraints.teacher_rules import can_parallel_special_course_pair
+        e1 = {"name": "學習中心", "teacher": "何采珍", "effectiveScheduleSubject": "導師區塊"}
+        e2 = {"name": "創思中心", "teacher": "李創思", "effectiveScheduleSubject": "資訊表達"}
+        e3 = {"name": "學習中心", "teacher": "陳莉津", "effectiveScheduleSubject": "數學"}  # e1 & e3 屬同實體不同科目
+
+        assert can_parallel_special_course_pair(e1, e2, "5年9班") is True
+        assert can_parallel_special_course_pair(e2, e3, "5年9班") is True
+        assert can_parallel_special_course_pair(e1, e3, "5年9班") is False
+
+    def test_unknown_or_blank_entity_does_not_get_cross_entity_allowance(self):
+        from constraints.teacher_rules import can_parallel_special_course_pair
+        left = {"name": "", "teacher": "何采珍", "effectiveScheduleSubject": "導師區塊"}
+        right = {"name": "創思中心", "teacher": "李創思", "effectiveScheduleSubject": "資訊表達"}
+
+        assert can_parallel_special_course_pair(left, right, "5年9班") is False
+
+    def test_source_kind_is_not_used_for_entity_identity(self):
+        from constraints.teacher_rules import normalize_special_course_entity
+        sc = {"name": "學習中心", "sourceKind": "gifted"}
+        # 實體名稱應完全依據 exact normalized name ("學習中心")，不受 sourceKind 影響
+        assert normalize_special_course_entity(sc) == "學習中心"
+
+
+class TestTask2ClassifierAndValidationIntegration:
+    """Task 2: 測試 Classifier 與 _validate_schedule_result 整合。"""
+
+    def test_classify_cross_entity_different_effective_subject_as_allowed(self):
+        resolved_sc = [
+            {
+                "name": "學習中心",
+                "teacher": "何采珍",
+                "targetSubject": "語文-國語",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "name": "創思中心",
+                "teacher": "李創思",
+                "targetSubject": "資訊表達",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+        result = classify_special_course_overlaps(resolved_sc)
+        assert len(result["conflicts"]) == 0
+        assert len(result["allowed_overlaps"]) == 1
+        assert result["allowed_overlaps"][0]["disposition"] == "allowed_cross_entity_parallel"
+
+    def test_validate_cross_entity_parallel_has_no_class_slot_or_special_overlap_conflict(self):
+        resolved_sc = [
+            {
+                "name": "學習中心",
+                "teacher": "何采珍",
+                "targetSubject": "語文-國語",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "name": "創思中心",
+                "teacher": "李創思",
+                "targetSubject": "資訊表達",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+        schedule_entries = [
+            {"className": "5年9班", "teacherName": "何采珍", "subject": "導師區塊", "day": 1, "period": 1},
+            {"className": "5年9班", "teacherName": "李創思", "subject": "資訊表達", "day": 1, "period": 1},
+        ]
+        report = _validate_schedule_result(
+            schedule_entries,
+            classes_data=[{"name": "5年9班"}],
+            school_info={},
+            classrooms=[],
+            ai_settings={},
+            resolved_special_courses=resolved_sc,
+        )
+
+        assert report["class_slot_conflicts"] == []
+        assert report["special_course_overlap_conflicts"] == []
+        assert len(report["special_course_allowed_overlaps"]) == 1
+        assert _has_hard_validation_errors(report) is False
+
+    def test_validate_cross_entity_same_teacher_keeps_teacher_conflict(self):
+        resolved_sc = [
+            {
+                "name": "學習中心",
+                "teacher": "何采珍",
+                "targetSubject": "語文-國語",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "name": "創思中心",
+                "teacher": "何采珍",
+                "targetSubject": "資訊表達",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+        schedule_entries = [
+            {"className": "5年9班", "teacherName": "何采珍", "subject": "導師區塊", "day": 1, "period": 1},
+            {"className": "5年9班", "teacherName": "何采珍", "subject": "資訊表達", "day": 1, "period": 1},
+        ]
+        report = _validate_schedule_result(
+            schedule_entries,
+            classes_data=[{"name": "5年9班"}],
+            school_info={},
+            classrooms=[],
+            ai_settings={},
+            resolved_special_courses=resolved_sc,
+        )
+
+        assert len(report["teacher_conflicts"]) > 0
+        assert _has_hard_validation_errors(report) is True
+
+    def test_validate_three_cross_entity_events_requires_all_pairs_allowed(self):
+        resolved_sc = [
+            {
+                "name": "學習中心",
+                "teacher": "何采珍",
+                "targetSubject": "語文-國語",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "name": "創思中心",
+                "teacher": "李創思",
+                "targetSubject": "資訊表達",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+            {
+                "name": "學習中心",
+                "teacher": "陳莉津",
+                "targetSubject": "數學",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "_effective_subjects": {"5年9班": "數學"},
+            },
+        ]
+        schedule_entries = [
+            {"className": "5年9班", "teacherName": "何采珍", "subject": "導師區塊", "day": 1, "period": 1},
+            {"className": "5年9班", "teacherName": "李創思", "subject": "資訊表達", "day": 1, "period": 1},
+            {"className": "5年9班", "teacherName": "陳莉津", "subject": "數學", "day": 1, "period": 1},
+        ]
+        report = _validate_schedule_result(
+            schedule_entries,
+            classes_data=[{"name": "5年9班"}],
+            school_info={},
+            classrooms=[],
+            ai_settings={},
+            resolved_special_courses=resolved_sc,
+        )
+
+        assert len(report["special_course_overlap_conflicts"]) > 0
+        assert len(report["class_slot_conflicts"]) > 0
+        assert _has_hard_validation_errors(report) is True
+
+    def test_validate_mixed_shared_event_reports_input_error(self):
+        resolved_sc = [
+            {
+                "name": "學習中心",
+                "teacher": "何采珍",
+                "targetSubject": "語文-國語",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "sharedEventId": "evt-mixed",
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "name": "創思中心",
+                "teacher": "李創思",
+                "targetSubject": "資訊表達",
+                "targetClasses": ["5年9班"],
+                "lockedSlots": [{"day": 1, "period": 1}],
+                "sharedEventId": "evt-mixed",
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+        report = _validate_schedule_result(
+            schedule_entries=[],
+            classes_data=[],
+            school_info={},
+            classrooms=[],
+            ai_settings={},
+            resolved_special_courses=resolved_sc,
+        )
+
+        input_errors = report.get("special_course_input_errors", [])
+        assert len(input_errors) == 1
+        assert input_errors[0]["code"] == "INVALID_SHARED_EVENT_MIXED_ENTITIES"
+        assert _has_hard_validation_errors(report) is True
+
+
+class TestTask3CPSatModelExclusivity:
+    """Task 3: 測試 CP-SAT 建模層排他約束解鎖與關閉。"""
+
+    def test_solver_allows_cross_entity_different_subject_different_teacher(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")  # 學習中心 / 何采珍 / 導師區塊
+        v2 = model.NewBoolVar("v2")  # 創思中心 / 李創思 / 資訊表達
+
+        schedule = {
+            ("5年9班", 0, "何采珍", "導師區塊"): v1,
+            ("5年9班", 0, "李創思", "資訊表達"): v2,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "學習中心", "teacher": "何采珍", "targetSubject": "語文-國語"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "sc": {"name": "創思中心", "teacher": "李創思", "targetSubject": "資訊表達"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status in (cp_model.FEASIBLE, cp_model.OPTIMAL)
+
+    def test_solver_rejects_same_entity_different_subject(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")
+        v2 = model.NewBoolVar("v2")
+
+        schedule = {
+            ("5年9班", 0, "何采珍", "導師區塊"): v1,
+            ("5年9班", 0, "陳莉津", "數學"): v2,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "學習中心", "teacher": "何采珍", "targetSubject": "語文-國語"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "sc": {"name": "學習中心", "teacher": "陳莉津", "targetSubject": "數學"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "數學"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status == cp_model.INFEASIBLE
+
+    def test_solver_same_teacher_cross_entity_uses_confirmed_policy(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")
+        v2 = model.NewBoolVar("v2")
+
+        schedule = {
+            ("5年9班", 0, "何采珍", "導師區塊"): v1,
+            ("5年9班", 0, "何采珍", "資訊表達"): v2,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "學習中心", "teacher": "何采珍", "targetSubject": "語文-國語"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "sc": {"name": "創思中心", "teacher": "何采珍", "targetSubject": "資訊表達"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status == cp_model.INFEASIBLE
+
+    def test_solver_allows_three_distinct_entities_only_when_all_teachers_differ(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")
+        v2 = model.NewBoolVar("v2")
+        v3 = model.NewBoolVar("v3")
+
+        schedule = {
+            ("5年9班", 0, "何采珍", "導師區塊"): v1,
+            ("5年9班", 0, "李創思", "資訊表達"): v2,
+            ("5年9班", 0, "王外聘", "英語專案"): v3,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+        model.Add(v3 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "學習中心", "teacher": "何采珍", "targetSubject": "語文-國語"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "sc": {"name": "創思中心", "teacher": "李創思", "targetSubject": "資訊表達"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+            {
+                "sc": {"name": "外聘資源", "teacher": "王外聘", "targetSubject": "英語專案"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "英語專案"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status in (cp_model.FEASIBLE, cp_model.OPTIMAL)
+
+    def test_solver_rejects_three_entities_with_duplicate_teacher(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")
+        v2 = model.NewBoolVar("v2")
+        v3 = model.NewBoolVar("v3")
+
+        schedule = {
+            ("5年9班", 0, "何采珍", "導師區塊"): v1,
+            ("5年9班", 0, "李創思", "資訊表達"): v2,
+            ("5年9班", 0, "何采珍", "英語專案"): v3,  # v1 & v3 教師重複
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+        model.Add(v3 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "學習中心", "teacher": "何采珍", "targetSubject": "語文-國語"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "sc": {"name": "創思中心", "teacher": "李創思", "targetSubject": "資訊表達"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+            {
+                "sc": {"name": "外聘資源", "teacher": "何采珍", "targetSubject": "英語專案"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "英語專案"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status == cp_model.INFEASIBLE
+
+    def test_solver_keeps_regular_class_slot_exclusive_without_special_event(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")
+        v2 = model.NewBoolVar("v2")
+
+        schedule = {
+            ("5年9班", 0, "張導師", "國語"): v1,
+            ("5年9班", 0, "陳科任", "數學"): v2,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=None)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status == cp_model.INFEASIBLE
+
+    def test_solver_keeps_ordinary_and_special_mixture_exclusive(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")  # 普通課程: 國語
+        v2 = model.NewBoolVar("v2")  # 特殊課程: 創思中心
+
+        schedule = {
+            ("5年9班", 0, "張導師", "國語"): v1,
+            ("5年9班", 0, "李創思", "資訊表達"): v2,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "創思中心", "teacher": "李創思", "targetSubject": "資訊表達"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status == cp_model.INFEASIBLE
+
+    def test_solver_binds_one_event_to_all_of_its_schedule_vars(self):
+        from constraints.base_rules import apply_class_slot_exclusivity
+
+        model = cp_model.CpModel()
+        v1 = model.NewBoolVar("v1")
+        v2 = model.NewBoolVar("v2")
+        e_var = model.NewBoolVar("e_var")
+        model.Add(e_var == 0)  # 事件未 active
+
+        schedule = {
+            ("5年9班", 0, "何采珍", "導師區塊"): v1,
+            ("5年9班", 0, "李創思", "資訊表達"): v2,
+        }
+        model.Add(v1 == 1)
+        model.Add(v2 == 1)
+
+        sc_decision_vars = [
+            {
+                "sc": {"name": "學習中心", "teacher": "何采珍", "targetSubject": "語文-國語"},
+                "event_var": e_var,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "導師區塊"},
+            },
+            {
+                "sc": {"name": "創思中心", "teacher": "李創思", "targetSubject": "資訊表達"},
+                "event_var": 1,
+                "classes": ["5年9班"],
+                "_effective_subjects": {"5年9班": "資訊表達"},
+            },
+        ]
+
+        apply_class_slot_exclusivity(model, schedule, [{"name": "5年9班"}], special_courses=[], sc_decision_vars=sc_decision_vars)
+        solver = cp_model.CpSolver()
+        status = solver.Solve(model)
+        assert status == cp_model.INFEASIBLE
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

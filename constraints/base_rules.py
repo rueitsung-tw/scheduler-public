@@ -61,42 +61,123 @@ def create_schedule_vars_and_course_demands(model, classes_data, schedule):
                     continue
                 seen_alternating.add(alt_key)
 
-            total_needed_for_class += periods_needed
-
-            vars_for_this_req = []
+            vars_for_req = []
             for p in range(TOTAL_PERIODS):
-                var = model.NewBoolVar(f"c_{c_name}_p_{p}_t_{t_name}_s_{subject}")
-                schedule[(c_name, p, t_name, subject)] = var
-                vars_for_this_req.append(var)
+                v = model.NewBoolVar(f"sch_{c_name}_p{p}_{t_name}_{subject}")
+                schedule[(c_name, p, t_name, subject)] = v
+                vars_for_req.append(v)
 
-            model.Add(sum(vars_for_this_req) == periods_needed)
-
-            # [OK] 重構後：「音樂美勞_交替」只建立一組變數（以主老師 teacher_name 為 key）
-            # 實際授課老師由 is_music_odd 方向變數決定，不再為美勞老師建立獨立 BoolVar
-            # 這避免了同一班級同一 subject 出現兩組交替變數的問題
-
-        raw_grade = cls.get("grade")
+            model.Add(sum(vars_for_req) == periods_needed)
+            total_needed_for_class += periods_needed
+            raw_grade = cls.get("grade")
         print(f"[INFO] [檢查] 班級 {c_name} (前端傳入年級: {raw_grade}) | 本週總需求: {total_needed_for_class} 節")
 
-    # ==========================================
-    # 🛡️ 排他性約束：同一班級同一時段最多一個科目
-    # 這是防止 class_slot_conflicts 的核心硬約束
-    # sum over all subjects for (class, period) <= 1
-    # ==========================================
+    print(f"[INFO] [建模] 創建了 {len(schedule)} 個 schedule 變數")
+
+
+def apply_class_slot_exclusivity(model, schedule, classes_data, special_courses=None, sc_decision_vars=None):
+    """
+    [排他性約束] 同一班級同一時段的排他性與跨抽離實體條件解鎖。
+
+    預設每對 (var_i, var_j) 在同班同時段不可同時為 1 (sum <= 1)。
+    只有當 var_i 與 var_j 分屬兩個不同抽離實體且不同教師的 active special course events 時，
+    於這兩個事件均為 active 的前提下，允許該 pair 同時為 1。
+    """
+    from constraints.teacher_rules import can_parallel_special_course_pair, normalize_special_course_entity
+    from config import TOTAL_PERIODS
+
     classes_list = list(set(cls.get("name") for cls in classes_data if cls.get("name")))
+    sc_decision_vars = sc_decision_vars or []
+
+    from collections import defaultdict
+    slot_entries_map = defaultdict(list)
+    for (k_c, k_p, k_t, k_s), var in schedule.items():
+        slot_entries_map[(k_c, k_p)].append(((k_c, k_p, k_t, k_s), var))
+
     exclusive_count = 0
+    unlocked_pair_count = 0
+
     for c in classes_list:
         for p in range(TOTAL_PERIODS):
-            vars_for_slot = [
-                var for (k_c, k_p, k_t, k_s), var in schedule.items()
-                if k_c == c and k_p == p
-            ]
-            if len(vars_for_slot) > 1:
-                model.add(sum(vars_for_slot) <= 1)
-                exclusive_count += 1
+            slot_entries = slot_entries_map.get((c, p), [])
+            if len(slot_entries) <= 1:
+                continue
+
+            for i in range(len(slot_entries)):
+                for j in range(i + 1, len(slot_entries)):
+                    (k_c1, k_p1, k_t1, k_s1), var1 = slot_entries[i]
+                    (k_c2, k_p2, k_t2, k_s2), var2 = slot_entries[j]
+
+                    matched_events1 = []
+                    matched_events2 = []
+
+                    for item in sc_decision_vars:
+                        sc = item.get("sc", {})
+                        if c not in item.get("classes", []):
+                            continue
+                        sc_teacher = (sc.get("teacher") or "").strip()
+                        eff_subj = item.get("_effective_subjects", {}).get(c, sc.get("targetSubject", ""))
+
+                        if (not sc_teacher or k_t1 == sc_teacher) and (k_s1 == eff_subj or k_s1 == sc.get("targetSubject") or k_s1 == "導師區塊"):
+                            matched_events1.append(item)
+                        if (not sc_teacher or k_t2 == sc_teacher) and (k_s2 == eff_subj or k_s2 == sc.get("targetSubject") or k_s2 == "導師區塊"):
+                            matched_events2.append(item)
+
+                    pair_allowed_var = None
+                    if matched_events1 and matched_events2:
+                        for item1 in matched_events1:
+                            for item2 in matched_events2:
+                                dict1 = {"name": item1.get("sc", {}).get("name"), "teacher": k_t1, "effectiveScheduleSubject": k_s1}
+                                dict2 = {"name": item2.get("sc", {}).get("name"), "teacher": k_t2, "effectiveScheduleSubject": k_s2}
+                                if can_parallel_special_course_pair(dict1, dict2, c):
+                                    ev1 = item1.get("event_var")
+                                    ev2 = item2.get("event_var")
+                                    if ev1 is not None and ev2 is not None:
+                                        if isinstance(ev1, int) and isinstance(ev2, int) and ev1 == 1 and ev2 == 1:
+                                            pair_allowed_var = 1
+                                            break
+                                        elif isinstance(ev1, int) and ev1 == 1:
+                                            pair_allowed_var = ev2
+                                        elif isinstance(ev2, int) and ev2 == 1:
+                                            pair_allowed_var = ev1
+                                        else:
+                                            conj = model.NewBoolVar(f"pair_active_{c}_{p}_{i}_{j}")
+                                            model.AddBoolAnd([ev1, ev2]).OnlyEnforceIf(conj)
+                                            model.AddBoolOr([ev1.Not(), ev2.Not()]).OnlyEnforceIf(conj.Not())
+                                            pair_allowed_var = conj
+                                        break
+                            if pair_allowed_var is not None:
+                                break
+                    elif matched_events1 and not matched_events2:
+                        # Special course vs Ordinary course in same class (Pullout)
+                        sc1 = matched_events1[0].get("sc", {})
+                        eff_s1 = matched_events1[0].get("_effective_subjects", {}).get(c, sc1.get("targetSubject", ""))
+                        # Only allow if ordinary subject k_s2 matches target/effective subject or "導師區塊"
+                        if (k_s2 == eff_s1 or k_s2 == sc1.get("targetSubject") or k_s2 == "導師區塊" or "學習中心" in sc1.get("name", "")) and k_t1 != k_t2:
+                            ev1 = matched_events1[0].get("event_var")
+                            if ev1 is not None:
+                                pair_allowed_var = ev1
+                    elif matched_events2 and not matched_events1:
+                        # Ordinary course vs Special course in same class (Pullout)
+                        sc2 = matched_events2[0].get("sc", {})
+                        eff_s2 = matched_events2[0].get("_effective_subjects", {}).get(c, sc2.get("targetSubject", ""))
+                        # Only allow if ordinary subject k_s1 matches target/effective subject or "導師區塊"
+                        if (k_s1 == eff_s2 or k_s1 == sc2.get("targetSubject") or k_s1 == "導師區塊" or "學習中心" in sc2.get("name", "")) and k_t1 != k_t2:
+                            ev2 = matched_events2[0].get("event_var")
+                            if ev2 is not None:
+                                pair_allowed_var = ev2
+
+                    if isinstance(pair_allowed_var, int) and pair_allowed_var == 1:
+                        unlocked_pair_count += 1
+                        continue
+                    elif pair_allowed_var is not None and not isinstance(pair_allowed_var, int):
+                        unlocked_pair_count += 1
+                        model.Add(var1 + var2 <= 1).OnlyEnforceIf(pair_allowed_var.Not())
+                    else:
+                        exclusive_count += 1
+                        model.Add(var1 + var2 <= 1)
 
     print(f"[INFO] [建模] 創建了 {len(schedule)} 個 schedule 變數")
-    print(f"[INFO] [排他約束] 加入了 {exclusive_count} 個 at-most-one 約束 (班級/時段排他)")
 
 
 def create_alternating_vars(model, classes_data):
@@ -284,7 +365,7 @@ def _process_cell(model, current_c_name, abs_p, lock_subj, lock_teach, schedule,
     other_vars = []
     for (sch_c, sch_p, sch_t, sch_s), var in schedule.items():
         if sch_c == current_c_name and sch_p == abs_p:
-            if lock_subj and lock_teach and lock_subj in sch_s and lock_teach in sch_t:
+            if lock_subj and lock_teach and (lock_subj in sch_s or sch_s == "導師區塊") and lock_teach in sch_t:
                 match_vars.append(var)
             else:
                 other_vars.append(var)
