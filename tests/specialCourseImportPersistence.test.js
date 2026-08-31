@@ -191,4 +191,17 @@ describe('Special-course source metadata persistence API', () => {
     expect(courses[0].sharedEventId).toBe('evt-77-80')
     expect(courses[1].sharedEventId).toBe('evt-77-80')
   })
+
+  it('round-trips mixed confirmed sharedEventId and null sharedEventId payload', async () => {
+    const courses = await saveAndLoad([
+      { type: 'pullout', name: '學習中心', targetSubject: '數學', teacher: '佑瑩', targetClasses: ['4年2班', '4年6班'], lockedSlots: [{ day: 4, period: 1 }], sourceKind: 'learning_center', sharedEventId: 'evt-198-201' },
+      { type: 'pullout', name: '學習中心', targetSubject: '數學', teacher: '佑瑩', targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'], lockedSlots: [{ day: 4, period: 1 }], sourceKind: 'learning_center', sharedEventId: 'evt-198-201' },
+      { type: 'pullout', name: '學習中心', targetSubject: '數學', teacher: '何采珍', targetClasses: ['2年4班', '2年6班', '2年7班'], lockedSlots: [{ day: 4, period: 2 }], sourceKind: 'learning_center', sharedEventId: null },
+      { type: 'pullout', name: '學習中心', targetSubject: '語文-國語', teacher: '何采珍', targetClasses: ['5年1班', '5年6班', '5年9班'], lockedSlots: [{ day: 4, period: 2 }], sourceKind: 'learning_center', sharedEventId: null },
+    ])
+
+    expect(courses).toHaveLength(4)
+    expect(courses.filter((c) => c.sharedEventId === 'evt-198-201')).toHaveLength(2)
+    expect(courses.filter((c) => c.sharedEventId === null)).toHaveLength(2)
+  })
 })

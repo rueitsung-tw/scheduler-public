@@ -85,4 +85,29 @@ describe('applyBlockScheduleImport', () => {
       expect(typeof course.teacher_name).toBe('string')
     }
   })
+
+  it('replaces legacy-null records 198, 201, 204, 210 without duplicate course appends', () => {
+    const store = getStore()
+    store.specialCourses = [
+      { id: 198, name: '學習中心', targetSubject: '數學', targetClasses: ['4年2班', '4年6班'], lockedSlots: [{ day: 4, period: 1 }], sourceKind: 'learning_center', teacher: '佑瑩', teacher_name: '佑瑩', sharedEventId: null },
+      { id: 201, name: '學習中心', targetSubject: '數學', targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'], lockedSlots: [{ day: 4, period: 1 }], sourceKind: 'learning_center', teacher: '佑瑩', teacher_name: '佑瑩', sharedEventId: null },
+      { id: 204, name: '學習中心', targetSubject: '數學', targetClasses: ['2年4班', '2年6班', '2年7班'], lockedSlots: [{ day: 4, period: 2 }], sourceKind: 'learning_center', teacher: '何采珍', teacher_name: '何采珍', sharedEventId: null },
+      { id: 210, name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年1班', '5年6班', '5年9班'], lockedSlots: [{ day: 4, period: 2 }], sourceKind: 'learning_center', teacher: '何采珍', teacher_name: '何采珍', sharedEventId: null },
+    ]
+
+    const courses = [
+      { name: '學習中心', targetSubject: '數學', targetClasses: ['4年2班', '4年6班'], lockedSlots: [{ day: 4, period: 1 }], sourceKind: 'learning_center', teacher: '佑瑩', sharedEventId: 'evt-198-201' },
+      { name: '學習中心', targetSubject: '數學', targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'], lockedSlots: [{ day: 4, period: 1 }], sourceKind: 'learning_center', teacher: '佑瑩', sharedEventId: 'evt-198-201' },
+      { name: '學習中心', targetSubject: '數學', targetClasses: ['2年4班', '2年6班', '2年7班'], lockedSlots: [{ day: 4, period: 2 }], sourceKind: 'learning_center', teacher: '何采珍', sharedEventId: null },
+      { name: '學習中心', targetSubject: '語文-國語', targetClasses: ['5年1班', '5年6班', '5年9班'], lockedSlots: [{ day: 4, period: 2 }], sourceKind: 'learning_center', teacher: '何采珍', sharedEventId: null },
+    ]
+
+    store.applyBlockScheduleImport({ courses, replaceIds: [198, 201, 204, 210], clearExisting: false })
+
+    expect(store.specialCourses).toHaveLength(4)
+    expect(store.specialCourses.some((c) => c.id === 198 || c.id === 201 || c.id === 204 || c.id === 210)).toBe(false)
+    const sharedIds = store.specialCourses.map((c) => c.sharedEventId)
+    expect(sharedIds.filter((id) => id === 'evt-198-201')).toHaveLength(2)
+    expect(sharedIds.filter((id) => id === null)).toHaveLength(2)
+  })
 })

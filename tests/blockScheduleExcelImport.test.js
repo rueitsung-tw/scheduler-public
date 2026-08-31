@@ -1,7 +1,12 @@
 import * as XLSX from 'xlsx'
 import { describe, expect, it } from 'vitest'
 
-import { parseBlockScheduleWorkbook, buildBlockScheduleImportPlan } from '../src/utils/blockScheduleExcelImport.js'
+import {
+  parseBlockScheduleWorkbook,
+  buildBlockScheduleImportPlan,
+  findImplicitSharedEventCandidates,
+  materializeImplicitSharedEventDecisions,
+} from '../src/utils/blockScheduleExcelImport.js'
 
 const classes = [
   { name: '3年4班', course_requirements: [{ subject: '語文-國語' }, { subject: '數學' }] },
@@ -436,5 +441,200 @@ describe('buildBlockScheduleImportPlan', () => {
         code: 'MISMATCHED_SHARED_EVENT_SAME_CLASS_MULTI_SUBJECT',
       }),
     ]))
+  })
+
+  describe('implicit shared event candidates and materialization', () => {
+    function entry(cell, course) {
+      return {
+        source: { cellRef: cell, cell },
+        course: {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          sourceGroup: null,
+          teacher: '李靖',
+          targetSubject: '數學',
+          targetClasses: ['3年4班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+          ...course,
+        },
+      }
+    }
+
+    it('finds the 198/201 佑瑩 candidate without assigning an ID', () => {
+      const candidates = findImplicitSharedEventCandidates([
+        entry('C198', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['4年2班', '4年6班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+        }),
+        entry('C201', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+        }),
+      ])
+      expect(candidates).toHaveLength(1)
+      expect(candidates[0]).toMatchObject({
+        teacher: '佑瑩',
+        day: 4,
+        period: 1,
+        confirmationBlocked: false,
+      })
+    })
+
+    it('finds the 204/210 何采珍 mixed-subject candidate when class groups are disjoint', () => {
+      const candidates = findImplicitSharedEventCandidates([
+        entry('C204', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '何采珍',
+          targetSubject: '數學',
+          targetClasses: ['2年4班', '2年6班', '2年7班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: null,
+        }),
+        entry('C210', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '何采珍',
+          targetSubject: '語文-國語',
+          targetClasses: ['5年1班', '5年6班', '5年9班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: null,
+        }),
+      ])
+      expect(candidates[0]).toMatchObject({ teacher: '何采珍', confirmationBlocked: false })
+    })
+
+    it('confirmed 198/201 gets one generated ID and matches legacy null records as selectable replacements', () => {
+      const entries = [
+        entry('C198', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['4年2班', '4年6班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+        }),
+        entry('C201', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+        }),
+      ]
+      const candidates = findImplicitSharedEventCandidates(entries)
+      const existingNullRows = [
+        {
+          id: 198,
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['4年2班', '4年6班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+        },
+        {
+          id: 201,
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['5年1班', '5年4班', '5年6班', '5年9班'],
+          lockedSlots: [{ day: 4, period: 1 }],
+          sharedEventId: null,
+        },
+      ]
+
+      const materialized = materializeImplicitSharedEventDecisions(
+        entries,
+        candidates,
+        { [candidates[0].key]: 'confirm' },
+        () => 'evt-198-201'
+      )
+      const plan = buildBlockScheduleImportPlan(materialized.entries, existingNullRows, {
+        legacyNullMigrationEntryKeys: materialized.legacyNullMigrationEntryKeys,
+      })
+
+      expect(materialized.entries.map(({ course }) => course.sharedEventId)).toEqual([
+        'evt-198-201',
+        'evt-198-201',
+      ])
+      expect(plan.replacements.flatMap((item) => item.existingCandidates.map(({ id }) => id))).toEqual([
+        198, 201,
+      ])
+    })
+
+    it('keeping 204/210 independent preserves null and still creates normal null-identity replacements', () => {
+      const entries = [
+        entry('C204', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '何采珍',
+          targetSubject: '數學',
+          targetClasses: ['2年4班', '2年6班', '2年7班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: null,
+        }),
+        entry('C210', {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '何采珍',
+          targetSubject: '語文-國語',
+          targetClasses: ['5年1班', '5年6班', '5年9班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: null,
+        }),
+      ]
+      const candidates = findImplicitSharedEventCandidates(entries)
+      const existingNullRows = [
+        {
+          id: 204,
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '何采珍',
+          targetSubject: '數學',
+          targetClasses: ['2年4班', '2年6班', '2年7班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: null,
+        },
+        {
+          id: 210,
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '何采珍',
+          targetSubject: '語文-國語',
+          targetClasses: ['5年1班', '5年6班', '5年9班'],
+          lockedSlots: [{ day: 4, period: 2 }],
+          sharedEventId: null,
+        },
+      ]
+
+      const materialized = materializeImplicitSharedEventDecisions(
+        entries,
+        candidates,
+        { [candidates[0].key]: 'keep_independent' },
+        () => 'must-not-run'
+      )
+      expect(materialized.entries.every(({ course }) => course.sharedEventId === null)).toBe(true)
+      expect(materialized.legacyNullMigrationEntryKeys.size).toBe(0)
+      expect(
+        buildBlockScheduleImportPlan(materialized.entries, existingNullRows).replacements
+      ).toHaveLength(2)
+    })
   })
 })

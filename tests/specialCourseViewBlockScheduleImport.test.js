@@ -237,4 +237,61 @@ describe('SpecialCourseView block schedule import', () => {
     expect(store.specialCourses.some((course) => course.id === 'dup-a')).toBe(true)
     expect(store.specialCourses.some((course) => course.id === 'dup-b')).toBe(false)
   })
+
+  it('renders candidate review controls and blocks import until decision is made', async () => {
+    const store = seedStore()
+    store.teachers.push({ id: 't-youying', name: '佑瑩', type: 'special_ed_resource' })
+    store.classes.push(
+      { name: '4年2班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '4年6班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '5年1班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '5年4班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '5年6班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '5年9班', grade: 5, course_requirements: [{ subject: '數學' }] }
+    )
+
+    const wrapper = mount(SpecialCourseView)
+    await uploadWorkbook(wrapper, [
+      ['星期', '節次', '4年2班、4年6班', '5年1班、5年4班、5年6班、5年9班'],
+      ['四', '一', '402、406數(佑瑩)', '501、504、506、509數(佑瑩)'],
+    ])
+
+    const candidateSection = wrapper.get('[data-testid="shared-event-candidates"]')
+    expect(candidateSection.text()).toContain('佑瑩')
+    expect(candidateSection.text()).toContain('4年2班')
+
+    const confirmBtn = wrapper.get('[data-testid="confirm-block-schedule-import"]')
+    expect(confirmBtn.attributes('disabled')).toBeDefined()
+
+    const candidateConfirmBtn = wrapper.find('[data-testid^="confirm-shared-event-"]')
+    expect(candidateConfirmBtn.exists()).toBe(true)
+    await candidateConfirmBtn.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="confirm-block-schedule-import"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('allows selecting keep_independent to enable final import', async () => {
+    const store = seedStore()
+    store.teachers.push({ id: 't-youying', name: '佑瑩', type: 'special_ed_resource' })
+    store.classes.push(
+      { name: '4年2班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '4年6班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '5年1班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '5年4班', grade: 5, course_requirements: [{ subject: '數學' }] }
+    )
+
+    const wrapper = mount(SpecialCourseView)
+    await uploadWorkbook(wrapper, [
+      ['星期', '節次', '4年2班、4年6班', '5年1班、5年4班'],
+      ['四', '一', '402、406數(佑瑩)', '501、504數(佑瑩)'],
+    ])
+
+    const keepIndepBtn = wrapper.find('[data-testid^="keep-independent-"]')
+    expect(keepIndepBtn.exists()).toBe(true)
+    await keepIndepBtn.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="confirm-block-schedule-import"]').attributes('disabled')).toBeUndefined()
+  })
 })

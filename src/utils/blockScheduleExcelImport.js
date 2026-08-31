@@ -325,6 +325,189 @@ export function specialCourseImportIdentity(course) {
   return JSON.stringify(base)
 }
 
+export function specialCourseImportIdentityWithoutSharedEventId(course) {
+  const base = {
+    name: course.name || '',
+    subject: course.targetSubject || '',
+    classes: [...(course.targetClasses || [])].sort(),
+    slots: [...(course.lockedSlots || [])]
+      .map(({ day, period }) => ({ day: Number(day), period: Number(period) }))
+      .sort((a, b) => a.day - b.day || a.period - b.period),
+    sourceKind: course.sourceKind || '',
+  }
+  if (course.sourceKind === 'learning_center') {
+    return JSON.stringify({
+      ...base,
+      teacher: course.teacher || course.teacher_name || '',
+      sourceGroup: course.sourceGroup || '',
+    })
+  }
+  return JSON.stringify(base)
+}
+
+function entryKey(entry) {
+  const c = entry?.course || {}
+  const cell = entry?.source?.cell || entry?.source?.cellRef || ''
+  const teacher = c.teacher || c.teacher_name || ''
+  const sortedClasses = [...(c.targetClasses || [])].sort()
+  const sortedSlots = [...(c.lockedSlots || [])]
+    .map(({ day, period }) => ({ day: Number(day), period: Number(period) }))
+    .sort((a, b) => a.day - b.day || a.period - b.period)
+  return JSON.stringify([
+    cell,
+    c.name || '',
+    c.sourceKind || '',
+    c.sourceGroup || '',
+    teacher,
+    c.targetSubject || '',
+    sortedClasses,
+    sortedSlots,
+  ])
+}
+
+export function findImplicitSharedEventCandidates(entries) {
+  const groups = new Map()
+
+  for (const entry of entries || []) {
+    const course = entry?.course
+    if (!course || course.sourceKind !== 'learning_center') continue
+    if (course.sharedEventId) continue
+    if (!course.lockedSlots || course.lockedSlots.length !== 1) continue
+
+    const slot = course.lockedSlots[0]
+    const day = Number(slot.day)
+    const period = Number(slot.period)
+    if (!day || !period) continue
+
+    const name = text(course.name)
+    const teacher = text(course.teacher || course.teacher_name)
+    if (!name || !teacher) continue
+
+    const groupKey = JSON.stringify([name, teacher, day, period])
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, [])
+    }
+    groups.get(groupKey).push(entry)
+  }
+
+  const candidates = []
+  for (const [groupKey, groupEntries] of groups) {
+    if (groupEntries.length < 2) continue
+
+    const classArrays = groupEntries.map((e) => [...(e.course.targetClasses || [])].sort())
+    const distinctClassArraysStr = new Set(classArrays.map((ca) => JSON.stringify(ca)))
+    if (distinctClassArraysStr.size < 2) continue
+
+    const name = text(groupEntries[0].course.name)
+    const teacher = text(groupEntries[0].course.teacher || groupEntries[0].course.teacher_name)
+    const day = Number(groupEntries[0].course.lockedSlots[0].day)
+    const period = Number(groupEntries[0].course.lockedSlots[0].period)
+
+    const classToEntries = new Map()
+    let hasClassOverlap = false
+    let hasMixedSubjectOverlap = false
+
+    for (const entry of groupEntries) {
+      const classes = entry.course.targetClasses || []
+      const subj = entry.course.targetSubject || ''
+      for (const cls of classes) {
+        if (classToEntries.has(cls)) {
+          hasClassOverlap = true
+          const prevSubj = classToEntries.get(cls)
+          if (prevSubj !== subj) {
+            hasMixedSubjectOverlap = true
+          }
+        } else {
+          classToEntries.set(cls, subj)
+        }
+      }
+    }
+
+    let confirmationBlocked = false
+    let blockerMessage = null
+
+    if (hasClassOverlap) {
+      confirmationBlocked = true
+      if (hasMixedSubjectOverlap) {
+        blockerMessage = `共同事件包含重疊班級且指派不同科目，無法確認為共同事件`
+      } else {
+        blockerMessage = `共同事件包含重疊班級，無法確認為共同事件`
+      }
+    }
+
+    const sortedEntries = [...groupEntries].sort((a, b) => entryKey(a).localeCompare(entryKey(b)))
+    const candidateEntryKeys = sortedEntries.map((e) => entryKey(e))
+    const candidateKey = JSON.stringify([name, teacher, day, period, candidateEntryKeys])
+
+    const rows = sortedEntries.map((e) => ({
+      entryKey: entryKey(e),
+      cell: e.source?.cell || e.source?.cellRef || '',
+      targetSubject: e.course.targetSubject || '',
+      targetClasses: [...(e.course.targetClasses || [])].sort(),
+    }))
+
+    candidates.push({
+      key: candidateKey,
+      entryKeys: candidateEntryKeys,
+      entityName: name,
+      teacher,
+      day,
+      period,
+      rows,
+      confirmationBlocked,
+      blockerMessage,
+    })
+  }
+
+  return candidates
+}
+
+export function materializeImplicitSharedEventDecisions(
+  entries,
+  candidates,
+  decisions = {},
+  idFactory = () => crypto.randomUUID()
+) {
+  const normDecisions = decisions instanceof Map ? Object.fromEntries(decisions) : (decisions || {})
+  const confirmedEntryKeysToId = new Map()
+  const legacyNullMigrationEntryKeys = new Set()
+
+  for (const candidate of candidates || []) {
+    const decision = normDecisions[candidate.key]
+    if (decision === 'pending') {
+      throw new Error(`Candidate decision is still pending for candidate key ${candidate.key}`)
+    }
+    if (candidate.confirmationBlocked && decision === 'confirm') {
+      throw new Error(`Cannot confirm blocked candidate ${candidate.key}`)
+    }
+
+    if (decision === 'confirm') {
+      const generatedId = idFactory(candidate)
+      if (!generatedId) {
+        throw new Error(`idFactory returned empty ID for candidate ${candidate.key}`)
+      }
+      for (const ek of candidate.entryKeys) {
+        confirmedEntryKeysToId.set(ek, generatedId)
+        legacyNullMigrationEntryKeys.add(ek)
+      }
+    }
+  }
+
+  const newEntries = (entries || []).map((entry) => {
+    const ek = entryKey(entry)
+    const clonedCourse = { ...entry.course }
+    if (confirmedEntryKeysToId.has(ek)) {
+      clonedCourse.sharedEventId = confirmedEntryKeysToId.get(ek)
+    }
+    return {
+      ...entry,
+      course: clonedCourse,
+    }
+  })
+
+  return { entries: newEntries, legacyNullMigrationEntryKeys }
+}
+
 /**
  * Check if two courses have overlapping slots on shared classes.
  */
@@ -350,11 +533,17 @@ function hasSlotOverlap(a, b) {
 /**
  * Build an import plan: classify incoming entries into replacements, appendable, and warnings.
  */
-export function buildBlockScheduleImportPlan(entries, existingSpecialCourses = []) {
+export function buildBlockScheduleImportPlan(
+  entries,
+  existingSpecialCourses = [],
+  { legacyNullMigrationEntryKeys = new Set() } = {}
+) {
   const appendable = []
   const replacements = []
   const blockers = []
   const warnings = []
+
+  const sharedEventCandidates = findImplicitSharedEventCandidates(entries)
 
   // Collect any blockers from the parse results
   for (const entry of entries) {
@@ -438,12 +627,30 @@ export function buildBlockScheduleImportPlan(entries, existingSpecialCourses = [
   for (const entry of entries) {
     const incoming = entry.course
     const incomingIdentity = specialCourseImportIdentity(incoming)
+    const ek = entryKey(entry)
+    const isLegacyNullMigration = legacyNullMigrationEntryKeys.has(ek)
 
-    // Find all existing courses with the same identity
+    // Find all existing courses with matching identity
     const matchedExisting = []
+    const matchedIds = new Set()
+
     for (const existing of existingSpecialCourses) {
-      if (specialCourseImportIdentity(existing) === incomingIdentity) {
+      const existingIdentity = specialCourseImportIdentity(existing)
+      let matches = false
+
+      if (existingIdentity === incomingIdentity) {
+        matches = true
+      } else if (isLegacyNullMigration && (!existing.sharedEventId || existing.sharedEventId === '')) {
+        const incomingNoId = specialCourseImportIdentityWithoutSharedEventId(incoming)
+        const existingNoId = specialCourseImportIdentityWithoutSharedEventId(existing)
+        if (incomingNoId === existingNoId) {
+          matches = true
+        }
+      }
+
+      if (matches && !matchedIds.has(existing.id)) {
         matchedExisting.push(existing)
+        matchedIds.add(existing.id)
       }
     }
 
@@ -475,5 +682,5 @@ export function buildBlockScheduleImportPlan(entries, existingSpecialCourses = [
     }
   }
 
-  return { appendable, replacements, blockers, warnings }
+  return { appendable, replacements, blockers, warnings, sharedEventCandidates }
 }

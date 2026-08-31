@@ -106,6 +106,47 @@
         </table>
       </div>
 
+      <div v-if="sharedEventCandidates.length > 0" data-testid="shared-event-candidates" class="preview-group">
+        <h4>隱含共同事件確認</h4>
+        <div
+          v-for="candidate in sharedEventCandidates"
+          :key="candidate.key"
+          class="candidate-card mb-3 p-3 border rounded"
+        >
+          <div class="candidate-header">
+            <strong>{{ candidate.entityName }} - {{ candidate.teacher }}（星期{{ ['一','二','三','四','五'][candidate.day - 1] || candidate.day }} 第{{ candidate.period }}節）</strong>
+          </div>
+          <div class="candidate-rows my-2">
+            <div v-for="row in candidate.rows" :key="row.entryKey" class="candidate-row-item">
+              儲存格 {{ row.cell }}: 科目「{{ row.targetSubject }}」、班級「{{ row.targetClasses.join('、') }}」
+            </div>
+          </div>
+          <div v-if="candidate.confirmationBlocked" class="text-danger small">
+            {{ candidate.blockerMessage || '包含重疊班級，無法確認為共同事件' }}
+          </div>
+          <div v-else class="candidate-actions mt-2 btn-group">
+            <button
+              type="button"
+              :data-testid="`confirm-shared-event-${candidate.key}`"
+              class="btn btn-sm"
+              :class="sharedEventDecisions[candidate.key] === 'confirm' ? 'btn-primary' : 'btn-outline-primary'"
+              @click="setSharedEventDecision(candidate.key, 'confirm')"
+            >
+              確認為同一事件
+            </button>
+            <button
+              type="button"
+              :data-testid="`keep-independent-${candidate.key}`"
+              class="btn btn-sm"
+              :class="sharedEventDecisions[candidate.key] === 'keep_independent' ? 'btn-secondary' : 'btn-outline-secondary'"
+              @click="setSharedEventDecision(candidate.key, 'keep_independent')"
+            >
+              維持獨立課程
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div v-if="replacementRows.length > 0" data-testid="replacement-section" class="preview-group">
         <h4>需確認取代</h4>
         <table class="preview-table">
@@ -336,7 +377,12 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useScheduleStore } from '../stores/schedule'
-import { buildBlockScheduleImportPlan, parseBlockScheduleWorkbook } from '../utils/blockScheduleExcelImport.js'
+import {
+  buildBlockScheduleImportPlan,
+  parseBlockScheduleWorkbook,
+  findImplicitSharedEventCandidates,
+  materializeImplicitSharedEventDecisions,
+} from '../utils/blockScheduleExcelImport.js'
 
 const scheduleStore = useScheduleStore()
 
@@ -353,6 +399,9 @@ const blockScheduleUnitName = ref('創思中心')
 const selectedReplacementIds = ref([])
 const isImportingBlockSchedule = ref(false)
 
+const rawImportEntries = ref([])
+const sharedEventDecisions = ref({})
+
 const pulloutForm = ref({
   type: '學習中心',
   subject: '',
@@ -366,9 +415,32 @@ const pulloutForm = ref({
 const hasImportPlan = computed(() => Boolean(importPlan.value))
 const appendableRows = computed(() => importPlan.value?.appendable || [])
 const replacementRows = computed(() => importPlan.value?.replacements || [])
+const sharedEventCandidates = computed(() => importPlan.value?.sharedEventCandidates || [])
+const hasPendingSharedEventDecision = computed(() =>
+  sharedEventCandidates.value.some(
+    (candidate) =>
+      !candidate.confirmationBlocked &&
+      (sharedEventDecisions.value[candidate.key] || 'pending') === 'pending'
+  )
+)
 const canConfirmImport = computed(() => {
-  return hasImportPlan.value && (appendableRows.value.length + replacementRows.value.length) > 0 && importBlockers.value.length === 0 && !isImportingBlockSchedule.value
+  return (
+    hasImportPlan.value &&
+    (appendableRows.value.length + replacementRows.value.length) > 0 &&
+    importBlockers.value.length === 0 &&
+    !isImportingBlockSchedule.value &&
+    !hasPendingSharedEventDecision.value
+  )
 })
+
+const setSharedEventDecision = (key, decision) => {
+  if (decision === 'confirm' || decision === 'keep_independent') {
+    sharedEventDecisions.value = {
+      ...sharedEventDecisions.value,
+      [key]: decision,
+    }
+  }
+}
 
 const getClassesByGrade = (grade) => {
   const list = []
@@ -414,6 +486,8 @@ const clearImportState = ({ keepStatus = false } = {}) => {
   importBlockers.value = []
   importWarnings.value = []
   selectedReplacementIds.value = []
+  rawImportEntries.value = []
+  sharedEventDecisions.value = {}
   importError.value = ''
   importFileName.value = ''
   if (!keepStatus) {
@@ -431,10 +505,16 @@ const rebuildImportPreview = (arrayBuffer) => {
     giftedUnitName: blockScheduleUnitName.value.trim() || '創思中心',
     learningCenterName: '學習中心',
   })
+  rawImportEntries.value = parsed.entries || []
+  sharedEventDecisions.value = {}
+  for (const candidate of findImplicitSharedEventCandidates(parsed.entries)) {
+    sharedEventDecisions.value[candidate.key] = 'pending'
+  }
+
   const plan = buildBlockScheduleImportPlan(parsed.entries, scheduleStore.specialCourses)
   importWorkbookBuffer.value = arrayBuffer
   importPlan.value = plan
-  importBlockers.value = [...(parsed.blockers || []), ...(plan.blockers || [])]
+  importBlockers.value = parsed.blockers || []
   importWarnings.value = [...(parsed.warnings || []), ...(plan.warnings || [])]
   selectedReplacementIds.value = plan.replacements.flatMap((replacement) =>
     replacement.existingCandidates.map((candidate) => candidate.id),
@@ -484,16 +564,38 @@ const confirmBlockScheduleImport = async () => {
   importError.value = ''
 
   try {
+    const materialized = materializeImplicitSharedEventDecisions(
+      rawImportEntries.value,
+      sharedEventCandidates.value,
+      sharedEventDecisions.value,
+      () => crypto.randomUUID()
+    )
+
+    const finalPlan = buildBlockScheduleImportPlan(
+      materialized.entries,
+      scheduleStore.specialCourses,
+      { legacyNullMigrationEntryKeys: materialized.legacyNullMigrationEntryKeys }
+    )
+
+    if (finalPlan.blockers && finalPlan.blockers.length > 0) {
+      importBlockers.value = finalPlan.blockers
+      return
+    }
+
     const selectedReplacementSet = new Set(selectedReplacementIds.value)
     const courses = [
-      ...appendableRows.value.map((entry) => entry.course),
-      ...replacementRows.value.map((entry) => entry.incomingEntry.course),
+      ...finalPlan.appendable.map((entry) => entry.course),
+      ...finalPlan.replacements.map((entry) => entry.incomingEntry.course),
     ]
-    const replaceIds = replacementRows.value.flatMap((entry) =>
-      entry.existingCandidates
-        .filter((candidate) => selectedReplacementSet.has(candidate.id))
-        .map((candidate) => candidate.id),
-    )
+    const replaceIds = [
+      ...new Set(
+        finalPlan.replacements.flatMap((entry) =>
+          entry.existingCandidates
+            .filter((candidate) => selectedReplacementSet.has(candidate.id))
+            .map((candidate) => candidate.id)
+        )
+      ),
+    ]
 
     scheduleStore.applyBlockScheduleImport({
       courses,
