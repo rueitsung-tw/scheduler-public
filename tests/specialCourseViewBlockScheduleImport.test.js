@@ -294,4 +294,143 @@ describe('SpecialCourseView block schedule import', () => {
 
     expect(wrapper.get('[data-testid="confirm-block-schedule-import"]').attributes('disabled')).toBeUndefined()
   })
+
+  it('renders decision summary, card status text, aria-pressed, and handles resets correctly', async () => {
+    const store = seedStore()
+    store.teachers.push(
+      { id: 't-youying', name: '佑瑩', type: 'special_ed_resource' },
+      { id: 't-hecaizhen', name: '何采珍', type: 'special_ed_resource' }
+    )
+    store.classes.push(
+      { name: '4年2班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '4年6班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '5年1班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '5年4班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '3年1班', grade: 3, course_requirements: [{ subject: '數學' }] },
+      { name: '3年2班', grade: 3, course_requirements: [{ subject: '語文-國語' }] }
+    )
+
+    const wrapper = mount(SpecialCourseView)
+    const rows = [
+      ['星期', '節次', '4年2班、4年6班', '5年1班、5年4班', '3年1班', '3年2班'],
+      ['四', '一', '402、406數(佑瑩)', '501、504數(佑瑩)', '', ''],
+      ['四', '二', '', '', '301數(何采珍)', '302國(何采珍)'],
+    ]
+    await uploadWorkbook(wrapper, rows)
+
+    const summaryEl = wrapper.get('[data-testid="shared-event-decision-summary"]')
+    expect(summaryEl.text()).toContain('待決策：2')
+    expect(summaryEl.text()).toContain('已確認：0')
+    expect(summaryEl.text()).toContain('維持獨立：0')
+
+    const confirmBtns = wrapper.findAll('[data-testid^="confirm-shared-event-"]')
+    const keepBtns = wrapper.findAll('[data-testid^="keep-independent-"]')
+    expect(confirmBtns).toHaveLength(2)
+    expect(keepBtns).toHaveLength(2)
+
+    await confirmBtns[0].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('待決策：1')
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('已確認：1')
+    expect(confirmBtns[0].attributes('aria-pressed')).toBe('true')
+    expect(wrapper.get('[data-testid="confirm-block-schedule-import"]').attributes('disabled')).toBeDefined()
+
+    // Double-click idempotency check
+    await confirmBtns[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('已確認：1')
+
+    await keepBtns[1].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('待決策：0')
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('維持獨立：1')
+    expect(keepBtns[1].attributes('aria-pressed')).toBe('true')
+    expect(wrapper.get('[data-testid="confirm-block-schedule-import"]').attributes('disabled')).toBeUndefined()
+
+    // Re-upload resets decisions to pending
+    await uploadWorkbook(wrapper, rows)
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('待決策：2')
+
+    // Unit-name watcher reset
+    await confirmBtns[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('已確認：1')
+
+    const unitNameInput = wrapper.get('[data-testid="block-schedule-unit-name"]')
+    await unitNameInput.setValue('學習中心新名稱')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="shared-event-decision-summary"]').text()).toContain('待決策：2')
+  })
+
+  it('prevents duplicate in-flight final import clicks when sync is deferred', async () => {
+    const store = seedStore()
+    store.teachers.push({ id: 't-youying', name: '佑瑩', type: 'special_ed_resource' })
+    store.classes.push(
+      { name: '4年2班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '4年6班', grade: 4, course_requirements: [{ subject: '數學' }] },
+      { name: '5年1班', grade: 5, course_requirements: [{ subject: '數學' }] },
+      { name: '5年4班', grade: 5, course_requirements: [{ subject: '數學' }] }
+    )
+
+    let resolveSync
+    const syncPromise = new Promise((resolve) => { resolveSync = resolve })
+    const applySpy = vi.spyOn(store, 'applyBlockScheduleImport')
+    const syncSpy = vi.spyOn(store, 'syncToCloud').mockReturnValue(syncPromise)
+
+    const wrapper = mount(SpecialCourseView)
+    await uploadWorkbook(wrapper, [
+      ['星期', '節次', '4年2班、4年6班', '5年1班、5年4班'],
+      ['四', '一', '402、406數(佑瑩)', '501、504數(佑瑩)'],
+    ])
+
+    const confirmCandidate = wrapper.get('[data-testid^="confirm-shared-event-"]')
+    await confirmCandidate.trigger('click')
+    await flushPromises()
+
+    const finalBtn = wrapper.get('[data-testid="confirm-block-schedule-import"]')
+    await finalBtn.trigger('click')
+    await finalBtn.trigger('click')
+
+    expect(applySpy).toHaveBeenCalledTimes(1)
+    expect(syncSpy).toHaveBeenCalledTimes(1)
+
+    resolveSync()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="import-status"]').text()).toContain('已匯入')
+  })
+
+  it('renders read-only source-priority conflicts report and explicit contract block message', async () => {
+    const store = seedStore()
+    store.teachers.push({ id: 't-youying', name: '佑瑩', type: 'special_ed_resource' })
+    store.classes.push({
+      name: '5年7班',
+      grade: 5,
+      course_requirements: [{ subject: '數學', periods: 5 }],
+    })
+
+    const wrapper = mount(SpecialCourseView)
+    const rows = [
+      ['星期', '節次', '5年7班'],
+      ['一', '一', '507數(佑瑩)'],
+      ['一', '二', '507數(佑瑩)'],
+      ['一', '三', '507數(佑瑩)'],
+      ['一', '四', '507數(佑瑩)'],
+      ['一', '五', '507數(佑瑩)'],
+      ['一', '六', '507數學→數理'],
+      ['一', '七', '507數學→數理'],
+    ]
+
+    await uploadWorkbook(wrapper, rows)
+
+    const reportEl = wrapper.get('[data-testid="source-priority-conflicts"]')
+    expect(reportEl.text()).toContain('5年7班')
+    expect(reportEl.text()).toContain('數學')
+    expect(reportEl.text()).toContain('需求 5')
+    expect(reportEl.text()).toContain('固定合計 7')
+    expect(reportEl.text()).toContain('超額 2')
+    expect(reportEl.text()).toContain('來源優先權轉換尚無已核定的一般導師區塊資料契約；未修改任何課程或鎖定。')
+  })
 })

@@ -6,6 +6,7 @@ import {
   buildBlockScheduleImportPlan,
   findImplicitSharedEventCandidates,
   materializeImplicitSharedEventDecisions,
+  detectSourcePriorityConflicts,
 } from '../src/utils/blockScheduleExcelImport.js'
 
 const classes = [
@@ -635,6 +636,135 @@ describe('buildBlockScheduleImportPlan', () => {
       expect(
         buildBlockScheduleImportPlan(materialized.entries, existingNullRows).replacements
       ).toHaveLength(2)
+    })
+  })
+
+  describe('detectSourcePriorityConflicts', () => {
+    function entry(cell, course) {
+      return {
+        source: { cellRef: cell, cell },
+        course: {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          sourceGroup: null,
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['5年7班'],
+          lockedSlots: [{ day: 1, period: 1 }],
+          sharedEventId: null,
+          ...course,
+        },
+      }
+    }
+
+    it('detects 5年7班 math over-allocation across learning_center (5 slots) and gifted (2 slots)', () => {
+      const classes57 = [
+        { name: '5年7班', course_requirements: [{ subject: '數學', periods: 5 }] },
+      ]
+      const entries = [
+        ...[1, 2, 3, 4, 5].map((period) => entry(`C-lc-${period}`, {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['5年7班'],
+          isAutoTime: false,
+          lockedSlots: [{ day: 1, period }],
+        })),
+        ...[6, 7].map((period) => entry(`C-gifted-${period}`, {
+          name: '創思中心',
+          sourceKind: 'gifted',
+          projectName: '數理',
+          teacher: null,
+          targetSubject: '數學',
+          targetClasses: ['5年7班'],
+          isAutoTime: false,
+          lockedSlots: [{ day: 1, period }],
+        })),
+      ]
+
+      const conflicts = detectSourcePriorityConflicts(entries, classes57)
+      expect(conflicts).toHaveLength(1)
+      expect(conflicts[0]).toMatchObject({
+        className: '5年7班',
+        targetSubject: '數學',
+        requirementPeriods: 5,
+        totalFixedSlotCount: 7,
+        overagePeriods: 2,
+      })
+      const lcDetail = conflicts[0].sources.find((s) => s.sourceKind === 'learning_center')
+      const giftedDetail = conflicts[0].sources.find((s) => s.sourceKind === 'gifted')
+      expect(lcDetail).toMatchObject({
+        sourceKind: 'learning_center',
+        fixedSlotCount: 5,
+      })
+      expect(giftedDetail).toMatchObject({
+        sourceKind: 'gifted',
+        fixedSlotCount: 2,
+      })
+    })
+
+    it('proves sharedEventId does not alter totalFixedSlotCount or overage calculation', () => {
+      const classes57 = [
+        { name: '5年7班', course_requirements: [{ subject: '數學', periods: 5 }] },
+      ]
+      const entries = [
+        ...[1, 2, 3, 4, 5].map((period) => entry(`C-lc-${period}`, {
+          name: '學習中心',
+          sourceKind: 'learning_center',
+          teacher: '佑瑩',
+          targetSubject: '數學',
+          targetClasses: ['5年7班'],
+          isAutoTime: false,
+          lockedSlots: [{ day: 1, period }],
+          sharedEventId: 'evt-shared-label-1',
+        })),
+        ...[6, 7].map((period) => entry(`C-gifted-${period}`, {
+          name: '創思中心',
+          sourceKind: 'gifted',
+          projectName: '數理',
+          teacher: null,
+          targetSubject: '數學',
+          targetClasses: ['5年7班'],
+          isAutoTime: false,
+          lockedSlots: [{ day: 1, period }],
+          sharedEventId: 'evt-shared-label-1',
+        })),
+      ]
+
+      const conflicts = detectSourcePriorityConflicts(entries, classes57)
+      expect(conflicts).toHaveLength(1)
+      expect(conflicts[0].totalFixedSlotCount).toBe(7)
+      expect(conflicts[0].overagePeriods).toBe(2)
+    })
+
+    it('returns empty when fixed slots match requirement or come from a single source', () => {
+      const classes57 = [
+        { name: '5年7班', course_requirements: [{ subject: '數學', periods: 5 }] },
+      ]
+      const singleSourceEntries = [1, 2, 3, 4, 5, 6, 7].map((period) => entry(`C-lc-${period}`, {
+        name: '學習中心',
+        sourceKind: 'learning_center',
+        teacher: period <= 5 ? '佑瑩' : '何采珍',
+        targetSubject: '數學',
+        targetClasses: ['5年7班'],
+        isAutoTime: false,
+        lockedSlots: [{ day: 1, period }],
+      }))
+
+      expect(detectSourcePriorityConflicts(singleSourceEntries, classes57)).toEqual([])
+
+      const atRequirementEntries = [1, 2, 3, 4, 5].map((period) => entry(`C-lc-${period}`, {
+        name: '學習中心',
+        sourceKind: 'learning_center',
+        teacher: '佑瑩',
+        targetSubject: '數學',
+        targetClasses: ['5年7班'],
+        isAutoTime: false,
+        lockedSlots: [{ day: 1, period }],
+      }))
+
+      expect(detectSourcePriorityConflicts(atRequirementEntries, classes57)).toEqual([])
     })
   })
 })

@@ -684,3 +684,151 @@ export function buildBlockScheduleImportPlan(
 
   return { appendable, replacements, blockers, warnings, sharedEventCandidates }
 }
+
+export function detectSourcePriorityConflicts(entries = [], classes = []) {
+  const classReqMap = new Map()
+  for (const cls of classes) {
+    if (!cls?.name) continue
+    const reqs = new Map()
+    for (const req of cls.course_requirements || []) {
+      if (!req?.subject) continue
+      const normSubj = normalizeSubject(req.subject)
+      const periods = Number(req.periods) || Number(req.periodCount) || Number(req.hours)
+      if (periods > 0) {
+        reqs.set(normSubj, periods)
+      }
+    }
+    classReqMap.set(cls.name, reqs)
+  }
+
+  const groupMap = new Map()
+
+  for (const entry of entries) {
+    const course = entry?.course
+    if (!course) continue
+    if (course.isAutoTime === true) continue
+    const lockedSlots = course.lockedSlots || []
+    if (lockedSlots.length === 0) continue
+
+    const targetClasses = course.targetClasses || course.classes || []
+    const rawSubj = course.targetSubject || course.subject || ''
+    if (!rawSubj) continue
+    const normSubj = normalizeSubject(rawSubj)
+
+    const sourceKind = course.sourceKind || 'unknown'
+    const sourceName = course.name || ''
+    const projectName = course.projectName || null
+    const sourceKeyObj = { sourceKind, name: sourceName, projectName }
+    const sourceKey = JSON.stringify(sourceKeyObj)
+
+    for (const className of targetClasses) {
+      const reqs = classReqMap.get(className)
+      if (!reqs || !reqs.has(normSubj)) continue
+      const reqPeriods = reqs.get(normSubj)
+
+      const groupKey = `${className}::${normSubj}`
+      if (!groupMap.has(groupKey)) {
+        groupMap.set(groupKey, {
+          className,
+          targetSubject: normSubj,
+          requirementPeriods: reqPeriods,
+          sourceEntriesMap: new Map(),
+        })
+      }
+
+      const groupData = groupMap.get(groupKey)
+      if (!groupData.sourceEntriesMap.has(sourceKey)) {
+        groupData.sourceEntriesMap.set(sourceKey, {
+          sourceKeyObj,
+          sourceKey,
+          entries: [],
+        })
+      }
+      groupData.sourceEntriesMap.get(sourceKey).entries.push(entry)
+    }
+  }
+
+  const conflicts = []
+
+  for (const groupData of groupMap.values()) {
+    const { className, targetSubject, requirementPeriods, sourceEntriesMap } = groupData
+
+    if (sourceEntriesMap.size < 2) continue
+
+    const allSlotsSet = new Set()
+    const sourcesDetail = []
+
+    for (const [sourceKey, { sourceKeyObj, entries: sourceEntries }] of sourceEntriesMap.entries()) {
+      const sourceSlotsSet = new Set()
+      const sourceCellsSet = new Set()
+      const coursesDetail = []
+      let teacherName = null
+
+      for (const entry of sourceEntries) {
+        const course = entry.course
+        const cell = entry.source?.cell || entry.source?.cellRef || ''
+        if (cell) sourceCellsSet.add(cell)
+
+        const teacher = course.teacher || course.teacher_name || null
+        if (teacher && !teacherName) teacherName = teacher
+
+        const lockedSlots = course.lockedSlots || []
+        for (const slot of lockedSlots) {
+          if (!slot || slot.day == null || slot.period == null) continue
+          const slotStr = `${slot.day}:${slot.period}`
+          sourceSlotsSet.add(slotStr)
+          allSlotsSet.add(slotStr)
+        }
+
+        coursesDetail.push({
+          entryKey: entryKey(entry),
+          sourceCell: cell,
+          targetClasses: course.targetClasses || course.classes || [],
+          targetSubject: course.targetSubject || course.subject || '',
+          teacher,
+          lockedSlots,
+          sharedEventId: course.sharedEventId || null,
+        })
+      }
+
+      const fixedSlots = Array.from(sourceSlotsSet)
+        .map((str) => {
+          const [d, p] = str.split(':').map(Number)
+          return { day: d, period: p }
+        })
+        .sort((a, b) => a.day - b.day || a.period - b.period)
+
+      sourcesDetail.push({
+        sourceKey,
+        sourceKind: sourceKeyObj.sourceKind,
+        name: sourceKeyObj.name,
+        projectName: sourceKeyObj.projectName,
+        teacher: teacherName,
+        sourceCells: Array.from(sourceCellsSet).sort(),
+        fixedSlots,
+        fixedSlotCount: fixedSlots.length,
+        courses: coursesDetail,
+      })
+    }
+
+    const totalFixedSlotCount = allSlotsSet.size
+
+    if (totalFixedSlotCount > requirementPeriods) {
+      sourcesDetail.sort((a, b) => a.sourceKey.localeCompare(b.sourceKey))
+
+      conflicts.push({
+        key: `${className}::${targetSubject}`,
+        className,
+        targetSubject,
+        requirementPeriods,
+        totalFixedSlotCount,
+        overagePeriods: totalFixedSlotCount - requirementPeriods,
+        sources: sourcesDetail,
+      })
+    }
+  }
+
+  conflicts.sort((a, b) => a.className.localeCompare(b.className) || a.targetSubject.localeCompare(b.targetSubject))
+
+  return conflicts
+}

@@ -108,13 +108,19 @@
 
       <div v-if="sharedEventCandidates.length > 0" data-testid="shared-event-candidates" class="preview-group">
         <h4>隱含共同事件確認</h4>
+        <div data-testid="shared-event-decision-summary" class="mb-3 text-muted">
+          隱含共同事件進度：待決策：{{ sharedEventDecisionSummary.pending }} | 已確認：{{ sharedEventDecisionSummary.confirmed }} | 維持獨立：{{ sharedEventDecisionSummary.keptIndependent }}
+        </div>
         <div
           v-for="candidate in sharedEventCandidates"
           :key="candidate.key"
           class="candidate-card mb-3 p-3 border rounded"
         >
-          <div class="candidate-header">
+          <div class="candidate-header flex justify-between items-center">
             <strong>{{ candidate.entityName }} - {{ candidate.teacher }}（星期{{ ['一','二','三','四','五'][candidate.day - 1] || candidate.day }} 第{{ candidate.period }}節）</strong>
+            <span :data-testid="`shared-event-decision-${candidate.key}`" class="badge" :class="candidate.confirmationBlocked ? 'badge-danger' : (sharedEventDecisions[candidate.key] === 'confirm' ? 'badge-success' : (sharedEventDecisions[candidate.key] === 'keep_independent' ? 'badge-secondary' : 'badge-warning'))">
+              {{ candidate.confirmationBlocked ? '無法確認' : formatSharedEventDecision(sharedEventDecisions[candidate.key]) }}
+            </span>
           </div>
           <div class="candidate-rows my-2">
             <div v-for="row in candidate.rows" :key="row.entryKey" class="candidate-row-item">
@@ -130,6 +136,8 @@
               :data-testid="`confirm-shared-event-${candidate.key}`"
               class="btn btn-sm"
               :class="sharedEventDecisions[candidate.key] === 'confirm' ? 'btn-primary' : 'btn-outline-primary'"
+              :aria-pressed="sharedEventDecisions[candidate.key] === 'confirm' ? 'true' : 'false'"
+              :disabled="isImportingBlockSchedule"
               @click="setSharedEventDecision(candidate.key, 'confirm')"
             >
               確認為同一事件
@@ -139,10 +147,31 @@
               :data-testid="`keep-independent-${candidate.key}`"
               class="btn btn-sm"
               :class="sharedEventDecisions[candidate.key] === 'keep_independent' ? 'btn-secondary' : 'btn-outline-secondary'"
+              :aria-pressed="sharedEventDecisions[candidate.key] === 'keep_independent' ? 'true' : 'false'"
+              :disabled="isImportingBlockSchedule"
               @click="setSharedEventDecision(candidate.key, 'keep_independent')"
             >
               維持獨立課程
             </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="sourcePriorityConflicts.length > 0" data-testid="source-priority-conflicts" class="preview-group">
+        <h4>⚡ 來源優先權固定節數超額提醒</h4>
+        <div v-for="conflict in sourcePriorityConflicts" :key="conflict.key" class="candidate-card mb-3 p-3 border rounded">
+          <div class="font-bold mb-2">
+            班級：{{ conflict.className }} ｜ 科目：{{ conflict.targetSubject }} ｜ 需求 {{ conflict.requirementPeriods }} 節 ｜ 固定合計 {{ conflict.totalFixedSlotCount }} 節 ｜ 超額 {{ conflict.overagePeriods }} 節
+          </div>
+          <div class="sources-list my-2">
+            <div v-for="src in conflict.sources" :key="src.sourceKey" class="source-detail-row text-sm my-1">
+              • 來源：{{ src.name }}{{ src.projectName ? ' (' + src.projectName + ')' : '' }} — 固定 {{ src.fixedSlotCount }} 節
+              <span v-if="src.teacher">（教師：{{ src.teacher }}）</span>
+              （儲存格：{{ src.sourceCells.join('、') }}）
+            </div>
+          </div>
+          <div class="text-warning small mt-2">
+            來源優先權轉換尚無已核定的一般導師區塊資料契約；未修改任何課程或鎖定。
           </div>
         </div>
       </div>
@@ -382,6 +411,7 @@ import {
   parseBlockScheduleWorkbook,
   findImplicitSharedEventCandidates,
   materializeImplicitSharedEventDecisions,
+  detectSourcePriorityConflicts,
 } from '../utils/blockScheduleExcelImport.js'
 
 const scheduleStore = useScheduleStore()
@@ -401,6 +431,7 @@ const isImportingBlockSchedule = ref(false)
 
 const rawImportEntries = ref([])
 const sharedEventDecisions = ref({})
+const sourcePriorityConflicts = ref([])
 
 const pulloutForm = ref({
   type: '學習中心',
@@ -433,8 +464,41 @@ const canConfirmImport = computed(() => {
   )
 })
 
+const sharedEventDecisionSummary = computed(() => {
+  let pending = 0
+  let confirmed = 0
+  let keptIndependent = 0
+  let blocked = 0
+
+  for (const candidate of sharedEventCandidates.value) {
+    if (candidate.confirmationBlocked) {
+      blocked++
+      continue
+    }
+    const decision = sharedEventDecisions.value[candidate.key] || 'pending'
+    if (decision === 'confirm') confirmed++
+    else if (decision === 'keep_independent') keptIndependent++
+    else pending++
+  }
+
+  return {
+    totalDecidable: sharedEventCandidates.value.length - blocked,
+    pending,
+    confirmed,
+    keptIndependent,
+    blocked,
+  }
+})
+
+const formatSharedEventDecision = (decision) => {
+  if (decision === 'confirm') return '已確認為同一事件'
+  if (decision === 'keep_independent') return '已選擇維持獨立課程'
+  return '尚待決策'
+}
+
 const setSharedEventDecision = (key, decision) => {
   if (decision === 'confirm' || decision === 'keep_independent') {
+    if (sharedEventDecisions.value[key] === decision) return
     sharedEventDecisions.value = {
       ...sharedEventDecisions.value,
       [key]: decision,
@@ -488,6 +552,7 @@ const clearImportState = ({ keepStatus = false } = {}) => {
   selectedReplacementIds.value = []
   rawImportEntries.value = []
   sharedEventDecisions.value = {}
+  sourcePriorityConflicts.value = []
   importError.value = ''
   importFileName.value = ''
   if (!keepStatus) {
@@ -510,6 +575,8 @@ const rebuildImportPreview = (arrayBuffer) => {
   for (const candidate of findImplicitSharedEventCandidates(parsed.entries)) {
     sharedEventDecisions.value[candidate.key] = 'pending'
   }
+
+  sourcePriorityConflicts.value = detectSourcePriorityConflicts(parsed.entries, scheduleStore.classes)
 
   const plan = buildBlockScheduleImportPlan(parsed.entries, scheduleStore.specialCourses)
   importWorkbookBuffer.value = arrayBuffer
@@ -558,7 +625,7 @@ watch(blockScheduleUnitName, () => {
 })
 
 const confirmBlockScheduleImport = async () => {
-  if (!canConfirmImport.value || !importPlan.value) return
+  if (!canConfirmImport.value || !importPlan.value || isImportingBlockSchedule.value) return
 
   isImportingBlockSchedule.value = true
   importError.value = ''
