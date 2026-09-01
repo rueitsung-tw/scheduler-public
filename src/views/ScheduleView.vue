@@ -1248,30 +1248,24 @@ const startEngine = async () => {
     console.log("🧹 已完成中高年級科目轉換（僅用於本次排課 payload，不寫回 DB）！");
   }
 
-  const homeroomRequirementTrace = dataStore.classes.map((cls) => {
-    const homeroomSubjects = (cls.course_requirements || []).filter((req) => {
-      const subject = String(req.subject || '').trim();
-      return req.defaultTeacher === 'homeroom'
-        && subject !== '導師區塊'
-        && !subject.includes('生活')
-        && !subject.includes('游泳')
-        && !subject.includes('體育');
-    });
-
-    const existingHomeroomBlock = (cls.course_requirements || []).find(
-      (req) => String(req.subject || '').trim() === '導師區塊'
-    );
-
-    return {
-      className: cls.name,
-      blockCandidatePeriods: homeroomSubjects.reduce((sum, req) => sum + (Number(req.periods) || 0), 0),
-      existingHomeroomBlockPeriods: Number(existingHomeroomBlock?.periods) || 0,
-      mergedSubjects: homeroomSubjects.map((req) => ({
-        subject: req.subject,
-        periods: Number(req.periods) || 0
-      }))
-    };
-  }).filter((item) => item.blockCandidatePeriods > 0 || item.existingHomeroomBlockPeriods > 0);
+  const homeroomRequirementTrace = dataStore.resolveHomeroomRequirementTrace(dataStore.classes)
+    .map((item) => {
+      const cleanSubjects = item.mergedSubjects.filter((m) => {
+        const subject = String(m.subject || '').trim()
+        return !subject.includes('生活') && !subject.includes('游泳') && !subject.includes('體育')
+      })
+      const blockCandidatePeriods = cleanSubjects.reduce((sum, m) => sum + (Number(m.periods) || 0), 0)
+      return {
+        className: item.className,
+        blockCandidatePeriods,
+        existingHomeroomBlockPeriods: item.existingHomeroomBlockPeriods,
+        mergedSubjects: cleanSubjects.map((m) => ({
+          subject: m.subject,
+          periods: Number(m.periods) || 0,
+        })),
+      }
+    })
+    .filter((item) => item.blockCandidatePeriods > 0 || item.existingHomeroomBlockPeriods > 0)
 
   // 🚀 組合最乾淨的 Payload 送出給 Python
   const realPayload = {

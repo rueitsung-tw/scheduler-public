@@ -1182,55 +1182,82 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     return null;
   };
 
+  const resolveHomeroomRequirementTrace = (classesList = []) => {
+    const result = [];
+    (classesList || []).forEach((cls) => {
+      if (!cls?.name) return;
+      const gradeMatch = String(cls.name).match(/(\d+)年/) || String(cls.name).match(/^(\d)/);
+      const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : (cls.grade || 0);
+
+      const homeroomSubjects = (cls.course_requirements || []).filter((req) => {
+        const subject = String(req.subject || '').trim();
+        return req.defaultTeacher === 'homeroom' && Number(req.periods) > 0 && subject !== '導師區塊';
+      });
+
+      const existingHomeroomBlock = (cls.course_requirements || []).find(
+        (req) => String(req.subject || '').trim() === '導師區塊'
+      );
+
+      const blockCandidatePeriods = homeroomSubjects.reduce(
+        (sum, req) => sum + (Number(req.periods) || 0),
+        0
+      );
+      const existingHomeroomBlockPeriods = Number(existingHomeroomBlock?.periods) || 0;
+
+      if (blockCandidatePeriods > 0 || existingHomeroomBlockPeriods > 0) {
+        result.push({
+          className: cls.name,
+          grade,
+          blockCandidatePeriods,
+          existingHomeroomBlockPeriods,
+          mergedSubjects: homeroomSubjects.map((req) => ({
+            subject: req.subject,
+            periods: Number(req.periods) || 0,
+            teacher: req.teacher_name || req.teacher || null,
+          })),
+        });
+      }
+    });
+    return result;
+  };
+
   // ==========================================
   // 🚀 導師課區塊化預處理函數
   // ==========================================
   const buildHomeroomBlockMap = () => {
     const blockMap = {};
+    const trace = resolveHomeroomRequirementTrace(classes.value);
 
-    classes.value.forEach(cls => {
-      // 萃取年級數字
-      const gradeMatch = String(cls.name).match(/(\d+)年/) || String(cls.name).match(/^(\d)/);
-      const grade = gradeMatch ? parseInt(gradeMatch[1], 10) : (cls.grade || 0);
+    trace.forEach(item => {
+      item.mergedSubjects.forEach(req => {
+        const teacherName = req.teacher;
+        if (!teacherName) return;
 
-      (cls.course_requirements || []).forEach(req => {
-        // 🔧 修復：支援 req.teacher_name 與 req.teacher 兩種欄位
-        const teacherName = req.teacher_name || req.teacher;
-        // 篩選條件：預設由導師授課，且已明確指派教師姓名，且節數 > 0
-        // 不把已聚合的 subject: '導師區塊' 當成背包科目
-        if (req.defaultTeacher === 'homeroom' && teacherName && Number(req.periods) > 0 && req.subject !== '導師區塊') {
-          const tName = teacherName;
-
-          // 若該導師尚未在 map 中，初始化它
-          if (!blockMap[tName]) {
-            blockMap[tName] = {
-              totalPeriods: 0,
-              classes: []
-            };
-          }
-
-          // 尋找該導師的班級陣列中，是否已經有這個班級
-          let classEntry = blockMap[tName].classes.find(c => c.className === cls.name);
-          if (!classEntry) {
-            classEntry = {
-              className: cls.name,
-              grade: grade,
-              homeroomPeriods: 0,
-              subjectBreakdown: []
-            };
-            blockMap[tName].classes.push(classEntry);
-          }
-
-          // 累加節數與記錄科目明細
-          const periods = Number(req.periods) || 0;
-          classEntry.homeroomPeriods += periods;
-          classEntry.subjectBreakdown.push({
-            subject: req.subject,
-            periods: periods
-          });
-
-          blockMap[tName].totalPeriods += periods;
+        if (!blockMap[teacherName]) {
+          blockMap[teacherName] = {
+            totalPeriods: 0,
+            classes: []
+          };
         }
+
+        let classEntry = blockMap[teacherName].classes.find(c => c.className === item.className);
+        if (!classEntry) {
+          classEntry = {
+            className: item.className,
+            grade: item.grade,
+            homeroomPeriods: 0,
+            subjectBreakdown: []
+          };
+          blockMap[teacherName].classes.push(classEntry);
+        }
+
+        classEntry.homeroomPeriods += req.periods;
+        classEntry.subjectBreakdown.push({
+          subject: req.subject,
+          periods: req.periods
+        });
+
+        blockMap[teacherName].totalPeriods += req.periods;
       });
     });
 
@@ -2072,6 +2099,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     aiSettings,
     normalizeSlotRule, addSlotRule, updateSlotRule, deleteSlotRule,
     buildHomeroomBlockMap,
+    resolveHomeroomRequirementTrace,
     loadFromDB,
     syncToCloud,
     clearAllTimetables, clearAllTeachers, resetAllData,
