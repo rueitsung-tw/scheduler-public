@@ -124,6 +124,10 @@
             <button @click="saveAiSettings" class="save-btn">儲存 AI 設定</button>
           </div>
 
+          <p class="desc" style="margin-top: 8px; margin-bottom: 0;">
+            💡 此按鈕只儲存 AI 連線參數（端點、模型、提示詞）。共備規則與排課演算法設定請使用頁面底部的「儲存所有設定」。
+          </p>
+
           <div v-if="testResult" :class="['test-result', testStatus]">
             {{ testResult }}
           </div>
@@ -683,7 +687,7 @@
         </div>
       </div>
 
-      <button @click="saveSettings" class="main-save-btn">儲存所有設定</button>
+      <button @click="saveSettings" class="main-save-btn">儲存所有設定（含共備規則與排課演算法參數）</button>
     </div>
   </div>
 </template>
@@ -1058,7 +1062,7 @@ async function saveAiSettings() {
     aiStore.apiUrl = normalizeServiceUrl(aiStore.apiUrl, aiStore.serviceType)
     await aiStore.saveToApi()
     aiStore.saveSettings()
-    alert('AI 連線設定已儲存，下次重新整理後也會保留。')
+    alert('AI 連線設定已儲存。\n\n💡 若同時修改了共備規則或演算法參數，請再點擊頁面底部的「儲存所有設定」以完成完整儲存。')
   } catch (error) {
     if (error.code === 'ECONNABORTED') {
       alert('儲存逾時：後端可能暫時沒有回應。')

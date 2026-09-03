@@ -145,14 +145,20 @@ function parseLine(rawLine, options, blockers, warnings, cell) {
       addIssue(blockers, 'EMPTY_PROJECT', '專案名稱不可空白', cell)
       return null
     }
+    const classItems = resolveClasses(arrow[1], options.classes, blockers, cell)
     return {
-      classItems: resolveClasses(arrow[1], options.classes, blockers, cell),
+      classItems,
       rawSubject: arrow[2],
       sourceKind: 'gifted',
       sourceGroup: null,
       projectName,
       teacher: null,
       sharedEventId,
+      classCodes: classItems.map((c) => c.name),
+      pulloutLabelSubjectRaw: arrow[2],
+      teacherRaw: null,
+      deliveryCourseNameRaw: projectName,
+      sourceSyntax: 'arrow',
     }
   }
 
@@ -167,13 +173,69 @@ function parseLine(rawLine, options, blockers, warnings, cell) {
     addIssue(blockers, 'MISSING_TEACHER', '缺少教師姓名', cell)
     return null
   }
+  const classItems = resolveClasses(learningCenter[1], options.classes, blockers, cell)
+  const teacher = resolveTeacher(teacherName, options.teachers, blockers, cell)
   return {
-    classItems: resolveClasses(learningCenter[1], options.classes, blockers, cell),
+    classItems,
     rawSubject: learningCenter[2],
     sourceKind: 'learning_center',
     projectName: null,
-    teacher: resolveTeacher(teacherName, options.teachers, blockers, cell),
+    teacher,
     sharedEventId,
+    classCodes: classItems.map((c) => c.name),
+    pulloutLabelSubjectRaw: learningCenter[2],
+    teacherRaw: teacherName,
+    deliveryCourseNameRaw: null,
+    sourceSyntax: 'learning_center',
+  }
+}
+
+export function normalizePartialPulloutSemantic({
+  parsedLine,
+  sourceAnchor,
+  classAnchorSubjects = {},
+  entityName = '',
+}) {
+  const parsed = parsedLine || {}
+  const rawSubj = parsed.pulloutLabelSubject || parsed.targetSubject || parsed.rawSubject || null
+  const pulloutLabelSubject = rawSubj ? normalizeSubject(SUBJECT_ALIASES[rawSubj] || rawSubj) : null
+  const teacherAssignmentMode = (parsed.sourceKind === 'gifted' || parsed.teacherAssignmentMode === 'center_pool')
+    ? 'center_pool'
+    : 'fixed'
+  const deliveryCourseName = parsed.projectName || parsed.deliveryCourseName || null
+
+  let classAnchorSubject = parsed.classAnchorSubject || null
+  if (!classAnchorSubject && classAnchorSubjects && typeof classAnchorSubjects === 'object') {
+    const classNames = parsed.classNames || parsed.targetClasses || parsed.classes || []
+    if (classNames.length > 0 && classAnchorSubjects[classNames[0]]) {
+      classAnchorSubject = classAnchorSubjects[classNames[0]]
+    }
+  }
+
+  const day = sourceAnchor?.day != null ? Number(sourceAnchor.day) : null
+  const period = sourceAnchor?.period != null ? Number(sourceAnchor.period) : null
+
+  return {
+    semanticVersion: 2,
+    pulloutLabelSubject,
+    classAnchorSubject,
+    deliveryCourseName,
+    participantGroupId: null,
+    teacherAssignmentMode,
+    teacher: parsed.teacher?.name || (typeof parsed.teacher === 'string' ? parsed.teacher : null),
+    sourceAnchor: {
+      workbookKind: 'block_schedule',
+      workbookFingerprint: sourceAnchor?.workbookFingerprint || '',
+      sheetName: sourceAnchor?.sheetName || '',
+      cell: sourceAnchor?.cell || sourceAnchor?.cellRef || '',
+      rawLine: sourceAnchor?.rawLine || sourceAnchor?.raw || '',
+      day,
+      period,
+    },
+    legalTimeWindow: (day && period) ? [{ day, period }] : [],
+    timePolicy: 'legacy_hard',
+    anchorPriority: null,
+    classSubjectSynchronization: 'none',
   }
 }
 
@@ -185,6 +247,7 @@ export function parseBlockScheduleWorkbook(arrayBuffer, {
   teachers = [],
   giftedUnitName,
   learningCenterName = '學習中心',
+  classAnchorSubjects = {},
 } = {}) {
   const entries = []
   const blockers = []
@@ -274,6 +337,24 @@ export function parseBlockScheduleWorkbook(arrayBuffer, {
         if (day === null || day == null || period === null) continue
 
         const classNames = parsed.classItems.map((classItem) => classItem.name)
+        const v2Metadata = normalizePartialPulloutSemantic({
+          parsedLine: {
+            ...parsed,
+            classNames,
+            targetClasses: classNames,
+            pulloutLabelSubject: targetSubject,
+          },
+          sourceAnchor: {
+            sheetName,
+            cell,
+            rawLine: text(rawLine),
+            day,
+            period,
+          },
+          classAnchorSubjects,
+          entityName: parsed.sourceKind === 'gifted' ? giftedUnitName : learningCenterName,
+        })
+
         const course = {
           type: 'pullout',
           name: parsed.sourceKind === 'gifted' ? giftedUnitName : learningCenterName,
@@ -291,7 +372,19 @@ export function parseBlockScheduleWorkbook(arrayBuffer, {
           isAutoClass: false,
           autoClassConfig: null,
           lockedSlots: [{ day, period }],
+          ...v2Metadata,
         }
+
+        const gateRes = evaluatePartialPulloutGate(course)
+        if (gateRes && gateRes.status === 'BLOCKER') {
+          blockers.push({
+            cell,
+            cellRef: cell,
+            code: gateRes.code,
+            message: gateRes.message,
+          })
+        }
+
         entries.push({ course, source: { cell, cellRef: cell, raw: text(rawLine) } })
       }
     }
@@ -832,3 +925,36 @@ export function detectSourcePriorityConflicts(entries = [], classes = []) {
 
   return conflicts
 }
+
+export function evaluatePartialPulloutGate(course) {
+  if (!course || course.semanticVersion < 2) return { status: 'OK' }
+
+  const targetClasses = course.targetClasses || course.classes || []
+  if (!targetClasses || targetClasses.length === 0) {
+    return {
+      status: 'BLOCKER',
+      code: 'PULLOUT_TARGET_CLASSES_MISSING',
+      message: '缺對應目標班級',
+    }
+  }
+
+  const legalWindow = course.legalTimeWindow || course.lockedSlots || []
+  if (!legalWindow || legalWindow.length === 0) {
+    return {
+      status: 'BLOCKER',
+      code: 'PULLOUT_TIME_WINDOW_MISSING',
+      message: '缺合法選時窗口與時段',
+    }
+  }
+
+  const diagnostics = []
+  if (course.teacherAssignmentMode === 'center_pool' && !course.teacher) {
+    diagnostics.push('中心自行調配（未提供固定教師）')
+  }
+  if (!course.participantGroupId) {
+    diagnostics.push('未提供抽離學生群組 ID')
+  }
+
+  return { status: 'OK', diagnostics }
+}
+

@@ -517,7 +517,18 @@ app.post('/api/save-all', async (req, res) => {
                         projectName: nullableSourceMetadata(sc.projectName),
                         sourceGroup: nullableSourceMetadata(sc.sourceGroup),
                         sourceKind: nullableSourceMetadata(sc.sourceKind),
-                        sharedEventId: nullableSourceMetadata(sc.sharedEventId)
+                        sharedEventId: nullableSourceMetadata(sc.sharedEventId),
+                        semanticVersion: sc.semanticVersion != null ? Number(sc.semanticVersion) : null,
+                        pulloutLabelSubject: nullableSourceMetadata(sc.pulloutLabelSubject),
+                        classAnchorSubject: nullableSourceMetadata(sc.classAnchorSubject),
+                        deliveryCourseName: nullableSourceMetadata(sc.deliveryCourseName),
+                        participantGroupId: nullableSourceMetadata(sc.participantGroupId),
+                        teacherAssignmentMode: nullableSourceMetadata(sc.teacherAssignmentMode),
+                        sourceAnchor: sc.sourceAnchor ? JSON.stringify(sc.sourceAnchor) : null,
+                        legalTimeWindow: sc.legalTimeWindow ? JSON.stringify(sc.legalTimeWindow) : null,
+                        timePolicy: nullableSourceMetadata(sc.timePolicy),
+                        anchorPriority: nullableSourceMetadata(sc.anchorPriority),
+                        classSubjectSynchronization: nullableSourceMetadata(sc.classSubjectSynchronization)
                     }
                 });
             }
@@ -669,9 +680,19 @@ app.get('/api/schedule', async (req, res) => {
                 sourceGroup: typeof sc.sourceGroup === 'string' && sc.sourceGroup.trim() !== '' ? sc.sourceGroup.trim() : null,
                 sourceKind: typeof sc.sourceKind === 'string' && sc.sourceKind.trim() !== '' ? sc.sourceKind.trim() : null,
                 sharedEventId: typeof sc.sharedEventId === 'string' && sc.sharedEventId.trim() !== '' ? sc.sharedEventId.trim() : null,
+                pulloutLabelSubject: typeof sc.pulloutLabelSubject === 'string' && sc.pulloutLabelSubject.trim() !== '' ? sc.pulloutLabelSubject.trim() : null,
+                classAnchorSubject: typeof sc.classAnchorSubject === 'string' && sc.classAnchorSubject.trim() !== '' ? sc.classAnchorSubject.trim() : null,
+                deliveryCourseName: typeof sc.deliveryCourseName === 'string' && sc.deliveryCourseName.trim() !== '' ? sc.deliveryCourseName.trim() : null,
+                participantGroupId: typeof sc.participantGroupId === 'string' && sc.participantGroupId.trim() !== '' ? sc.participantGroupId.trim() : null,
+                teacherAssignmentMode: typeof sc.teacherAssignmentMode === 'string' && sc.teacherAssignmentMode.trim() !== '' ? sc.teacherAssignmentMode.trim() : null,
+                timePolicy: typeof sc.timePolicy === 'string' && sc.timePolicy.trim() !== '' ? sc.timePolicy.trim() : null,
+                anchorPriority: typeof sc.anchorPriority === 'string' && sc.anchorPriority.trim() !== '' ? sc.anchorPriority.trim() : null,
+                classSubjectSynchronization: typeof sc.classSubjectSynchronization === 'string' && sc.classSubjectSynchronization.trim() !== '' ? sc.classSubjectSynchronization.trim() : null,
                 targetClasses: JSON.parse(sc.targetClasses || '[]'),
                 lockedSlots: JSON.parse(sc.lockedSlots || '[]'),
-                autoClassConfig: JSON.parse(sc.autoClassConfig || 'null')
+                autoClassConfig: JSON.parse(sc.autoClassConfig || 'null'),
+                sourceAnchor: sc.sourceAnchor ? JSON.parse(sc.sourceAnchor) : null,
+                legalTimeWindow: sc.legalTimeWindow ? JSON.parse(sc.legalTimeWindow) : []
             })),
             classrooms
         });

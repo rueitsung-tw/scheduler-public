@@ -578,27 +578,19 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
                                 preprocess_metadata=None, movable_locks_policy=None):
     """
     [硬約束 5] 特殊專案與抽離課程建模（學習中心/抽離群組結構）
-
-    支援：
-      1. 鎖定時段 (isAutoTime=False)
-      2. AI自動時段 (isAutoTime=True)
-      3. 固定參與班級 (isAutoClass=False)
-      4. AI自動湊班 (isAutoClass=True)
-      5. 班級目標科目 (targetSubject) 同步排課
-      6. 特教教師衝堂防護與佔用
-
-    [SEMANTIC FIX 2026-06-30]
-    學習中心抽離事件語意修正：
-    多筆 pullout 記錄（不同 targetSubject）可能代表同一個抽離事件。
-    例如：4165(國語)+4166(國語)+4167(數學)+4168(數學) 都是「3年1/3/10班 → 學習中心」的同一事件。
-
-    修復策略：
-    - 引入 event_key = (name, teacher, mode, classes_key) 作為事件層級分組（不含 subject）
-    - 同一事件內的 pullout 共用同一組時段決策變數 (event_vars)
-    - 教師佔用只計算事件層級（一次），而非每筆 pullout 各算一次
-    - 每筆 pullout 的 sc_decision_vars 仍獨立記錄（供輸出使用），但 vars 指向 event_vars
-    - lockedSlots 取同一事件內所有 pullout 的交集時段
     """
+    # Filter v2 courses to route to apply_partial_pullout_events
+    v2_courses = [sc for sc in (special_courses or []) if sc.get("semanticVersion", 1) >= 2]
+    legacy_courses = [sc for sc in (special_courses or []) if sc.get("semanticVersion", 1) < 2]
+
+    if v2_courses:
+        apply_partial_pullout_events(
+            model, schedule, v2_courses, classes_data, teachers_data,
+            ai_settings, preprocess_metadata, movable_locks_policy
+        )
+
+    special_courses = legacy_courses
+
     from collections import defaultdict
     import re
     from config import LUNCH_BOUNDARY
@@ -899,3 +891,138 @@ def apply_special_course_locks(model, schedule, special_courses, classes_data, t
 
     # 把 sc_decision_vars 暫存到 model 中，方便主程式存取
     model.sc_decision_vars = sc_decision_vars
+
+
+def apply_partial_pullout_events(model, schedule, special_courses, classes_data, teachers_data,
+                                ai_settings, preprocess_metadata=None, movable_locks_policy=None, policy=None):
+    """
+    [硬約束 5.2] 僅處理 semanticVersion >= 2 的 partial pullout 課程；不修改班級需求 (course_requirements) 等式。
+    """
+    from collections import defaultdict
+    import json
+
+    if not special_courses:
+        return
+
+    schedule_by_c_p_s = defaultdict(list)
+    schedule_by_t_p = defaultdict(list)
+    for (sch_c, sch_p, sch_t, sch_s), var in schedule.items():
+        schedule_by_c_p_s[(sch_c, sch_p, sch_s)].append(var)
+        if sch_t:
+            schedule_by_t_p[(sch_t, sch_p)].append((sch_s, var))
+
+    teacher_occupied_slots = defaultdict(list)
+    group_occupied_slots = defaultdict(list)
+
+    # Group v2 courses by sharedEventId if present
+    events_by_key = defaultdict(list)
+    for sc in special_courses:
+        if sc.get("semanticVersion", 1) < 2:
+            continue
+        shared_id = sc.get("sharedEventId")
+        if shared_id:
+            key = f"shared_{shared_id}"
+        else:
+            key = f"sc_{sc.get('id', id(sc))}"
+        events_by_key[key].append(sc)
+
+    for event_key, group_scs in events_by_key.items():
+        first_sc = group_scs[0]
+        teacher_mode = first_sc.get("teacherAssignmentMode", "fixed")
+        teacher_name = first_sc.get("teacher")
+        group_id = first_sc.get("participantGroupId")
+        time_policy = first_sc.get("timePolicy", "legacy_hard")
+
+        candidate_p_set = set()
+        for sc in group_scs:
+            legal_window = sc.get("legalTimeWindow", [])
+            if isinstance(legal_window, str):
+                try:
+                    legal_window = json.loads(legal_window)
+                except Exception:
+                    legal_window = []
+            locked_slots = sc.get("lockedSlots", [])
+            if isinstance(locked_slots, str):
+                try:
+                    locked_slots = json.loads(locked_slots)
+                except Exception:
+                    locked_slots = []
+            if not legal_window and locked_slots:
+                legal_window = locked_slots
+
+            for slot in legal_window:
+                d = slot.get("day")
+                p = slot.get("period")
+                if d is not None and p is not None:
+                    p_idx = (d - 1) * 7 + (p - 1)
+                    if 0 <= p_idx < 35:
+                        candidate_p_set.add(p_idx)
+
+        candidate_p_list = sorted(list(candidate_p_set))
+        if not candidate_p_list:
+            continue
+
+        event_slot_vars = []
+        for p_idx in candidate_p_list:
+            var_name = f"v2_event_{event_key}_p{p_idx}"
+            v = model.NewBoolVar(var_name)
+            event_slot_vars.append((p_idx, v))
+
+            if teacher_mode == "fixed" and teacher_name:
+                teacher_occupied_slots[(teacher_name, p_idx)].append(v)
+
+            if group_id:
+                group_occupied_slots[(group_id, p_idx)].append(v)
+
+            for sc in group_scs:
+                class_sync = sc.get("classSubjectSynchronization", "none")
+                class_anchor_subject = sc.get("classAnchorSubject")
+                target_classes = sc.get("targetClasses", [])
+                if isinstance(target_classes, str):
+                    try:
+                        target_classes = json.loads(target_classes)
+                    except Exception:
+                        target_classes = []
+
+                if class_sync == "require_anchor_subject" and class_anchor_subject:
+                    for cls_name in target_classes:
+                        class_vars = schedule_by_c_p_s[(cls_name, p_idx, class_anchor_subject)]
+                        if class_vars:
+                            model.Add(sum(class_vars) >= v)
+
+        if len(event_slot_vars) == 1:
+            model.Add(event_slot_vars[0][1] == 1)
+        elif len(event_slot_vars) > 1:
+            model.Add(sum(v for _, v in event_slot_vars) == 1)
+
+        # Soft preference objective terms
+        if time_policy == "soft_preference":
+            src_anchor = first_sc.get("sourceAnchor") or {}
+            if isinstance(src_anchor, str):
+                try:
+                    src_anchor = json.loads(src_anchor)
+                except Exception:
+                    src_anchor = {}
+            orig_d = src_anchor.get("day")
+            orig_p = src_anchor.get("period")
+            if orig_d is not None and orig_p is not None:
+                orig_p_idx = (orig_d - 1) * 7 + (orig_p - 1)
+                if not hasattr(model, "v2_soft_penalty_terms"):
+                    model.v2_soft_penalty_terms = []
+                for p_idx, v in event_slot_vars:
+                    if p_idx != orig_p_idx:
+                        d_orig, pr_orig = orig_p_idx // 7, orig_p_idx % 7
+                        d_cand, pr_cand = p_idx // 7, p_idx % 7
+                        slot_dist = abs(pr_cand - pr_orig) if d_orig == d_cand else abs(p_idx - orig_p_idx)
+                        model.v2_soft_penalty_terms.append({"var": v, "weight": 2500, "rule_id": "partial_pullout_anchor_miss"})
+                        if slot_dist > 0:
+                            model.v2_soft_penalty_terms.append({"var": v, "weight": 300 * slot_dist, "rule_id": "partial_pullout_anchor_distance"})
+
+    for (t_name, p_idx), vars_at_p in teacher_occupied_slots.items():
+        if len(vars_at_p) > 1:
+            model.Add(sum(vars_at_p) <= 1)
+
+    for (g_id, p_idx), vars_at_p in group_occupied_slots.items():
+        if len(vars_at_p) > 1:
+            model.Add(sum(vars_at_p) <= 1)
+

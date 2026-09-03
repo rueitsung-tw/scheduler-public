@@ -56,20 +56,31 @@ model Classroom {
 
 // 4：特殊專案與抽離 (升級版：支援 AI 參數與多班級)
 model SpecialCourse {
-  id              Int      @id @default(autoincrement())
-  type            String   // 'pullout' 或 'swimming'
-  name            String
-  targetSubject   String?  // 對應學科
-  teacher         String?  // 特教/負責教師
-  targetClasses   String?  // 參與班級 (JSON 陣列)
-  lockedSlots     String?  // 鎖定時段 (JSON 陣列)
-  isAutoTime      Boolean  @default(false)
-  isAutoClass     Boolean  @default(false)
-  autoClassConfig String?  // AI 湊班設定 (JSON 物件)
-  projectName     String?  // 匯入來源的專案名稱
-  sourceGroup     String?  // 匯入來源的群組名稱
-  sourceKind      String?  // 匯入來源類型
-  sharedEventId   String?  // 匯入或手動標註的共同授課事件識別碼
+  id                           Int      @id @default(autoincrement())
+  type                         String   // 'pullout' 或 'swimming'
+  name                         String
+  targetSubject                String?  // 對應學科
+  teacher                      String?  // 特教/負責教師
+  targetClasses                String?  // 參與班級 (JSON 陣列)
+  lockedSlots                  String?  // 鎖定時段 (JSON 陣列)
+  isAutoTime                   Boolean  @default(false)
+  isAutoClass                  Boolean  @default(false)
+  autoClassConfig              String?  // AI 湊班設定 (JSON 物件)
+  projectName                  String?  // 匯入來源的專案名稱
+  sourceGroup                  String?  // 匯入來源的群組名稱
+  sourceKind                   String?  // 匯入來源類型
+  sharedEventId                String?  // 匯入或手動標註的共同授課事件識別碼
+  semanticVersion              Int?     @default(1)
+  pulloutLabelSubject          String?
+  classAnchorSubject           String?
+  deliveryCourseName           String?
+  participantGroupId           String?
+  teacherAssignmentMode        String?
+  sourceAnchor                 String?  // JSON 物件
+  legalTimeWindow              String?  // JSON 陣列
+  timePolicy                   String?
+  anchorPriority               String?
+  classSubjectSynchronization  String?
 }
 
 // 5. 課程需求與配課表 

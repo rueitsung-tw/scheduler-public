@@ -576,6 +576,9 @@ class SchedulePhase2Engine:
         else:
             print("  [SKIP] [Priority Placeholder] build_level=core，跳過 quality-only 約束")
 
+        if hasattr(self.model, "v2_soft_penalty_terms"):
+            self.penalty_vars.extend(self.model.v2_soft_penalty_terms)
+
         # ==========================================
         # ? 目標函數：最小化總扣分 (含負載平衡 + Soft Quota)
         # ==========================================

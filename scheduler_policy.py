@@ -81,6 +81,12 @@ WEIGHT_REGISTRY: Dict[str, int] = {
     "specialty_room_non_preferred_grade": 3000,
         # 專科教室非偏好年級使用懲罰
 
+    "partial_pullout_anchor_miss": 2500,
+        # v2 partial pullout 定錨偏離基礎懲罰
+
+    "partial_pullout_anchor_distance": 300,
+        # v2 partial pullout 定錨偏離同日節次距離懲罰 (每節 300)
+
     # --- medium_high (800-2500) ---
     "swimming_consecutive": 1200,
         # 游泳連堂偏好
@@ -279,6 +285,9 @@ class SolvePolicy:
         "pe_avoid_period_45",
         # [2026-07-21] 通用時段規則引擎
         "slot_rule_soft_avoid",
+        # [2026-09-02] v2 partial pullout 定錨偏好
+        "partial_pullout_anchor_miss",
+        "partial_pullout_anchor_distance",
     ])
 
     # --- Helper methods ---
