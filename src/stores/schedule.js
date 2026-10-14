@@ -7,6 +7,7 @@ import {
   createDefaultGradeTimeRulesSettings,
   normalizeGradeTimeRulesSettings,
 } from '../utils/gradeTimeRules'
+import { normalizeTeacherClassProgressAiSettings } from '../utils/teacherClassProgressSettings.js'
 import {
   canApplyPreallocationConflictPlan,
   applyClassResolution,
@@ -295,6 +296,11 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   const specialCourses = ref([]);
   const classrooms = ref([]);
   const preallocEvents = ref([]);
+  const lastTeacherClassProgressDiagnostics = ref(null);
+
+  const setTeacherClassProgressDiagnostics = (diag) => {
+    lastTeacherClassProgressDiagnostics.value = diag ? JSON.parse(JSON.stringify(diag)) : null;
+  };
 
   // 🚀 補上這段：宣告 AI 硬約束設定
   const aiSettings = ref({
@@ -317,6 +323,13 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
         excludeSubjectNames: ['本土語言', '社會', '體育', '健康'],
       },
       peAvoidPeriod45: { enabled: true, weight: 'lowest' },
+      teacherClassProgress: {
+        enabled: false,
+        incompleteRoundWeight: 10,
+        waitingWeight: 5,
+        visitPatternWeight: 5,
+        teachers: [],
+      },
     }
   });
 
@@ -878,7 +891,15 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       // 🚀 修復：ai_settings 位於 data.schoolInfo.ai_settings（後端 /api/schedule 回傳格式）
       if (data.schoolInfo && data.schoolInfo.ai_settings) {
         try {
-          aiSettings.value = { ...aiSettings.value, ...data.schoolInfo.ai_settings };
+          const loadedAiSettings = normalizeTeacherClassProgressAiSettings(data.schoolInfo.ai_settings);
+          aiSettings.value = normalizeTeacherClassProgressAiSettings({
+            ...aiSettings.value,
+            ...loadedAiSettings,
+            qualityRules: {
+              ...(aiSettings.value.qualityRules || {}),
+              ...(loadedAiSettings.qualityRules || {}),
+            },
+          });
           // 這條規則已固定生效，避免舊資料把它帶回 false
           aiSettings.value.grade12AfternoonOff = true;
 
@@ -1095,7 +1116,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       specialCourses: specialCourses.value,
       classrooms: classrooms.value,
       standardDomainSettings: standardDomainSettings.value,
-      aiSettings: aiSettings.value,
+      aiSettings: normalizeTeacherClassProgressAiSettings(aiSettings.value),
       preallocEvents: preallocEvents.value,
     };
 
@@ -1640,6 +1661,13 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             try { resultObj = JSON.parse(resultObj); } catch { resultObj = {}; }
           }
 
+          if (resultObj?.teacherClassProgress || resultObj?.teacher_class_progress || resultObj?.penaltyBreakdown) {
+            setTeacherClassProgressDiagnostics({
+              penaltyBreakdown: resultObj.penaltyBreakdown || null,
+              teacherClassProgress: resultObj.teacherClassProgress || resultObj.teacher_class_progress || null,
+            });
+          }
+
           // 🆕 Movable Locks Result Processing
           if (resultObj?.requiresUserReview === true && resultObj?.movedLockedLessons?.length > 0) {
             movableLocksReviewData.value = {
@@ -1754,6 +1782,9 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       // 🆕 注入 movableLocksPolicy 到 top-level payload
       const finalPayload = {
         ...payload,
+        aiSettings: normalizeTeacherClassProgressAiSettings(
+          payload?.aiSettings ?? aiSettings.value,
+        ),
         movableLocksPolicy: movableLocksPolicy.value
       };
 
@@ -2150,5 +2181,8 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     // 🆕 混合配課 Pinia 狀態
     pendingMixedPlans,
     hasPendingMixedPlans,
+    // 🆕 跨班巡迴進度診斷資訊
+    lastTeacherClassProgressDiagnostics,
+    setTeacherClassProgressDiagnostics,
   }
 });

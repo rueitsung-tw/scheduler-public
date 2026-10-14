@@ -14,6 +14,7 @@ repair_agent.py — Phase 2 修補代理 (Repair Agent)
 """
 
 import terminal_sanitizer
+import argparse
 import json
 import math
 import random
@@ -22,6 +23,11 @@ import time
 import sys
 import re
 from collections import defaultdict
+from dataclasses import dataclass, field
+from constraints.teacher_class_progress import (
+    build_teacher_class_progress_weekly_activities,
+    evaluate_teacher_class_progress_round_robin,
+)
 
 
 def canonical_subject(subject: str) -> str:
@@ -325,6 +331,55 @@ class RepairAgent:
         總分越低 = 課表品質越好。
         """
         penalty = 0
+
+        # Teacher Class Progress Round-Robin penalty
+        tcp_settings = (self.payload.get("aiSettings") or {}).get("qualityRules", {}).get("teacherClassProgress", {})
+        if tcp_settings.get("enabled", False):
+            rep_schedule = {}
+
+            def add_tcp_activity(class_name, period_idx, teacher_name, subject_name, week):
+                key = (class_name, period_idx, teacher_name, subject_name)
+                week_tag = self._normalize_week_tag(week)
+                previous = rep_schedule.get(key)
+                if previous is not None:
+                    previous_week = self._normalize_week_tag(previous.get("week"))
+                    if previous_week != week_tag:
+                        week_tag = "both"
+                    else:
+                        week_tag = previous_week
+                rep_schedule[key] = {"week": week_tag, "presence": 1}
+
+            for (d, p, cls), slot in self.schedule.items():
+                if slot:
+                    period_idx = d * self.periods_per_day + p + 1
+                    add_tcp_activity(
+                        cls,
+                        period_idx,
+                        slot.get("teacherName"),
+                        slot.get("subject"),
+                        slot.get("week"),
+                    )
+
+            for entry in self.week_specific_entries:
+                try:
+                    day = int(entry.get("day", 0)) - 1
+                    period = int(entry.get("period", 0)) - 1
+                except (TypeError, ValueError):
+                    continue
+                if day < 0 or day >= self.days or period < 0 or period >= self.periods_per_day:
+                    continue
+                add_tcp_activity(
+                    entry.get("className", ""),
+                    day * self.periods_per_day + period + 1,
+                    entry.get("teacherName"),
+                    entry.get("subject"),
+                    entry.get("week"),
+                )
+
+            acts = build_teacher_class_progress_weekly_activities(rep_schedule, (self.payload.get("aiSettings") or {}).get("qualityRules", {}), days=self.days, periods_per_day=self.periods_per_day, period_base="one")
+            tcp_res = evaluate_teacher_class_progress_round_robin(acts, (self.payload.get("aiSettings") or {}).get("qualityRules", {}))
+            penalty += tcp_res["total_penalty"]
+            self.teacher_class_progress_evaluation = tcp_res
 
         # =========================================================================
         # 1. 教師疲勞度：同一位老師連續上 4 堂課 (+100 分/次)
@@ -1115,6 +1170,27 @@ class RepairAgent:
         final_output["postRepairValidation"] = dict(getattr(self, "post_repair_hard_snapshot", {}) or {})
         final_output["repairAttemptValidation"] = dict(getattr(self, "repair_attempt_validation", {}) or {})
 
+        initial_tcp = getattr(self, "initial_tcp_evaluation", {}) or {}
+        final_tcp = getattr(self, "teacher_class_progress_evaluation", {}) or {}
+        final_output["teacherClassProgress"] = {
+            "initial": {
+                "totalPenalty": initial_tcp.get("total_penalty", 0),
+                "components": initial_tcp.get("components", {}),
+                "rounds": initial_tcp.get("rounds", []),
+                "violations": initial_tcp.get("violations", []),
+            },
+            "final": {
+                "totalPenalty": final_tcp.get("total_penalty", 0),
+                "components": final_tcp.get("components", {}),
+                "rounds": final_tcp.get("rounds", []),
+                "violations": final_tcp.get("violations", []),
+            },
+            "repairAccepted": repair_accepted,
+            "hardSnapshotRegressed": not repair_accepted and bool(getattr(self, "repair_rejected_reasons", [])),
+            "globalPenaltyInitial": getattr(self, "initial_global_penalty", 0),
+            "globalPenaltyFinal": getattr(self, "final_global_penalty", 0),
+        }
+
 
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(final_output, f, ensure_ascii=False, indent=2)
@@ -1123,19 +1199,105 @@ class RepairAgent:
         return final_output
 
 
+@dataclass
+class RepairAcceptanceDecision:
+    """Pure pre/post repair gate decision (no side effects, no randomness)."""
+
+    accepted: bool
+    reasons: list
+    revert_penalty_to_initial: bool = False
+
+
+def evaluate_repair_acceptance(
+    initial_penalty,
+    final_penalty,
+    pre_hard,
+    post_hard,
+    pre_subject_totals,
+    post_subject_totals,
+):
+    """
+    Pure acceptance-gate decision for the repair agent.
+
+    Rejection rules (checked in order):
+    1. Any hard validation count increases: "<key>: <pre> -> <post>"
+    2. Any class subject totals changed:
+       "subject_totals changed for <cls>: <pre> -> <post>"
+    3. No global improvement: final_penalty >= initial_penalty
+       -> "repair_no_benefit" (final penalty is reported as the initial one)
+
+    A decision is accepted only when hard counts do not increase, subject
+    totals are unchanged, and the total penalty strictly decreases.
+    """
+    pre_hard = dict(pre_hard or {})
+    post_hard = dict(post_hard or {})
+    pre_totals = dict(pre_subject_totals or {})
+    post_totals = dict(post_subject_totals or {})
+
+    reasons = []
+    for key in sorted(pre_hard):
+        pre_val = pre_hard[key]
+        post_val = post_hard.get(key, 0)
+        if post_val > pre_val:
+            reasons.append(f"{key}: {pre_val} -> {post_val}")
+    for cls in sorted(set(pre_totals) | set(post_totals)):
+        pre_cls = pre_totals.get(cls, {})
+        post_cls = post_totals.get(cls, {})
+        if pre_cls != post_cls:
+            reasons.append(f"subject_totals changed for {cls}: {pre_cls} -> {post_cls}")
+    if reasons:
+        return RepairAcceptanceDecision(
+            accepted=False, reasons=reasons, revert_penalty_to_initial=False
+        )
+
+    if final_penalty >= initial_penalty:
+        return RepairAcceptanceDecision(
+            accepted=False, reasons=["repair_no_benefit"], revert_penalty_to_initial=True
+        )
+
+    return RepairAcceptanceDecision(accepted=True, reasons=[], revert_penalty_to_initial=False)
+
+
+def _build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Repair Agent: simulated annealing post-processing engine",
+        usage="python repair_agent.py <payload.json> <phase1_output.json> <output_path> [--max-iterations N] [--time-limit S]",
+    )
+    parser.add_argument("payload_path", help="前端原始 payload JSON 路徑")
+    parser.add_argument("phase1_output_path", help="Phase 1 輸出 JSON 路徑")
+    parser.add_argument("output_path", help="Repair 結果輸出 JSON 路徑")
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=30000,
+        help="模擬退火最大迭代次數（預設 30000；0 = 跳過退火，僅執行 gate）",
+    )
+    parser.add_argument(
+        "--time-limit",
+        type=int,
+        default=600,
+        help="模擬退火時間上限（秒，預設 600）",
+    )
+    return parser
+
+
 def main():
     """
     命令列入口
     用法：python repair_agent.py <payload.json> <phase1_output.json> <output_path>
+          [--max-iterations N] [--time-limit S]
     """
-    if len(sys.argv) < 4:
-        print("用法: python repair_agent.py <payload.json> <phase1_output.json> <output_path>")
-        print("範例: python repair_agent.py input_abc123.json output_abc123.json output_final.json")
-        sys.exit(1)
+    parser = _build_arg_parser()
+    args = parser.parse_args()
 
-    payload_path = sys.argv[1]
-    phase1_output_path = sys.argv[2]
-    output_path = sys.argv[3]
+    if args.max_iterations < 0:
+        parser.error("--max-iterations must be a non-negative integer")
+    if args.time_limit <= 0:
+        parser.error("--time-limit must be a positive integer")
+
+    payload_path = args.payload_path
+    phase1_output_path = args.phase1_output_path
+    output_path = args.output_path
 
     # 建立 Repair Agent
     agent = RepairAgent(payload_path, phase1_output_path)
@@ -1152,6 +1314,8 @@ def main():
 
     # 計算初始 penalty
     initial_penalty = agent.calculate_penalty()
+    agent.initial_global_penalty = initial_penalty
+    agent.initial_tcp_evaluation = copy.deepcopy(getattr(agent, "teacher_class_progress_evaluation", {}) or {})
     print(f"\n[INFO] Phase 1 初始 penalty: {initial_penalty}")
 
     # 備份 pre-repair schedule（用於回退）
@@ -1161,8 +1325,8 @@ def main():
     agent.simulated_annealing(
         initial_T=10000.0,
         cooling_rate=0.995,
-        max_iterations=30000,
-        time_limit=600  # 10 分鐘上限
+        max_iterations=args.max_iterations,
+        time_limit=args.time_limit
     )
 
     # ==========================================================================
@@ -1175,59 +1339,52 @@ def main():
     for key, val in agent.post_repair_hard_snapshot.items():
         print(f"  [SNAPSHOT] {key}: {val}")
 
-    # 逐項比對 pre vs post
-    gate_failed = False
+    # 逐項比對 pre vs post（診斷輸出）
     for key in agent.pre_repair_hard_snapshot:
         pre_val = agent.pre_repair_hard_snapshot[key]
         post_val = agent.post_repair_hard_snapshot.get(key, 0)
         if post_val > pre_val:
             print(f"  [REJECT] {key}: {pre_val} -> {post_val} (INCREASED!)")
-            agent.repair_rejected_reasons.append(
-                f"{key}: {pre_val} -> {post_val}"
-            )
-            gate_failed = True
         else:
             print(f"  [OK]     {key}: {pre_val} -> {post_val}")
 
     # ==========================================================================
-    # [Task 05] Sub-task 05.4.D: Subject Totals 不變檢查
+    # [Task 05] Acceptance gate 決策（純函數 evaluate_repair_acceptance）
+    # - 任何 hard count 增加 -> 拒絕
+    # - 任何班級 subject totals 改變 -> 拒絕
+    # - final penalty >= initial penalty -> 拒絕 (repair_no_benefit)
     # ==========================================================================
+    final_penalty = agent.calculate_penalty()
     post_subject_totals = agent._compute_class_subject_totals()
-    for cls in agent.class_names:
-        pre_totals = agent.initial_subject_totals.get(cls, {})
-        post_totals = post_subject_totals.get(cls, {})
-        if pre_totals != post_totals:
-            reason = f"subject_totals changed for {cls}: {pre_totals} -> {post_totals}"
-            print(f"  [REJECT] {reason}")
-            agent.repair_rejected_reasons.append(reason)
-            gate_failed = True
+    decision = evaluate_repair_acceptance(
+        initial_penalty=initial_penalty,
+        final_penalty=final_penalty,
+        pre_hard=agent.pre_repair_hard_snapshot,
+        post_hard=agent.post_repair_hard_snapshot,
+        pre_subject_totals=agent.initial_subject_totals,
+        post_subject_totals=post_subject_totals,
+    )
 
     # ==========================================================================
     # [Task 05] Sub-task 05.2: 若 Gate 失敗，回退到 pre-repair schedule
     # ==========================================================================
-    if gate_failed:
+    if not decision.accepted:
+        for reason in decision.reasons:
+            print(f"  [REJECT] {reason}")
         print("\n  [GATE FAILED] Repair rejected! Rolling back to pre-repair schedule.")
         agent.repair_attempt_validation = copy.deepcopy(agent.post_repair_hard_snapshot)
         agent.schedule = pre_repair_schedule_backup
         agent.post_repair_hard_snapshot = copy.deepcopy(agent.pre_repair_hard_snapshot)
         agent.repair_accepted = False
+        agent.repair_rejected_reasons.extend(decision.reasons)
+        # Every rejection restores the same schedule, regardless of its reason.
+        # Report that schedule's score, never the rejected candidate's score.
+        final_penalty = initial_penalty
     else:
         agent.repair_accepted = True
         print("\n  [GATE PASSED] Repair accepted.")
 
-    # ==========================================================================
-    # [Task 05] Sub-task 05.5 (partial): 若 repair 沒有安全收益，拒絕
-    # ==========================================================================
-    final_penalty = agent.calculate_penalty()
-    if not gate_failed and final_penalty >= initial_penalty:
-        print(f"\n  [NO BENEFIT] Repair penalty {final_penalty} >= initial {initial_penalty}, rejecting.")
-        agent.repair_attempt_validation = copy.deepcopy(agent.post_repair_hard_snapshot)
-        agent.schedule = pre_repair_schedule_backup
-        agent.post_repair_hard_snapshot = copy.deepcopy(agent.pre_repair_hard_snapshot)
-        agent.repair_accepted = False
-        agent.repair_rejected_reasons.append("repair_no_benefit")
-        final_penalty = initial_penalty
-
+    agent.final_global_penalty = final_penalty
     print(f"\n[INFO] 優化後 penalty: {final_penalty}")
     if initial_penalty > 0:
         improvement = initial_penalty - final_penalty

@@ -475,6 +475,103 @@
             <span class="sub">避開午休前後的高溫與消化時段排體育課。</span>
           </div>
         </div>
+
+        <!-- 跨班巡迴進度一致性 (Teacher Class Progress) -->
+        <div class="tcp-settings-block" v-if="scheduleStore.aiSettings.qualityRules?.teacherClassProgress" style="margin-top: 16px; border-top: 1px solid #e5e7eb; padding-top: 16px;">
+          <div class="control-item">
+            <label class="switch">
+              <input type="checkbox" v-model="scheduleStore.aiSettings.qualityRules.teacherClassProgress.enabled" data-test="tcp-enabled-toggle" />
+              <span class="slider round"></span>
+            </label>
+            <div class="label-box">
+              <span class="title">跨班巡迴進度一致性 (Teacher Class Progress)</span>
+              <span class="sub">使同教師跨班授課維持 Round-Robin 巡迴順序與進度平衡。</span>
+            </div>
+          </div>
+
+          <div v-if="scheduleStore.aiSettings.qualityRules.teacherClassProgress.enabled" class="tcp-details-panel" style="margin-top: 12px; padding: 12px; background: #f9fafb; border-radius: 8px;">
+            <div class="weights-grid" style="display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap;">
+              <div>
+                <label style="font-size: 12px; font-weight: 600; display: block;">未完成輪次懲罰權重 (incompleteRoundWeight)</label>
+                <input type="number" v-model.number="scheduleStore.aiSettings.qualityRules.teacherClassProgress.incompleteRoundWeight" min="0" data-test="tcp-incomplete-weight" style="width: 100%; padding: 4px; border: 1px solid #cbd5e1; border-radius: 4px;" />
+              </div>
+              <div>
+                <label style="font-size: 12px; font-weight: 600; display: block;">等待跨班進度權重 (waitingWeight)</label>
+                <input type="number" v-model.number="scheduleStore.aiSettings.qualityRules.teacherClassProgress.waitingWeight" min="0" data-test="tcp-waiting-weight" style="width: 100%; padding: 4px; border: 1px solid #cbd5e1; border-radius: 4px;" />
+              </div>
+              <div>
+                <label style="font-size: 12px; font-weight: 600; display: block;">巡迴模式權重 (visitPatternWeight)</label>
+                <input type="number" v-model.number="scheduleStore.aiSettings.qualityRules.teacherClassProgress.visitPatternWeight" min="0" data-test="tcp-visit-weight" style="width: 100%; padding: 4px; border: 1px solid #cbd5e1; border-radius: 4px;" />
+              </div>
+            </div>
+
+            <!-- 教師巡迴設定列表 -->
+            <div class="tcp-teachers-section">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h4 style="margin: 0; font-size: 14px;">巡迴教師設定</h4>
+                <button type="button" @click="addTcpTeacher" data-test="add-tcp-teacher-btn" class="save-btn" style="font-size: 12px; padding: 4px 8px;">
+                  + 新增巡迴教師
+                </button>
+              </div>
+
+              <div v-for="(tItem, tIdx) in scheduleStore.aiSettings.qualityRules.teacherClassProgress.teachers" :key="tIdx" class="tcp-teacher-card" style="border: 1px solid #e2e8f0; padding: 10px; margin-bottom: 8px; border-radius: 6px; background: #fff;">
+                <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+                  <label style="font-size: 12px; font-weight: 600;">教師：</label>
+                  <select v-model="tItem.teacherId" data-test="tcp-teacher-select" style="padding: 4px; border: 1px solid #cbd5e1; border-radius: 4px;">
+                    <option value="">-- 請選擇教師 --</option>
+                    <option v-for="t in scheduleStore.teachers" :key="t.id || t.name" :value="t.name || t.id">
+                      {{ t.name }}
+                    </option>
+                  </select>
+                  <button type="button" @click="removeTcpTeacher(tIdx)" data-test="remove-tcp-teacher-btn" style="color: #dc2626; border: none; background: none; cursor: pointer; font-size: 12px;">
+                    🗑️ 刪除教師
+                  </button>
+                </div>
+
+                <div style="margin-bottom: 8px;">
+                  <label style="font-size: 12px; font-weight: 600; display: block; margin-bottom: 4px;">巡迴班級順序 (classOrder)：</label>
+                  <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    <label v-for="c in scheduleStore.classes" :key="c.id || c.name" style="font-size: 12px; margin-right: 8px;">
+                      <input type="checkbox" :value="c.name || c.id" :checked="(tItem.classOrder || []).includes(c.name || c.id)" @change="toggleTcpClassOrder(tItem, c.name || c.id, $event.target.checked)" />
+                      {{ c.name }}
+                    </label>
+                  </div>
+                  <div v-if="tItem.classOrder?.length" style="margin-top: 6px;">
+                    <div v-for="(classId, classIdx) in tItem.classOrder" :key="`${classId}-${classIdx}`" style="display: flex; gap: 6px; align-items: center; margin-top: 3px; font-size: 12px;">
+                      <span>{{ classIdx + 1 }}. {{ classId }}</span>
+                      <button type="button" :data-test="`tcp-class-move-up-${tIdx}-${classIdx}`" :disabled="classIdx === 0" @click="moveTcpClassOrder(tItem, classIdx, -1)">↑</button>
+                      <button type="button" :data-test="`tcp-class-move-down-${tIdx}-${classIdx}`" :disabled="classIdx === tItem.classOrder.length - 1" @click="moveTcpClassOrder(tItem, classIdx, 1)">↓</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="tcp-weekly-lessons">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="font-size: 12px; font-weight: 600;">每週授課節數設定 (weeklyLessons)：</span>
+                    <button type="button" @click="addTcpWeeklyLesson(tItem)" data-test="add-tcp-lesson-btn" style="font-size: 11px; padding: 2px 6px;">+ 新增課程</button>
+                  </div>
+                  <div v-for="(lItem, lIdx) in tItem.weeklyLessons" :key="lIdx" style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+                    <select v-model="lItem.classId" style="font-size: 12px; padding: 2px; border: 1px solid #cbd5e1; border-radius: 4px;">
+                      <option value="">班級</option>
+                      <option v-for="c in scheduleStore.classes" :key="c.id || c.name" :value="c.name || c.id">{{ c.name }}</option>
+                    </select>
+                    <input type="text" v-model="lItem.subject" placeholder="科目" style="font-size: 12px; width: 80px; padding: 2px; border: 1px solid #cbd5e1; border-radius: 4px;" />
+                    <input type="number" v-model.number="lItem.lessons" min="1" placeholder="節數" style="font-size: 12px; width: 50px; padding: 2px; border: 1px solid #cbd5e1; border-radius: 4px;" />
+                    <select v-model.number="lItem.week" style="font-size: 12px; padding: 2px; border: 1px solid #cbd5e1; border-radius: 4px;">
+                      <option :value="0">每週（0）</option>
+                      <option :value="1">單週（1）</option>
+                      <option :value="2">雙週（2）</option>
+                    </select>
+                    <button type="button" @click="removeTcpWeeklyLesson(tItem, lIdx)" style="color: #dc2626; border: none; background: none; cursor: pointer; font-size: 11px;">✕</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p v-if="tcpValidationIssues.length" data-test="tcp-validation-errors" class="error-message">
+              {{ tcpValidationIssues.join('；') }}
+            </p>
+          </div>
+        </div>
       </div>
 
       <!-- 年級時段與共備規則單一整合介面 -->
@@ -687,7 +784,7 @@
         </div>
       </div>
 
-      <button @click="saveSettings" class="main-save-btn">儲存所有設定（含共備規則與排課演算法參數）</button>
+      <button @click="saveSettings" data-test="tcp-save-settings" class="main-save-btn">儲存所有設定（含共備規則與排課演算法參數）</button>
     </div>
   </div>
 </template>
@@ -707,14 +804,83 @@ import {
 import { parseNativeLanguagePreallocationExcel } from '../utils/nativeLanguagePreallocationExcelImport.js'
 import { downloadNativeLanguagePreallocationExcelTemplate } from '../utils/nativeLanguagePreallocationExcelTemplate.js'
 import { canApplyPreallocationConflictPlan } from '../utils/preallocationConflictResolution.js'
+import { validateTeacherClassProgress } from '../utils/teacherClassProgressSettings.js'
 
 const aiStore = useAiStore()
 const scheduleStore = useScheduleStore()
+const tcpValidationIssues = ref([])
 
 function onUpdateGradeTimeRulesSettings(newSettings) {
   scheduleStore.resetGradeTimeRuleWarningConfirmation()
   scheduleStore.schoolInfo.gradeTimeRulesSettings = newSettings
   scheduleStore.markScheduleDirty()
+}
+
+const addTcpTeacher = () => {
+  if (!scheduleStore.aiSettings.qualityRules) {
+    scheduleStore.aiSettings.qualityRules = {}
+  }
+  if (!scheduleStore.aiSettings.qualityRules.teacherClassProgress) {
+    scheduleStore.aiSettings.qualityRules.teacherClassProgress = {
+      enabled: true,
+      incompleteRoundWeight: 10,
+      waitingWeight: 5,
+      visitPatternWeight: 5,
+      teachers: [],
+    }
+  }
+  if (!Array.isArray(scheduleStore.aiSettings.qualityRules.teacherClassProgress.teachers)) {
+    scheduleStore.aiSettings.qualityRules.teacherClassProgress.teachers = []
+  }
+  scheduleStore.aiSettings.qualityRules.teacherClassProgress.teachers.push({
+    teacherId: '',
+    classOrder: [],
+    weeklyLessons: [],
+  })
+}
+
+const removeTcpTeacher = (index) => {
+  if (scheduleStore.aiSettings.qualityRules?.teacherClassProgress?.teachers) {
+    scheduleStore.aiSettings.qualityRules.teacherClassProgress.teachers.splice(index, 1)
+  }
+}
+
+const toggleTcpClassOrder = (tItem, classId, isChecked) => {
+  if (!Array.isArray(tItem.classOrder)) {
+    tItem.classOrder = []
+  }
+  if (isChecked) {
+    if (!tItem.classOrder.includes(classId)) {
+      tItem.classOrder.push(classId)
+    }
+  } else {
+    tItem.classOrder = tItem.classOrder.filter((c) => c !== classId)
+  }
+}
+
+const moveTcpClassOrder = (tItem, index, delta) => {
+  const nextIndex = index + delta
+  if (!Array.isArray(tItem.classOrder) || nextIndex < 0 || nextIndex >= tItem.classOrder.length) return
+  const [classId] = tItem.classOrder.splice(index, 1)
+  tItem.classOrder.splice(nextIndex, 0, classId)
+}
+
+const addTcpWeeklyLesson = (tItem) => {
+  if (!Array.isArray(tItem.weeklyLessons)) {
+    tItem.weeklyLessons = []
+  }
+  tItem.weeklyLessons.push({
+    classId: '',
+    subject: '',
+    lessons: 1,
+    week: 0,
+  })
+}
+
+const removeTcpWeeklyLesson = (tItem, lIdx) => {
+  if (Array.isArray(tItem.weeklyLessons)) {
+    tItem.weeklyLessons.splice(lIdx, 1)
+  }
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:3000/api`
@@ -1083,7 +1249,19 @@ async function saveAiSettings() {
   }
 }
 
+function validateTcpBeforeSave() {
+  tcpValidationIssues.value = validateTeacherClassProgress(
+    scheduleStore.aiSettings.qualityRules?.teacherClassProgress,
+    {
+      teacherIds: scheduleStore.teachers.map((teacher) => teacher.name || teacher.id),
+      classIds: scheduleStore.classes.map((classItem) => classItem.name || classItem.id),
+    },
+  )
+  return tcpValidationIssues.value.length === 0
+}
+
 async function saveSettings() {
+  if (!validateTcpBeforeSave()) return false
   const ok = await scheduleStore.syncToCloud()
   if (ok) {
     alert('演算法硬約束設定已儲存。')
@@ -2142,4 +2320,3 @@ input:checked + .slider:before {
   cursor: not-allowed;
 }
 </style>
-

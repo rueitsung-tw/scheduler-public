@@ -22,6 +22,7 @@ import { validateRepairHardConstraints } from './src/utils/repairHardConstraints
 import { buildAiTuningPromptBundle } from './src/services/aiTuningPrompt.js';
 import { buildInfeasibleAnalysisBundle } from './src/services/aiInfeasibleAnalysisBundle.js';
 import { buildAiInfeasibleAnalysisPrompt, validateAiInfeasibleAnalysisResponse } from './src/services/aiInfeasibleAnalysisPrompt.js';
+import { normalizeTeacherClassProgressAiSettings, validateTeacherClassProgress } from './src/utils/teacherClassProgressSettings.js';
 import {
     buildAiErrorDetails,
     getReportCandidateIds,
@@ -302,10 +303,25 @@ app.post('/api/save-all', async (req, res) => {
             return res.status(400).json({ error: '缺少必要資料 (teachers 或 classes)' });
         }
 
+        // TCP: 先正規化，再以本次請求的教師／班級 identity 驗證，最後持久化正規化結果
+        let normalizedAiSettings = aiSettings;
+        if (aiSettings) {
+            normalizedAiSettings = normalizeTeacherClassProgressAiSettings(aiSettings);
+            const tcpTeacherIds = teachers.map(t => String(t.name ?? '').trim()).filter(Boolean);
+            const tcpClassIds = classes.map(c => String(c.name ?? '').trim()).filter(Boolean);
+            const tcpIssues = validateTeacherClassProgress(
+                normalizedAiSettings.qualityRules.teacherClassProgress,
+                { teacherIds: tcpTeacherIds, classIds: tcpClassIds }
+            );
+            if (tcpIssues.length > 0) {
+                return res.status(400).json({ error: 'INVALID_TEACHER_CLASS_PROGRESS', issues: tcpIssues });
+            }
+        }
+
         const prepared = prepareGradeTimeRulesPersistence({
             gradeTimeRulesSettings: schoolInfo?.gradeTimeRulesSettings,
             schoolInfo,
-            aiSettings,
+            aiSettings: normalizedAiSettings,
         });
 
         const blockingIssue = (prepared.migrationIssues || []).find(i => i.severity === 'blocking');
@@ -615,14 +631,23 @@ app.get('/api/schedule', async (req, res) => {
         const persistedAiSettings = systemSetting?.ai_settings
             ? JSON.parse(systemSetting.ai_settings || '{}')
             : {};
-        const publicAiSettings = cleanLegacyCoPlanningKeys(persistedAiSettings);
+        // TCP: 讀出時先做 canonical normalization，確保回應永遠是正規化結果
+        const normalizedPersistedAiSettings = normalizeTeacherClassProgressAiSettings(persistedAiSettings);
+        const publicAiSettings = cleanLegacyCoPlanningKeys(normalizedPersistedAiSettings);
         const resolved = resolveGradeTimeRulesServerLoad({
             gradeTimeRulesSettings: systemSetting?.gradeTimeRulesSettings,
             aiSettings: persistedAiSettings,
         });
         const gradeTimeRulesSettings = resolved.gradeTimeRulesSettings;
 
-        if (resolved.source === 'migrated_legacy' && systemSetting) {
+        // 沿用既有 read-time migration 慣例：僅當正規化實際改動 TCP 分支（或 legacy 遷移）才寫回
+        const tcpNormalizationChanged = JSON.stringify(
+            normalizedPersistedAiSettings.qualityRules?.teacherClassProgress
+        ) !== JSON.stringify(
+            persistedAiSettings.qualityRules?.teacherClassProgress
+        );
+
+        if ((resolved.source === 'migrated_legacy' || tcpNormalizationChanged) && systemSetting) {
             await prisma.systemSetting.update({
                 where: { id: systemSetting.id },
                 data: {
@@ -3901,6 +3926,7 @@ async function runSchedulingWorker(jobId, payload) {
                         MODEL_INVALID: '模型構建錯誤',
                         INVALID_INPUT: '輸入資料驗證失敗',
                         INVALID_GRADE_TIME_RULE_CONFIGURATION: '年級時間規則設定無效，請檢查共備時段或彈性節次配置',
+                        MODEL_EVALUATOR_MISMATCH: '求解模型與評測器結果不一致，請檢查教師班級進度診斷',
                     };
 
                     const rawErrMsg = (typeof outputJson?.error === 'string' && outputJson.error.trim())
@@ -3971,7 +3997,8 @@ async function runSchedulingWorker(jobId, payload) {
                         'UNKNOWN_TIMEOUT',
                         'TIMEOUT_NO_SOLUTION',
                         'MODEL_INVALID',
-                        'INVALID_GRADE_TIME_RULE_CONFIGURATION'
+                        'INVALID_GRADE_TIME_RULE_CONFIGURATION',
+                        'MODEL_EVALUATOR_MISMATCH'
                     ];
                     if (validStatuses.includes(effectiveSolverStatus)) {
                         failedResult.status = effectiveSolverStatus;
@@ -4037,7 +4064,24 @@ async function runSchedulingWorker(jobId, payload) {
 app.post('/api/schedule', async (req, res) => {
     req.setTimeout(1800000); // 30 分鐘超時
     try {
-        const payload = req.body;
+        const payload = req.body || {};
+        // TCP: 先正規化，再以本 payload 的教師／班級 identity 驗證，然後才建立 job
+        if (payload.aiSettings) {
+            payload.aiSettings = normalizeTeacherClassProgressAiSettings(payload.aiSettings);
+            const tcpTeacherIds = Array.isArray(payload.teachers)
+                ? payload.teachers.map(t => String(t?.name ?? '').trim()).filter(Boolean)
+                : [];
+            const tcpClassIds = Array.isArray(payload.classes)
+                ? payload.classes.map(c => String(c?.name ?? '').trim()).filter(Boolean)
+                : [];
+            const tcpIssues = validateTeacherClassProgress(
+                payload.aiSettings.qualityRules.teacherClassProgress,
+                { teacherIds: tcpTeacherIds, classIds: tcpClassIds }
+            );
+            if (tcpIssues.length > 0) {
+                return res.status(400).json({ error: 'INVALID_TEACHER_CLASS_PROGRESS', issues: tcpIssues });
+            }
+        }
         const job = await prisma.scheduleJob.create({
             data: { payload: JSON.stringify(payload) }
         });

@@ -6,6 +6,10 @@ from collections import defaultdict
 
 # [Task 02] Import WEIGHT_REGISTRY to eliminate hard-coded weights
 from scheduler_policy import WEIGHT_REGISTRY, get_active_policy, SolveMode
+from constraints.teacher_class_progress import (
+    add_teacher_class_progress_round_robin_penalties,
+    build_teacher_class_progress_weekly_activities,
+)
 
 
 class SchedulePhase2Engine:
@@ -568,6 +572,7 @@ class SchedulePhase2Engine:
         # ==========================================
         if build_level == "quality":
             self._build_priority_placeholder_objective()
+            self._build_teacher_class_progress()
             self.penalty_vars.extend(self._build_soft_slot_rule_penalty())
             self.penalty_vars.extend(self._build_teacher_daily_load_smoothing())
             self.penalty_vars.extend(self._build_grade_consistency_penalty())
@@ -798,6 +803,19 @@ class SchedulePhase2Engine:
 
         print(f"  [Task 08] Priority placeholder reservation model: "
               f"{placeholder_penalty_count} placeholder(s), {total_reservation_vars} reservation vars, weight={priority_weight}")
+
+    def _build_teacher_class_progress(self):
+        # Hook teacherClassProgress round-robin penalties
+        tcp_settings = (self.ai_settings or {}).get("qualityRules", {}).get("teacherClassProgress", {})
+        if tcp_settings.get("enabled", False):
+            weekly_acts = build_teacher_class_progress_weekly_activities(
+                self.schedule, (self.ai_settings or {}).get("qualityRules", {}), days=self.days, periods_per_day=self.periods_per_day
+            )
+            tcp_artifact = add_teacher_class_progress_round_robin_penalties(
+                self.model, weekly_acts, (self.ai_settings or {}).get("qualityRules", {}), days=self.days, periods_per_day=self.periods_per_day
+            )
+            self.tcp_artifact = tcp_artifact
+            self.penalty_vars.extend(tcp_artifact.get("penalty_entries", []))
 
     @staticmethod
     def _penalty_expr(penalty_entry):

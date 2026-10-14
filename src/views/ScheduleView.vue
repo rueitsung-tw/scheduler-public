@@ -193,6 +193,64 @@
         <p><strong>總運行時間：</strong>{{ dataStore.formatElapsed(dataStore.engineElapsedSeconds) }}</p>
         <p v-if="dataStore.engineFinishedAt"><strong>完成時間：</strong>{{ new Date(dataStore.engineFinishedAt).toLocaleString('zh-TW') }}</p>
       </div>
+
+      <!-- 🆕 跨班巡迴進度 (TCP) 診斷面板 -->
+      <div class="tcp-diagnostics-panel" data-test="tcp-diagnostics-panel" style="margin-top: 16px; border: 1px solid #cbd5e1; padding: 12px; border-radius: 8px; background: #f8fafc;">
+        <h4 style="margin: 0 0 8px; font-size: 14px;">跨班巡迴進度診斷 (Teacher Class Progress Diagnostics)</h4>
+        <div v-if="dataStore.lastTeacherClassProgressDiagnostics" class="tcp-diagnostics-content">
+          <!-- Penalty Breakdown -->
+          <div v-if="dataStore.lastTeacherClassProgressDiagnostics.penaltyBreakdown" class="tcp-breakdown" style="font-size: 12px; margin-bottom: 8px;">
+            <strong>品質懲罰分項：</strong>
+            <p data-test="tcp-total">TCP 總計（solver penaltyBreakdown）：{{ tcpPenaltyTotal }}</p>
+            <ul style="margin: 4px 0; padding-left: 20px;">
+              <li>未完成輪次懲罰 (incomplete_round): {{ dataStore.lastTeacherClassProgressDiagnostics.penaltyBreakdown.teacher_class_progress_incomplete_round ?? 0 }}</li>
+              <li>等待跨班進度懲罰 (waiting): {{ dataStore.lastTeacherClassProgressDiagnostics.penaltyBreakdown.teacher_class_progress_waiting ?? 0 }}</li>
+              <li>巡迴模式懲罰 (visit_pattern): {{ dataStore.lastTeacherClassProgressDiagnostics.penaltyBreakdown.teacher_class_progress_visit_pattern ?? 0 }}</li>
+            </ul>
+          </div>
+
+          <!-- Component Penalties & Violations -->
+          <div v-if="dataStore.lastTeacherClassProgressDiagnostics.teacherClassProgress?.violations?.length" class="tcp-violations" style="font-size: 12px; margin-bottom: 8px;">
+            <strong>巡迴進度違規明細 ({{ dataStore.lastTeacherClassProgressDiagnostics.teacherClassProgress.violations.length }} 筆)：</strong>
+            <table class="tcp-violations-table" style="width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 11px;">
+              <thead>
+                <tr style="background: #e2e8f0; text-align: left;">
+                  <th style="padding: 4px;">教師</th>
+                  <th style="padding: 4px;">規則分項</th>
+                  <th style="padding: 4px;">有效週</th>
+                  <th style="padding: 4px;">輪次</th>
+                  <th style="padding: 4px;">預期班級</th>
+                  <th style="padding: 4px;">實際班級</th>
+                  <th style="padding: 4px;">懲罰分數</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(v, idx) in dataStore.lastTeacherClassProgressDiagnostics.teacherClassProgress.violations" :key="idx" style="border-bottom: 1px solid #e2e8f0;">
+                  <td style="padding: 4px;">{{ v.teacherId }}</td>
+                  <td style="padding: 4px;">{{ v.component }}</td>
+                  <td style="padding: 4px;">{{ v.effectiveWeek }}</td>
+                  <td style="padding: 4px;">{{ v.roundIndex }}</td>
+                  <td style="padding: 4px;">{{ v.expectedClassId }}</td>
+                  <td style="padding: 4px;">{{ v.actualClassId }}</td>
+                  <td style="padding: 4px;">{{ v.penalty }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Rounds Status -->
+          <div v-if="dataStore.lastTeacherClassProgressDiagnostics.teacherClassProgress?.rounds?.length" class="tcp-rounds" style="font-size: 12px;">
+            <strong>教師輪次狀態：</strong>
+            <span v-for="(r, rIdx) in dataStore.lastTeacherClassProgressDiagnostics.teacherClassProgress.rounds" :key="rIdx" style="margin-right: 8px;">
+              {{ r.teacherId }} (輪次 {{ r.roundIndex }}): {{ r.status }}
+            </span>
+          </div>
+        </div>
+
+        <div v-else class="tcp-empty-state" data-test="tcp-empty-state" style="font-size: 12px; color: #64748b;">
+          目前未產生或無額外跨班巡迴進度 (TCP) 診斷資訊。
+        </div>
+      </div>
             <div class="result-actions">
         <div class="ai-tuning-toolbar">
           <label class="ai-tuning-field">
@@ -428,6 +486,14 @@ import { runAiInfeasibleAnalysis } from '../services/aiInfeasibleAnalysisClient'
 const dataStore = useScheduleStore();
 const aiStore = useAiStore();
 const router = useRouter();
+const tcpPenaltyTotal = computed(() => {
+  const breakdown = dataStore.lastTeacherClassProgressDiagnostics?.penaltyBreakdown || {};
+  return [
+    'teacher_class_progress_incomplete_round',
+    'teacher_class_progress_waiting',
+    'teacher_class_progress_visit_pattern',
+  ].reduce((total, ruleId) => total + Number(breakdown[ruleId] || 0), 0);
+});
 
 const hasBlockingMovableLocksReview = computed(() => {
   return !dataStore.canApplyScheduleResult;

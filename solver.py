@@ -106,6 +106,36 @@ from constraints.special_rules import (
     add_consecutive_constraint,
     get_valid_consecutive_pairs,
 )
+from constraints.teacher_class_progress import (
+    build_teacher_class_progress_weekly_activities,
+    evaluate_teacher_class_progress_round_robin,
+)
+
+# TCP penalty component rule IDs, in canonical order.
+TCP_COMPONENT_RULE_IDS = (
+    "teacher_class_progress_incomplete_round",
+    "teacher_class_progress_waiting",
+    "teacher_class_progress_visit_pattern",
+)
+
+
+def compare_teacher_class_progress_components(model_components, evaluator_components):
+    """Compare solved model TCP components against the canonical evaluator's components.
+
+    Pure function: no solver state, no I/O, no environment access.
+    Returns {"matched": bool, "mismatches": [{"ruleId", "modelValue", "evaluatorValue"}, ...]}
+    where each mismatch names the divergent rule and both values.
+    """
+    mismatches = [
+        {
+            "ruleId": rule_id,
+            "modelValue": model_components.get(rule_id, 0),
+            "evaluatorValue": evaluator_components.get(rule_id, 0),
+        }
+        for rule_id in TCP_COMPONENT_RULE_IDS
+        if model_components.get(rule_id, 0) != evaluator_components.get(rule_id, 0)
+    ]
+    return {"matched": not mismatches, "mismatches": mismatches}
 
 
 def _normalize_week_tag(week):
@@ -2105,6 +2135,7 @@ def main():
             room_primary_teacher_map=room_primary_teacher_map,
             classes_data=classes_data,
             school_info=schoolInfo,
+            ai_settings=ai_settings,
             # [Task 08] Priority teacher placeholders for solver-driven assignment
             priority_placeholders=priority_placeholders,
             # [repair_03] Pass runtime policy adapter for weight resolution
@@ -2200,6 +2231,7 @@ def main():
             "solver": solver,
             "status": status,
             "phase2_penalty_vars": phase2_penalty_vars,
+            "engine": engine if 'engine' in locals() else None,
             "alternating_class_is_music_odd": alternating_class_is_music_odd,
             "alternating_group_map": alternating_group_map,
             "class_pair_group": class_pair_group,
@@ -2442,6 +2474,7 @@ def main():
         solver = attempt["solver"]
         status = attempt["status"]
         phase2_penalty_vars = attempt["phase2_penalty_vars"]
+        engine = attempt.get("engine")
         alternating_class_is_music_odd = attempt["alternating_class_is_music_odd"]
         alternating_group_map = attempt["alternating_group_map"]
         class_pair_group = attempt["class_pair_group"]
@@ -2465,11 +2498,15 @@ def main():
             "priority_teacher_placeholder": 0,
             # [repair_07] Teacher quota overtime — always soft, aggregated from dict metadata
             "teacher_quota_overtime": 0,
+            "teacher_class_progress_incomplete_round": 0,
+            "teacher_class_progress_waiting": 0,
+            "teacher_class_progress_visit_pattern": 0,
         }
         # CRITICAL: solver.Value() crashes with C-level access violation on INFEASIBLE/UNKNOWN
         # Must guard ALL solver.Value() calls with status check
+        solved_penalty_entries = (engine.penalty_vars if 'engine' in locals() and hasattr(engine, 'penalty_vars') else phase2_penalty_vars) or []
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            for pv_entry in phase2_penalty_vars or []:
+            for pv_entry in solved_penalty_entries:
                 if not isinstance(pv_entry, dict):
                     continue
 
@@ -2481,7 +2518,7 @@ def main():
                     continue
 
                 try:
-                    val = solver.Value(var)
+                    val = solver.Value(var) if hasattr(var, "Index") else int(var)
                 except Exception:
                     continue
 
@@ -2507,6 +2544,7 @@ def main():
             "degraded": degraded,
             "degradationReasons": degradation_reasons,
             "penaltyBreakdown": penalty_breakdown,
+            "teacherClassProgress": getattr(engine, "tcp_artifact", {}).get("evaluator_result", {"components": {}, "violations": [], "rounds": []}) if 'engine' in locals() else {"components": {}, "violations": [], "rounds": []},
             "timeoutStage": attempt.get("timeout_stage", "short"),
             "hadFeasibleCandidate": status in (cp_model.OPTIMAL, cp_model.FEASIBLE),
         }
@@ -2515,6 +2553,75 @@ def main():
             result["message"] = "成功產出課表"
             if used_soft_capacity_fallback:
                 result["message"] = "成功產出課表（已啟用專科教室容量軟性降級）"
+
+            # Post-solve solved parity calculation for teacherClassProgress
+            tcp_entries_in_engine = [p for p in getattr(engine, 'penalty_vars', []) if isinstance(p, dict) and str(p.get('rule_id', '')).startswith('teacher_class_progress')]
+            print(f"[DIAG] engine.penalty_vars TCP count: {len(tcp_entries_in_engine)}", flush=True)
+            for p in tcp_entries_in_engine:
+                try:
+                    val = solver.Value(p["var"]) if hasattr(p["var"], "Index") else int(p["var"])
+                    print(f"[DIAG] TCP entry rule={p.get('rule_id')} w={p.get('weight')} var={p['var']} val={val}", flush=True)
+                except Exception as ex:
+                    print(f"[DIAG] TCP entry rule={p.get('rule_id')} w={p.get('weight')} err={ex}", flush=True)
+            model_tcp_components = {
+                "teacher_class_progress_incomplete_round": 0,
+                "teacher_class_progress_waiting": 0,
+                "teacher_class_progress_visit_pattern": 0,
+            }
+            tcp_sources = (engine.penalty_vars if engine and hasattr(engine, 'penalty_vars') else phase2_penalty_vars) or []
+            for pv_entry in tcp_sources:
+                if isinstance(pv_entry, dict):
+                    rule_id = pv_entry.get("rule_id")
+                    if rule_id in model_tcp_components:
+                        w = pv_entry.get("weight", 0)
+                        v = pv_entry.get("var")
+                        if v is not None:
+                            try:
+                                val = solver.Value(v) if hasattr(v, "Index") else int(v)
+                                model_tcp_components[rule_id] += w * val
+                            except Exception as e:
+                                pass
+
+            rep_schedule = {}
+            for (c, p, t, s), var in schedule.items():
+                try:
+                    if solver.Value(var) == 1:
+                        rep_schedule[(c, p, t, s)] = 1
+                except Exception:
+                    pass
+
+            tcp_cfg = (ai_settings or {}).get("qualityRules", {})
+            eval_acts = build_teacher_class_progress_weekly_activities(
+                rep_schedule, tcp_cfg, days=DAYS, periods_per_day=PERIODS_PER_DAY
+            )
+            eval_res = evaluate_teacher_class_progress_round_robin(
+                eval_acts, tcp_cfg, value_of=None
+            )
+            evaluator_tcp_components = eval_res.get("components", {
+                "teacher_class_progress_incomplete_round": 0,
+                "teacher_class_progress_waiting": 0,
+                "teacher_class_progress_visit_pattern": 0,
+            })
+
+            tcp_parity = compare_teacher_class_progress_components(
+                model_tcp_components, evaluator_tcp_components
+            )
+
+            result["teacherClassProgress"] = {
+                "source": "solved",
+                "modelComponents": model_tcp_components,
+                "evaluatorComponents": evaluator_tcp_components,
+                "totalPenalty": sum(model_tcp_components.values()),
+                "parity": tcp_parity,
+                "rounds": eval_res.get("rounds", []),
+                "violations": eval_res.get("violations", []),
+            }
+
+            if not tcp_parity["matched"]:
+                result["status"] = "MODEL_EVALUATOR_MISMATCH"
+                result["solverStatus"] = "MODEL_EVALUATOR_MISMATCH"
+                result["error"] = "teacher_class_progress_model_evaluator_mismatch"
+                result["message"] = "求解失敗：TCP 模型與評估器結果不一致"
 
             # ========== [NEW] 輸出 AI 排定與湊班後的特殊專案/抽離課程 ==========
             result["specialCourses"] = []

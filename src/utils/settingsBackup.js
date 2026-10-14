@@ -1,6 +1,7 @@
 import { useScheduleStore } from '../stores/schedule'
 import { createDefaultGradeTimeRulesSettings } from './gradeTimeRules.js'
 import { prepareGradeTimeRulesPersistence } from './gradeTimeRulesPersistence.js'
+import { normalizeTeacherClassProgressAiSettings } from './teacherClassProgressSettings.js'
 
 const SCHEMA_VERSION = '1.1.0'
 
@@ -92,7 +93,7 @@ export function buildExportPayload() {
       const cleaned = cloneDeep(store.aiSettings) || { ...DEFAULT_AI_SETTINGS }
       delete cleaned.coPlanningSettings
       delete cleaned.__schoolInfoCoPlanningSettings
-      return cleaned
+      return normalizeTeacherClassProgressAiSettings(cleaned)
     })(),
     // 🔒 完整匯出教師資料（包含志願序、專長、不可用時段等）
     teachers: store.teachers.map((t) => ({
@@ -204,7 +205,7 @@ export function applyImport(data) {
   }
 
   // --- aiSettings ---
-  Object.assign(store.aiSettings, data.aiSettings)
+  Object.assign(store.aiSettings, normalizeTeacherClassProgressAiSettings(data.aiSettings))
 
   // 🔒 完整還原教師資料（包含志願序、專長、不可用時段等）
   if (data.teachers.length > 0) {
@@ -319,14 +320,15 @@ export function applySemesterSettingsImport(data) {
   }
 
   if (data.aiSettings) {
+    const normalizedAiSettings = normalizeTeacherClassProgressAiSettings(data.aiSettings)
     SEMESTER_SETTINGS_AI_TOGGLE_KEYS.forEach((key) => {
       if (key in data.aiSettings) {
-        store.aiSettings[key] = data.aiSettings[key]
+        store.aiSettings[key] = normalizedAiSettings[key]
       }
     })
     SEMESTER_SETTINGS_AI_OBJECT_KEYS.forEach((key) => {
       if (key in data.aiSettings) {
-        store.aiSettings[key] = cloneDeep(data.aiSettings[key])
+        store.aiSettings[key] = cloneDeep(normalizedAiSettings[key])
       }
     })
   }
@@ -408,7 +410,7 @@ function normalizeAiSettings(ai) {
   const cleaned = !ai || typeof ai !== 'object' ? defaults : { ...defaults, ...ai, grade12AfternoonOff: true }
   delete cleaned.coPlanningSettings
   delete cleaned.__schoolInfoCoPlanningSettings
-  return cleaned
+  return normalizeTeacherClassProgressAiSettings(cleaned)
 }
 
 function cloneDeep(v) {

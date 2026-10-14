@@ -41,7 +41,7 @@
     "contracts/grade_time_rule_issue_codes.json"
   ],
   "includeDocFiles": [],
-  "targetOnlyRoots": ["tests", "docs", "node_modules", ".pytest_cache", "__pycache__"],
+  "targetOnlyRoots": ["tests", "docs", "agy-mcp-server", "node_modules", ".pytest_cache", "__pycache__"],
   "targetOnlyFiles": [
     "LICENSE.md",
     "README.md",
@@ -51,6 +51,8 @@
     "src/services/publicSchedulerFallback.js"
   ],
   "ignoredRoots": [
+    ".codex-orchestration",
+    "agy-mcp-server",
     ".cmp",
     ".agent",
     ".agents",
