@@ -311,6 +311,9 @@ import { ref, computed } from 'vue'
 import { useScheduleStore } from '../stores/schedule'
 import { buildExportPayload, downloadExport, parseImportFile, applyImport, previewSemesterSettingsImport, applySemesterSettingsImport } from '../utils/settingsBackup'
 import { isSubjectApplicableToGrade, sanitizeRequirementsByGrade } from '../utils/gradeSubjectUtils'
+import GTR_PRESENTATIONS from '../../contracts/grade_time_rule_issue_presentations.json' with { type: 'json' }
+import GTR_CODES from '../../contracts/grade_time_rule_issue_codes.json' with { type: 'json' }
+import { renderGtrIssuePresentation } from '../utils/gtrIssuePresentation.js'
 
 const scheduleStore = useScheduleStore()
 
@@ -361,7 +364,18 @@ async function handleImport(event) {
     selectedImportMode.value = null
     semesterImportPreview.value = null
   } catch (e) {
-    eiMessage.value = `❌ 匯入失敗：${e.message}`
+    if (e?.code === 'GRADE_TIME_RULE_MIGRATION_FAILED' || e?.issue?.code === 'GRADE_TIME_RULE_MIGRATION_FAILED') {
+      const rawIssue = e.issue || { code: 'GRADE_TIME_RULE_MIGRATION_FAILED', message: e.message }
+      const rendered = renderGtrIssuePresentation(rawIssue, {
+        source: 'server_internal',
+        authorityData: GTR_CODES,
+        presentationsData: GTR_PRESENTATIONS,
+      })
+      const nextStepStr = (rendered.nextSteps || []).join('；')
+      eiMessage.value = `❌ 匯入失敗：${rendered.userMessage}${nextStepStr ? ` 建議下一步：${nextStepStr}` : ''}`
+    } else {
+      eiMessage.value = `❌ 匯入失敗：${e.message}`
+    }
     eiType.value = 'error'
     resetImportState()
   }

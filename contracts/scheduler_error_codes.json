@@ -1,0 +1,594 @@
+{
+  "schemaVersion": 1,
+  "codes": [
+    {
+      "code": "SCHE_INFEASIBLE",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "目前條件下找不到可行課表；這是求解狀態，原因仍須看下方證據。",
+      "nextSteps": [
+        "逐項核對候選項指向的課程需求、教師可用時段與鎖定設定；無候選時先比對最近一次變更。"
+      ],
+      "testRef": [
+        "status-mapping-infeasible-unlocated"
+      ],
+      "fallbackMessage": "目前條件下找不到可行課表；這是求解狀態，原因仍須看下方證據。",
+      "fallbackNextSteps": [
+        "逐項核對候選項指向的課程需求、教師可用時段與鎖定設定；無候選時先比對最近一次變更。"
+      ],
+      "solverStatus": "INFEASIBLE"
+    },
+    {
+      "code": "SCHE_INVALID_INPUT",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "輸入資料未通過排課前檢查，需先修正才能繼續。",
+      "nextSteps": [
+        "開啟班級課程需求與鎖定課表，依下方檢查明細核對需求節數及鎖定數。"
+      ],
+      "testRef": [
+        "status-mapping-invalid-input"
+      ],
+      "fallbackMessage": "輸入資料未通過排課前檢查，需先修正才能繼續。",
+      "fallbackNextSteps": [
+        "開啟班級課程需求與鎖定課表，依下方檢查明細核對需求節數及鎖定數。"
+      ],
+      "solverStatus": "INVALID_INPUT"
+    },
+    {
+      "code": "SCHE_INVALID_VALIDATION",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "產出的課表未通過驗證，不能只因曾找到課表就視為完成。",
+      "nextSteps": [
+        "對照驗證明細檢查課表中的班級、教師、教室及相關規則；缺報告則查看本次驗證紀錄。"
+      ],
+      "testRef": [
+        "status-mapping-invalid-validation"
+      ],
+      "fallbackMessage": "產出的課表未通過驗證，不能只因曾找到課表就視為完成。",
+      "fallbackNextSteps": [
+        "對照驗證明細檢查課表中的班級、教師、教室及相關規則；缺報告則查看本次驗證紀錄。"
+      ],
+      "solverStatus": "INVALID_VALIDATION"
+    },
+    {
+      "code": "SCHE_INVALID_GRADE_TIME_RULE",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "年級時段規則有設定問題，細節以實際檢查結果為準。",
+      "nextSteps": [
+        "打開年級時段規則，核對 issue 指出的規則與同時段鎖定設定；沒有位置時先檢查本次修改規則。"
+      ],
+      "testRef": [
+        "status-mapping-invalid-grade-time-rule"
+      ],
+      "fallbackMessage": "年級時段規則有設定問題，細節以實際檢查結果為準。",
+      "fallbackNextSteps": [
+        "打開年級時段規則，核對 issue 指出的規則與同時段鎖定設定；沒有位置時先檢查本次修改規則。"
+      ],
+      "solverStatus": "INVALID_GRADE_TIME_RULE_CONFIGURATION"
+    },
+    {
+      "code": "SCHE_UNKNOWN_TIMEOUT",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "舊版記錄顯示求解逾時，未保存足夠資料判斷是否存在可行解。",
+      "nextSteps": [
+        "核對該次任務時間限制與紀錄；需要重跑時以目前設定重新提交並保留新任務資料。"
+      ],
+      "testRef": [
+        "status-mapping-unknown-timeout"
+      ],
+      "fallbackMessage": "舊版記錄顯示求解逾時，未保存足夠資料判斷是否存在可行解。",
+      "fallbackNextSteps": [
+        "核對該次任務時間限制與紀錄；需要重跑時以目前設定重新提交並保留新任務資料。"
+      ],
+      "solverStatus": "UNKNOWN_TIMEOUT",
+      "reserved": true
+    },
+    {
+      "code": "SCHE_TIMEOUT_NO_SOLUTION",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "時間用完前尚未找到可行課表，這不等於已證明無解。",
+      "nextSteps": [
+        "查看求解時間限制與最近增加的固定條件，確認後可調整時間上限再試。"
+      ],
+      "testRef": [
+        "status-mapping-error-fallback"
+      ],
+      "fallbackMessage": "時間用完前尚未找到可行課表，這不等於已證明無解。",
+      "fallbackNextSteps": [
+        "查看求解時間限制與最近增加的固定條件，確認後可調整時間上限再試。"
+      ],
+      "solverStatus": "TIMEOUT_NO_SOLUTION"
+    },
+    {
+      "code": "SCHE_MODEL_INVALID",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "排課模型未通過有效性檢查，尚無可採用的排課結果。",
+      "nextSteps": [
+        "保存本次任務編號與錯誤紀錄，核對最近修改的課程／規則資料並交由維護者檢查模型。"
+      ],
+      "testRef": [
+        "status-mapping-error-fallback"
+      ],
+      "fallbackMessage": "排課模型未通過有效性檢查，尚無可採用的排課結果。",
+      "fallbackNextSteps": [
+        "保存本次任務編號與錯誤紀錄，核對最近修改的課程／規則資料並交由維護者檢查模型。"
+      ],
+      "solverStatus": "MODEL_INVALID"
+    },
+    {
+      "code": "SCHE_MODEL_EVALUATOR_MISMATCH",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "求解模型與結果檢查的判定不一致，需要核對規則。",
+      "nextSteps": [
+        "保存同一任務的輸入、結果與驗證紀錄，請維護者比較雙方使用的規則版本。"
+      ],
+      "testRef": [
+        "status-mapping-error-fallback"
+      ],
+      "fallbackMessage": "求解模型與結果檢查的判定不一致，需要核對規則。",
+      "fallbackNextSteps": [
+        "保存同一任務的輸入、結果與驗證紀錄，請維護者比較雙方使用的規則版本。"
+      ],
+      "solverStatus": "MODEL_EVALUATOR_MISMATCH"
+    },
+    {
+      "code": "SCHE_ENGINE_ERROR",
+      "category": "status",
+      "severity": "blocking",
+      "confidence": "unknown",
+      "userMessage": "排課執行或結果讀取發生問題，目前無法確認具體根因。",
+      "nextSteps": [
+        "保存本次任務編號與時間，核對本次可見錯誤紀錄及最近變更；無法判斷時附上這些資訊交由管理者比對後端紀錄。"
+      ],
+      "testRef": [
+        "status-mapping-error-fallback"
+      ],
+      "fallbackMessage": "排課執行或結果讀取發生問題，目前無法確認具體根因。",
+      "fallbackNextSteps": [
+        "保存本次任務編號與時間，核對本次可見錯誤紀錄及最近變更；無法判斷時附上這些資訊交由管理者比對後端紀錄。"
+      ],
+      "solverStatus": "ERROR"
+    },
+    {
+      "code": "SCHE_INPUT_CLASS_LOAD_OVER_CAPACITY",
+      "category": "input",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "班級需求總節數超過可排容量；不足以容納全部需求。",
+      "nextSteps": [
+        "對照該班課程需求總數與年級／班別可用節數，核對是否重複輸入或鎖定，確認資料再調整。"
+      ],
+      "testRef": [
+        "status-mapping-invalid-input"
+      ],
+      "fallbackMessage": "班級需求總節數超過可排容量；不足以容納全部需求。",
+      "fallbackNextSteps": [
+        "對照該班課程需求總數與年級／班別可用節數，核對是否重複輸入或鎖定，確認資料再調整。"
+      ]
+    },
+    {
+      "code": "SCHE_INPUT_LOCKED_PERIODS_EXCEED_REQUIREMENT",
+      "category": "input",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "某科目的鎖定節數超過需求；須核對鎖定與需求一致性。",
+      "nextSteps": [
+        "打開該班鎖定課表，逐筆核對該科鎖定節數與課程需求；確認後解除多餘鎖定或更正需求。"
+      ],
+      "testRef": [
+        "status-mapping-invalid-input"
+      ],
+      "fallbackMessage": "某科目的鎖定節數超過需求；須核對鎖定與需求一致性。",
+      "fallbackNextSteps": [
+        "打開該班鎖定課表，逐筆核對該科鎖定節數與課程需求；確認後解除多餘鎖定或更正需求。"
+      ]
+    },
+    {
+      "code": "SCHE_VAL_CLASS_SLOT",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "驗證報告記錄同班同時段的課程重疊；需確認能否同時進行。",
+      "nextSteps": [
+        "在該班課表查看列出的時段與課程，核對固定鎖定及允許並行規則後調整。"
+      ],
+      "testRef": [
+        "valmap-class-slot"
+      ],
+      "fallbackMessage": "驗證報告記錄同班同時段的課程重疊；需確認能否同時進行。",
+      "fallbackNextSteps": [
+        "在該班課表查看列出的時段與課程，核對固定鎖定及允許並行規則後調整。"
+      ],
+      "validationSection": "class_slot_conflicts"
+    },
+    {
+      "code": "SCHE_VAL_TEACHER_CONFLICT",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "驗證報告記錄教師同時段有多個授課安排。",
+      "nextSteps": [
+        "查看該教師在列出時段的授課與固定課程，核對是否同一合法共同授課事件，再調整衝突安排。"
+      ],
+      "testRef": [
+        "valmap-teacher-conflict"
+      ],
+      "fallbackMessage": "驗證報告記錄教師同時段有多個授課安排。",
+      "fallbackNextSteps": [
+        "查看該教師在列出時段的授課與固定課程，核對是否同一合法共同授課事件，再調整衝突安排。"
+      ],
+      "validationSection": "teacher_conflicts"
+    },
+    {
+      "code": "SCHE_VAL_ROOM_CONFLICT",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "驗證報告記錄同一實體教室在同時段被多班使用。",
+      "nextSteps": [
+        "查看教室指派及該時段各班課程，核對是否誤指派同一教室，確認可用教室後調整。"
+      ],
+      "testRef": [
+        "valmap-room-conflict"
+      ],
+      "fallbackMessage": "驗證報告記錄同一實體教室在同時段被多班使用。",
+      "fallbackNextSteps": [
+        "查看教室指派及該時段各班課程，核對是否誤指派同一教室，確認可用教室後調整。"
+      ],
+      "validationSection": "room_conflicts"
+    },
+    {
+      "code": "SCHE_VAL_ROOM_OVERLOAD",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "possible",
+      "userMessage": "報告記錄教室容量使用超額；硬違規、軟降級或無法判別必須分開說明。",
+      "nextSteps": [
+        "對照該科教室數及該時段需求，核對是否啟用容量軟降級；缺判定資料先查看本次驗證與降級紀錄。"
+      ],
+      "testRef": [
+        "valmap-room-overload"
+      ],
+      "fallbackMessage": "報告記錄教室容量使用超額；硬違規、軟降級或無法判別必須分開說明。",
+      "fallbackNextSteps": [
+        "對照該科教室數及該時段需求，核對是否啟用容量軟降級；缺判定資料先查看本次驗證與降級紀錄。"
+      ],
+      "validationSection": "room_overloads"
+    },
+    {
+      "code": "SCHE_VAL_UNASSIGNED_SPECIAL_ROOM",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "需專科教室的課程尚未有實體教室指派；需補核對後才可使用。",
+      "nextSteps": [
+        "檢查該科教室清單及該堂課的教室指派；不要將未指派誤判成一定沒有容量。"
+      ],
+      "testRef": [
+        "valmap-unassigned-special-room"
+      ],
+      "fallbackMessage": "需專科教室的課程尚未有實體教室指派；需補核對後才可使用。",
+      "fallbackNextSteps": [
+        "檢查該科教室清單及該堂課的教室指派；不要將未指派誤判成一定沒有容量。"
+      ],
+      "validationSection": "unassigned_special_rooms"
+    },
+    {
+      "code": "SCHE_VAL_GRADE_SUBJECT",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "課表中的科目與適用年級規則不一致。",
+      "nextSteps": [
+        "對照班級年級、課程需求與科目適用年級設定，確認哪項資料需更正。"
+      ],
+      "testRef": [
+        "valmap-grade-subject"
+      ],
+      "fallbackMessage": "課表中的科目與適用年級規則不一致。",
+      "fallbackNextSteps": [
+        "對照班級年級、課程需求與科目適用年級設定，確認哪項資料需更正。"
+      ],
+      "validationSection": "grade_subject_issues"
+    },
+    {
+      "code": "SCHE_VAL_SPECIAL_COURSE_OVERLAP",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "特殊課在同班同時段有不允許的安排。不等同抽離課耗盡導師時段。",
+      "nextSteps": [
+        "核對各特殊課的對象班級、教師、鎖定時段及有效科目；確認並行規則與 disposition 後再調整。"
+      ],
+      "testRef": [
+        "valmap-special-course-overlap"
+      ],
+      "fallbackMessage": "特殊課在同班同時段有不允許的安排。不等同抽離課耗盡導師時段。",
+      "fallbackNextSteps": [
+        "核對各特殊課的對象班級、教師、鎖定時段及有效科目；確認並行規則與 disposition 後再調整。"
+      ],
+      "validationSection": "special_course_overlap_conflicts"
+    },
+    {
+      "code": "SCHE_VAL_SCIENCE_SAME_DAY",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "自然科學的同日節數安排未通過形狀檢查。",
+      "nextSteps": [
+        "對照該班自然課的同日節數／連堂設定及固定課程，核對列出的課節。"
+      ],
+      "testRef": [
+        "valmap-science-same-day"
+      ],
+      "fallbackMessage": "自然科學的同日節數安排未通過形狀檢查。",
+      "fallbackNextSteps": [
+        "對照該班自然課的同日節數／連堂設定及固定課程，核對列出的課節。"
+      ],
+      "validationSection": "science_same_day_shape_issues"
+    },
+    {
+      "code": "SCHE_VAL_SUBJECT_DAY_SPREAD",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "possible",
+      "userMessage": "科目在同一天的分布有檢查記錄；本土語硬檢查與其他科目提示分開說明。",
+      "nextSteps": [
+        "查看該班該科的每日分布與鎖定課程，依適用科目的規則核對是否需分散。"
+      ],
+      "testRef": [
+        "valmap-subject-day-spread"
+      ],
+      "fallbackMessage": "科目在同一天的分布有檢查記錄；本土語硬檢查與其他科目提示分開說明。",
+      "fallbackNextSteps": [
+        "查看該班該科的每日分布與鎖定課程，依適用科目的規則核對是否需分散。"
+      ],
+      "validationSection": "subject_day_spread_issues"
+    },
+    {
+      "code": "SCHE_VAL_SPECIAL_COURSE_INPUT_ERROR",
+      "category": "validation",
+      "severity": "blocking",
+      "confidence": "determined",
+      "userMessage": "特殊課共同事件的實體資料不一致；須先核對是否誤共用事件。",
+      "nextSteps": [
+        "檢查特殊課的共同事件識別與實體名稱；不同事件不應誤用同一識別，先核對再更正。"
+      ],
+      "testRef": [
+        "valmap-special-course-input"
+      ],
+      "fallbackMessage": "特殊課輸入資料有待檢查問題，具體類型尚未確認",
+      "fallbackNextSteps": [
+        "檢查特殊課的共同事件識別與實體名稱；不同事件不應誤用同一識別，先核對再更正。"
+      ],
+      "validationSection": "special_course_input_errors"
+    },
+    {
+      "code": "SCHE_WARN_CLASS_PERIOD_OVERLOAD",
+      "category": "warning",
+      "severity": "blocking",
+      "confidence": "possible",
+      "userMessage": "報告指出 {className} 需求 {needed} 節高於可用上限 {limit} 節（{label}）；可能影響排課。",
+      "nextSteps": [
+        "核對該班需求及年級／班別上限，確認是否重複需求；先確認報告屬於本次任務。"
+      ],
+      "testRef": [
+        "parser-class-overload-current-format"
+      ],
+      "fallbackMessage": "報告指出班級需求節數高於可用上限；可能影響排課。",
+      "fallbackNextSteps": [
+        "核對該班需求及年級／班別上限，確認是否重複需求；先確認報告屬於本次任務。"
+      ],
+      "parserCategory": "class_overload"
+    },
+    {
+      "code": "SCHE_WARN_PERIOD_SHORTAGE",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "報告中的 {className} 全週科任需求 {needed} 節高於有效時段 {available} 節。尚不能定位哪一天或哪位教師不足。",
+      "nextSteps": [
+        "核對該班科任需求與年級可排節數，再檢查教師可用時段及固定條件；不能直接要求增聘教師。"
+      ],
+      "testRef": [
+        "parser-period-shortage"
+      ],
+      "fallbackMessage": "報告中的全週科任需求高於有效時段。尚不能定位哪一天或哪位教師不足。",
+      "fallbackNextSteps": [
+        "核對該班科任需求與年級可排節數，再檢查教師可用時段及固定條件；不能直接要求增聘教師。"
+      ],
+      "parserCategory": "period_shortage"
+    },
+    {
+      "code": "SCHE_WARN_ROOM_CAPACITY_SHORTAGE",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "報告中的 {subject} 全週教室需求 {needed} 節高於 {roomCount} 間教室的週容量 {weeklyCapacity} 節。尚不能證明某節教室衝突。",
+      "nextSteps": [
+        "核對該科教室數、可用節數及需求總數，再查看各時段分布與固定課程。"
+      ],
+      "testRef": [
+        "parser-room-capacity"
+      ],
+      "fallbackMessage": "報告中的全週教室需求高於週容量。尚不能證明某節教室衝突。",
+      "fallbackNextSteps": [
+        "核對該科教室數、可用節數及需求總數，再查看各時段分布與固定課程。"
+      ],
+      "parserCategory": "room_capacity_shortage"
+    },
+    {
+      "code": "SCHE_WARN_TEACHER_LOAD_PRESSURE",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "報告顯示 {teacher} 全週配課負載 {load} 節偏高，可能減少安排彈性。",
+      "nextSteps": [
+        "核對該教師配課節數、可用時段與固定課程，確認負載計算及空堂要求。"
+      ],
+      "testRef": [
+        "parser-teacher-load"
+      ],
+      "fallbackMessage": "報告顯示教師全週配課負載偏高，可能減少安排彈性。",
+      "fallbackNextSteps": [
+        "核對該教師配課節數、可用時段與固定課程，確認負載計算及空堂要求。"
+      ],
+      "parserCategory": "generic_warning"
+    },
+    {
+      "code": "SCHE_WARN_TEACHER_QUOTA_EXCEEDED",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "報告顯示 {teacher} 配課需求 {actual} 節高於記錄的配額 {safeMax} 節。",
+      "nextSteps": [
+        "核對該教師配額設定及各班配課合計，確認配額與需求後調整。"
+      ],
+      "testRef": [
+        "parser-teacher-quota"
+      ],
+      "fallbackMessage": "報告顯示教師配課需求高於記錄的配額。",
+      "fallbackNextSteps": [
+        "核對該教師配額設定及各班配課合計，確認配額與需求後調整。"
+      ],
+      "parserCategory": "generic_warning"
+    },
+    {
+      "code": "SCHE_WARN_ALTERNATING_LOAD_PRESSURE",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "{teacher} 交替課涉及 {classCount} 個班級（{classNames}），需要核對安排。這是總量提示，不代表同時段衝突。",
+      "nextSteps": [
+        "查看這些班級交替課配對、單雙週與已鎖定時段，核對教師能否配合；不自動要求減班。"
+      ],
+      "testRef": [
+        "parser-pressure-optional"
+      ],
+      "fallbackMessage": "交替課涉及多個班級，需要核對安排。這是總量提示，不代表同時段衝突。",
+      "fallbackNextSteps": [
+        "查看這些班級交替課配對、單雙週與已鎖定時段，核對教師能否配合；不自動要求減班。"
+      ],
+      "parserCategory": "alternating_conflict",
+      "reserved": false
+    },
+    {
+      "code": "SCHE_WARN_SWIMMING_PRESSURE",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "游泳班級 {classCount} 班與泳池資源 {poolCount} 個有總量壓力提示。不直接代表無解或同時段超載。",
+      "nextSteps": [
+        "核對游泳課的分時安排、泳池可用時段與鎖定課程，再評估資源是否足夠。"
+      ],
+      "testRef": [
+        "parser-pressure-optional"
+      ],
+      "fallbackMessage": "游泳班級與泳池資源有總量壓力提示。不直接代表無解或同時段超載。",
+      "fallbackNextSteps": [
+        "核對游泳課的分時安排、泳池可用時段與鎖定課程，再評估資源是否足夠。"
+      ],
+      "parserCategory": "swimming_resource_pressure",
+      "reserved": false
+    },
+    {
+      "code": "SCHE_WARN_HOMEROOM_TRACE_MISMATCH",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "possible",
+      "userMessage": "{className} 前端導師課候選 {blockCandidatePeriods} 節與前處理合併 {mergedPeriods} 節不一致（現成導師區塊 {existingHomeroomBlockPeriods} 節、最終導師區塊 {finalHomeroomBlockPeriods} 節）。這是資料鏈檢查，尚不表示抽離課造成衝突。",
+      "nextSteps": [
+        "核對原始課程需求、導師區塊合併紀錄及是否重複送入既有區塊，再檢查特殊課有效科目。"
+      ],
+      "testRef": [
+        "parser-homeroom-trace"
+      ],
+      "fallbackMessage": "前端導師課候選與前處理合併節數不一致。這是資料鏈檢查，尚不表示抽離課造成衝突。",
+      "fallbackNextSteps": [
+        "核對原始課程需求、導師區塊合併紀錄及是否重複送入既有區塊，再檢查特殊課有效科目。"
+      ],
+      "parserCategory": "generic_warning"
+    },
+    {
+      "code": "SCHE_WARN_UNCLASSIFIED",
+      "category": "warning",
+      "severity": "warning",
+      "confidence": "unknown",
+      "userMessage": "報告含尚未能分類的警示，具體原因未定位；原文另列，不作已證事實。",
+      "nextSteps": [
+        "查看原文及其相鄰報告內容，核對最近修改的課程／規則；無法解讀時附本次任務記錄交由維護者。"
+      ],
+      "testRef": [
+        "parser-unclassified"
+      ],
+      "fallbackMessage": "報告含尚未能分類的警示，具體原因未定位；原文另列，不作已證事實。",
+      "fallbackNextSteps": [
+        "查看原文及其相鄰報告內容，核對最近修改的課程／規則；無法解讀時附本次任務記錄交由維護者。"
+      ],
+      "parserCategory": "generic_warning"
+    },
+    {
+      "code": "SCHE_INFEASIBLE_UNLOCATED",
+      "category": "fallback",
+      "severity": "warning",
+      "confidence": "unknown",
+      "userMessage": "已知本次無解，但目前診斷尚未指出可定位原因。",
+      "nextSteps": [
+        "先核對最近修改的班級需求、教師可用時段與固定課程；需要進一步分析時使用手動 AI 並保留本次資料。"
+      ],
+      "testRef": [
+        "status-mapping-infeasible-unlocated"
+      ],
+      "fallbackMessage": "已知本次無解，但目前診斷尚未指出可定位原因。",
+      "fallbackNextSteps": [
+        "先核對最近修改的班級需求、教師可用時段與固定課程；需要進一步分析時使用手動 AI 並保留本次資料。"
+      ]
+    }
+  ],
+  "parserCategoryMap": {
+    "class_overload": [
+      "SCHE_WARN_CLASS_PERIOD_OVERLOAD"
+    ],
+    "period_shortage": [
+      "SCHE_WARN_PERIOD_SHORTAGE"
+    ],
+    "room_capacity_shortage": [
+      "SCHE_WARN_ROOM_CAPACITY_SHORTAGE"
+    ],
+    "alternating_conflict": [
+      "SCHE_WARN_ALTERNATING_LOAD_PRESSURE"
+    ],
+    "swimming_resource_pressure": [
+      "SCHE_WARN_SWIMMING_PRESSURE"
+    ],
+    "generic_infeasible": [],
+    "generic_warning": [
+      "SCHE_WARN_TEACHER_LOAD_PRESSURE",
+      "SCHE_WARN_TEACHER_QUOTA_EXCEEDED",
+      "SCHE_WARN_HOMEROOM_TRACE_MISMATCH",
+      "SCHE_WARN_UNCLASSIFIED"
+    ],
+    "report_alert": []
+  },
+  "unknownCodeFallback": {
+    "userMessage": "目前無法辨識這項診斷的具體內容。",
+    "nextSteps": [
+      "核對本次任務的診斷紀錄與最近修改的設定；需要協助時提供原始代碼給維護者。"
+    ]
+  }
+}

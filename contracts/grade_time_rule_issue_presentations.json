@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "presentations": {
+    "GTR_INVALID_DAY_OR_PERIOD": {
+      "userMessage": "年級時段規則的星期或節次設定無效。",
+      "nextSteps": [
+        "開啟相關規則，比對輸入的星期與節次和學校可用範圍；缺位置時逐項核對近期變更。"
+      ],
+      "fallbackMessage": "年級時段規則的星期或節次設定無效。",
+      "fallbackNextSteps": [
+        "開啟相關規則，比對輸入的星期與節次和學校可用範圍；缺位置時逐項核對近期變更。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_DUPLICATE_RULE": {
+      "userMessage": "有年級時段規則的設定重複。",
+      "nextSteps": [
+        "比較列出的規則之年級、時段與條件，確認重複後再合併或停用。"
+      ],
+      "fallbackMessage": "有年級時段規則的設定重複。",
+      "fallbackNextSteps": [
+        "比較列出的規則之年級、時段與條件，確認重複後再合併或停用。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_REQUIRE_SUBJECT_CONFLICT": {
+      "userMessage": "同一年級時段有互不一致的指定科目規則。",
+      "nextSteps": [
+        "對照相關規則的年級、時段與指定科目，確認哪項設定需要更正。"
+      ],
+      "fallbackMessage": "同一年級時段有互不一致的指定科目規則。",
+      "fallbackNextSteps": [
+        "對照相關規則的年級、時段與指定科目，確認哪項設定需要更正。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_TEACHER_TYPE_CONFLICT": {
+      "userMessage": "同一年級時段對教師類型的要求互相衝突。",
+      "nextSteps": [
+        "比較相關規則的同一教師類型要求與禁止條件，確認哪項需要調整。"
+      ],
+      "fallbackMessage": "同一年級時段對教師類型的要求互相衝突。",
+      "fallbackNextSteps": [
+        "比較相關規則的同一教師類型要求與禁止條件，確認哪項需要調整。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_FIXED_LOCK_CONFLICT": {
+      "userMessage": "年級時段規則可能與固定鎖定課程衝突。",
+      "nextSteps": [
+        "對照相關年級時段規則與同時段鎖定課程，確認衝突項及其適用範圍。"
+      ],
+      "fallbackMessage": "年級時段規則可能與固定鎖定課程衝突。",
+      "fallbackNextSteps": [
+        "對照相關年級時段規則與同時段鎖定課程，確認衝突項及其適用範圍。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_SUBJECT_NOT_AVAILABLE_FOR_GRADE": {
+      "userMessage": "規則指定的科目可能不適用於相關年級。",
+      "nextSteps": [
+        "對照規則指定科目、適用年級與該年級課程需求，確認設定是否一致。"
+      ],
+      "fallbackMessage": "規則指定的科目可能不適用於相關年級。",
+      "fallbackNextSteps": [
+        "對照規則指定科目、適用年級與該年級課程需求，確認設定是否一致。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_EMPTY_CANDIDATE_BLOCKS": {
+      "userMessage": "規則的候選時段或用途設定不符合要求。",
+      "nextSteps": [
+        "核對規則用途、候選模式及候選時段清單，確認用途支援候選模式且清單完整。"
+      ],
+      "fallbackMessage": "規則的候選時段或用途設定不符合要求。",
+      "fallbackNextSteps": [
+        "核對規則用途、候選模式及候選時段清單，確認用途支援候選模式且清單完整。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_TEACHER_CAPACITY_RISK": {
+      "userMessage": "規則涉及的教師資源可能不足。",
+      "nextSteps": [
+        "對照規則的年級與時段、教師授課資格及可用時間，檢查是否有足夠安排空間。"
+      ],
+      "fallbackMessage": "規則涉及的教師資源可能不足。",
+      "fallbackNextSteps": [
+        "對照規則的年級與時段、教師授課資格及可用時間，檢查是否有足夠安排空間。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_ROOM_CAPACITY_RISK": {
+      "userMessage": "規則涉及的教室資源可能不足。",
+      "nextSteps": [
+        "對照規則適用時段、所需教室與教室可用數量，核對資源安排。"
+      ],
+      "fallbackMessage": "規則涉及的教室資源可能不足。",
+      "fallbackNextSteps": [
+        "對照規則適用時段、所需教室與教室可用數量，核對資源安排。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_THRESHOLD_CAPACITY_RISK": {
+      "userMessage": "規則要求的門檻可能超過可安排資源。",
+      "nextSteps": [
+        "比較規則門檻與該規則實際可用資源，確認門檻和資源資料。"
+      ],
+      "fallbackMessage": "規則要求的門檻可能超過可安排資源。",
+      "fallbackNextSteps": [
+        "比較規則門檻與該規則實際可用資源，確認門檻和資源資料。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_PE_PERIOD_45_QUALITY_RISK": {
+      "userMessage": "體育課規則可能涉及第 4 或第 5 節的品質風險。",
+      "nextSteps": [
+        "對照體育課規則的適用年級與時段，確認第 4、5 節設定是否符合學校安排。"
+      ],
+      "fallbackMessage": "體育課規則可能涉及第 4 或第 5 節的品質風險。",
+      "fallbackNextSteps": [
+        "對照體育課規則的適用年級與時段，確認第 4、5 節設定是否符合學校安排。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GTR_PERIOD7_FLEXIBLE_QUALITY_RISK": {
+      "userMessage": "第 7 節的規則安排可能不符合彈性時段偏好。",
+      "nextSteps": [
+        "對照第 7 節的規則與彈性安排設定，確認是否需要調整。"
+      ],
+      "fallbackMessage": "第 7 節的規則安排可能不符合彈性時段偏好。",
+      "fallbackNextSteps": [
+        "對照第 7 節的規則與彈性安排設定，確認是否需要調整。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    },
+    "GRADE_TIME_RULE_MIGRATION_FAILED": {
+      "userMessage": "舊版年級時段設定轉換失敗，新規則內容尚待確認。",
+      "nextSteps": [
+        "比對原有舊設定與備份中共同備課設定；保留原始資料並請管理者檢查轉換紀錄。"
+      ],
+      "fallbackMessage": "舊版年級時段設定轉換失敗，新規則內容尚待確認。",
+      "fallbackNextSteps": [
+        "比對原有舊設定與備份中共同備課設定；保留原始資料並請管理者檢查轉換紀錄。"
+      ],
+      "allowedFields": [
+        "ruleIds",
+        "grade",
+        "day",
+        "period"
+      ]
+    }
+  },
+  "unknownCodeFallback": {
+    "userMessage": "目前無法辨識這項診斷的具體內容。",
+    "nextSteps": [
+      "核對本次任務的診斷紀錄與最近修改的設定；需要協助時提供原始代碼給維護者。"
+    ]
+  }
+}

@@ -1,3 +1,5 @@
+import { hasLocatableInfeasibleCandidate } from './aiInfeasibleAnalysisBundle.js'
+
 const DEFAULT_MAX_PROMPT_CHARS = 120000
 
 function normalizeText(value) {
@@ -49,12 +51,50 @@ function buildPayloadFocus(bundle = {}) {
   }
 }
 
-function buildPromptPayload(bundle = {}, maxPromptChars = DEFAULT_MAX_PROMPT_CHARS) {
+export function buildPromptPayload(bundle = {}, maxPromptChars = DEFAULT_MAX_PROMPT_CHARS) {
+  const resolvedStatusDetail = bundle.statusDetail !== undefined
+    ? bundle.statusDetail
+    : (bundle.promptInput?.evidenceSummary?.statusDetail ?? null)
+
+  const resolvedErrorCodes = Array.isArray(bundle.errorCodes)
+    ? bundle.errorCodes
+    : (Array.isArray(bundle.promptInput?.evidenceSummary?.errorCodes)
+        ? bundle.promptInput.evidenceSummary.errorCodes
+        : [])
+
+  const resolvedGradeTimeRuleIssues = Array.isArray(bundle.gradeTimeRuleIssues)
+    ? bundle.gradeTimeRuleIssues
+    : (Array.isArray(bundle.promptInput?.evidenceSummary?.gradeTimeRuleIssues)
+        ? bundle.promptInput.evidenceSummary.gradeTimeRuleIssues
+        : [])
+
+  const resolvedErrorCodeIndex = Array.isArray(bundle.errorCodeIndex)
+    ? bundle.errorCodeIndex
+    : (Array.isArray(bundle.promptInput?.evidenceSummary?.errorCodeIndex)
+        ? bundle.promptInput.evidenceSummary.errorCodeIndex
+        : [])
+
+  const resolvedValidationReport = bundle.validationReport !== undefined
+    ? bundle.validationReport
+    : (bundle.promptInput?.evidenceSummary?.validationReport ?? null)
+
+  const resolvedValidationReportSource = resolvedValidationReport
+    ? (bundle.validationReportSource
+        || bundle.promptInput?.evidenceSummary?.validationReportSource
+        || '未確認')
+    : null
+
   const fullPayload = {
     bundleVersion: bundle.bundleVersion || '',
     generatedAt: bundle.generatedAt || '',
     kind: bundle.kind || '',
     job: bundle.job || {},
+    statusDetail: resolvedStatusDetail,
+    errorCodes: resolvedErrorCodes,
+    gradeTimeRuleIssues: resolvedGradeTimeRuleIssues,
+    errorCodeIndex: resolvedErrorCodeIndex,
+    validationReport: resolvedValidationReport,
+    validationReportSource: resolvedValidationReportSource,
     promptInput: bundle.promptInput || {},
     reportWarningLines: Array.isArray(bundle.reportWarningLines) ? bundle.reportWarningLines : [],
     diagnosticWarnings: Array.isArray(bundle.diagnosticWarnings) ? bundle.diagnosticWarnings : [],
@@ -82,6 +122,12 @@ function buildPromptPayload(bundle = {}, maxPromptChars = DEFAULT_MAX_PROMPT_CHA
     generatedAt: fullPayload.generatedAt,
     kind: fullPayload.kind,
     job: fullPayload.job,
+    statusDetail: fullPayload.statusDetail,
+    errorCodes: fullPayload.errorCodes,
+    gradeTimeRuleIssues: fullPayload.gradeTimeRuleIssues,
+    errorCodeIndex: fullPayload.errorCodeIndex,
+    validationReport: fullPayload.validationReport,
+    validationReportSource: fullPayload.validationReportSource,
     promptInput: fullPayload.promptInput,
     reportWarningLines: fullPayload.reportWarningLines.slice(0, 40),
     diagnosticWarnings: fullPayload.diagnosticWarnings.slice(0, 24),
@@ -104,21 +150,57 @@ function buildPromptPayload(bundle = {}, maxPromptChars = DEFAULT_MAX_PROMPT_CHA
   }
 }
 
+export function buildAiInfeasibleAnalysisSystemPrompt(bundle = {}, { baseSystemPrompt = '' } = {}) {
+  const solverStatus = bundle?.job?.solverStatus || 'ERROR'
+  const errorCodes = Array.isArray(bundle?.errorCodes) ? bundle.errorCodes : []
+  const isTrustedInfeasibleWithEvidence = hasLocatableInfeasibleCandidate(solverStatus, errorCodes)
+
+  const lines = []
+  if (baseSystemPrompt) {
+    lines.push(baseSystemPrompt)
+  }
+
+  lines.push('你是排課引擎診斷分析器，請只回傳 JSON。')
+
+  if (isTrustedInfeasibleWithEvidence) {
+    lines.push(
+      '目前排課狀態為 INFEASIBLE。你的任務是根據 bundle 中已觀察到的候選警示、payload 與診斷證據，找出最值得優先排查的衝突原因，並提出可執行的修復建議。',
+      '不要只重述所有警示，要排序並指出最值得先修的問題。',
+      '遵守 confidence/source 上限：標註 possible 者不得宣稱已確認根因；來源為 report_file/shared_file 需保留來源可能未確認的界線；server_fallback 僅為通用提示，不得當作根因線索。',
+      'rootCauses[].category 維持描述衝突類型（自由文字），不得以錯誤碼取代；錯誤碼僅能於 evidence 中引用。',
+      '嚴格遵守 user prompt 中提供的 schema 與規則。'
+    )
+  } else {
+    lines.push(
+      `目前排課狀態為 ${solverStatus}，且無已確認的硬衝突子因。不得無條件將其視為 INFEASIBLE 硬衝突，亦不得編造子因或要求硬衝突根因。`,
+      '狀態代碼（如 statusDetail）代表執行狀態，不是子因；不得把「執行失敗」寫成根因。',
+      '若無可定位子因，必須輸出合法 unknown/low 佔位（summary.primaryCategory="unknown"、confidence="low"，並說明尚無可定位根因）。',
+      '嚴格遵守 user prompt 中提供的 schema 與規則。'
+    )
+  }
+
+  return lines.join('\n\n')
+}
+
 export function buildAiInfeasibleAnalysisPrompt(bundle = {}, { maxPromptChars = DEFAULT_MAX_PROMPT_CHARS } = {}) {
   const promptPayload = buildPromptPayload(bundle, maxPromptChars)
-  const schemaExample = {
+  const solverStatus = bundle?.job?.solverStatus || 'ERROR'
+  const errorCodes = Array.isArray(bundle?.errorCodes) ? bundle.errorCodes : []
+  const isTrustedInfeasibleWithEvidence = hasLocatableInfeasibleCandidate(solverStatus, errorCodes)
+
+  const schemaExample = isTrustedInfeasibleWithEvidence ? {
     summary: {
       text: '高年級交替課與單一超額班級一起造成模型無解。',
       confidence: 'high',
       primaryCategory: 'class_overload',
-      nextStep: '先修正 3年5班總節數，再重跑並檢查交替課衝突是否仍存在。',
+      nextStep: '先修正 某班 總節數，再重跑並檢查交替課衝突是否仍存在。',
     },
     rootCauses: [
       {
         category: 'class_overload',
         confidence: 'high',
-        message: '3年5班需排節數超過該年級上限。',
-        evidence: ['report: 3年5班 30 > 29', 'payload: 3年5班 course requirements summary'],
+        message: '某班 需排節數超過該年級上限。',
+        evidence: ['report: 某班 30 > 29', 'payload: 某班 course requirements summary'],
       },
     ],
     recommendations: [
@@ -130,23 +212,43 @@ export function buildAiInfeasibleAnalysisPrompt(bundle = {}, { maxPromptChars = 
     ],
     evidence: [
       {
-        source: 'debug_infeasible_report.txt',
-        detail: '3年5班: 共需排 30 節課 (該年級上限: 29 節) [ERROR]',
+        source: 'errorCodeIndex',
+        detail: 'SCHE_VAL_ROOM_OVERLOAD: 某班 總節數超過可用上限',
       },
     ],
+  } : {
+    summary: { text: '尚無可定位根因。', confidence: 'low', primaryCategory: 'unknown', nextStep: '檢查本次錯誤紀錄。' },
+    rootCauses: [{ category: 'unknown', confidence: 'low', message: '尚無可定位根因。', evidence: ['現有狀態與診斷紀錄'] }],
+    recommendations: [{ priority: 'low', action: '檢查本次錯誤紀錄。', rationale: '目前沒有可定位子因證據。' }],
+    evidence: [{ source: 'analysisContract', detail: '此示例只示範未定位回應，實際證據須引用現有資料。' }],
   }
 
+  const taskDescription = isTrustedInfeasibleWithEvidence
+    ? `請分析這份排課診斷 bundle（狀態：${solverStatus}），根據已觀察到的候選警示、payload 與診斷證據，排序並指出最值得優先排查的衝突原因，並提出可執行的修復建議。`
+    : `請分析這份排課診斷 bundle（狀態：${solverStatus}），檢視目前執行狀態與診斷紀錄，並提出可執行的排查建議。`
+
+  const conflictRule = isTrustedInfeasibleWithEvidence
+    ? '8. 依據證據排序值得排查的候選衝突，不要只是重述所有警示。'
+    : `8. 本任務狀態為 ${solverStatus} 或無候選子因代碼，不得要求硬衝突根因或編造子因，請如實依可信證據與狀態呈現。`
+
+  const rules = [
+    '1. confidence 只能是 low / medium / high。',
+    '2. priority 只能是 low / medium / high。',
+    '3. rootCauses、recommendations、evidence 都必須是陣列，且至少各有 1 筆。',
+    '4. rootCauses[].category 繼續描述衝突類型（自由文字，例如 class_overload 或中文描述），不得以錯誤碼取代 category。狀態代碼是執行狀態，不是子因。',
+    '5. 若 bundle.errorCodes 提供代碼，錯誤碼只能於 evidence 中引用穩定 code 與摘要（例如：{ "source": "errorCodeIndex", "detail": "SCHE_WARN_PERIOD_SHORTAGE: <userMessage>" }）。',
+    '6. confidence 措辭不得高於 bundle evidence 標註：標 possible 者不得宣稱為確定根因；unknown 或來源未確認者不得升級為確定原因；source 為 report_file/shared_file 者須註明「來源可能未確認」；source 為 server_fallback 者為 server 產生的通用提示，不得當成根因線索。',
+    '7. 若 bundle.errorCodes 為空或無可定位子成因，不得編造子因；legacy 缺欄位不能被解讀為已證明無根因。此時必須依規定輸出合法 unknown/low 佔位：summary.primaryCategory="unknown"、confidence="low"，並說明尚無可定位根因；不得將「執行失敗」寫成根因，亦不得捏造 statusDetail、代碼、來源或報告。',
+    conflictRule,
+  ]
+
   const userPrompt = [
-    '請分析這份排課 INFEASIBLE bundle，找出最可能的根因並提出可執行修復建議。',
+    taskDescription,
     '只允許輸出 JSON，不要輸出 Markdown、說明文字或 reasoning。',
     '請完全符合以下 schema：',
     JSON.stringify(schemaExample, null, 2),
     '規則：',
-    '1. confidence 只能是 low / medium / high。',
-    '2. priority 只能是 low / medium / high。',
-    '3. rootCauses、recommendations、evidence 都必須是陣列，且至少各有 1 筆。',
-    '4. 若證據不足，不可假裝確定，必須在 confidence 標 low 或 medium。',
-    '5. 優先指出真正造成 INFEASIBLE 的硬衝突，不要只是重述所有警示。',
+    rules.join('\n'),
     '以下是 bundle JSON：',
     promptPayload.serialized,
   ].join('\n\n')

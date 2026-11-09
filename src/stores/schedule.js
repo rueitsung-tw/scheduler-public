@@ -20,6 +20,23 @@ import {
 } from '../utils/preallocEventModel.js'
 import { DEFAULT_SUBJECT_CODE_MAPPINGS } from '../utils/subjectAssignmentExcelParser.js'
 
+import GTR_PRESENTATIONS from '../../contracts/grade_time_rule_issue_presentations.json' with { type: 'json' }
+import GTR_CODES from '../../contracts/grade_time_rule_issue_codes.json' with { type: 'json' }
+import { renderGtrIssuesToErrorCodes, renderGtrIssuePresentation } from '../utils/gtrIssuePresentation.js'
+
+export const VALIDATION_REPORT_SECTIONS = Object.freeze([
+  'class_slot_conflicts',
+  'teacher_conflicts',
+  'room_conflicts',
+  'room_overloads',
+  'unassigned_special_rooms',
+  'grade_subject_issues',
+  'special_course_overlap_conflicts',
+  'science_same_day_shape_issues',
+  'subject_day_spread_issues',
+  'special_course_input_errors',
+]);
+
 export const useScheduleStore = defineStore('simpleSchedule', () => {
 
   // 優先使用相對路徑走 Vite proxy；僅在生產環境 (非 localhost) 時才 fallback 到絕對 URL
@@ -95,7 +112,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     const level = String(item.level || 'warn').trim().toLowerCase() || 'warn';
     const category = String(item.category || 'generic_infeasible').trim() || 'generic_infeasible';
     const displayText = normalizeDiagnosticLine(item.displayText || `[${level.toUpperCase()}] ${message}`);
-    return {
+    const normalized = {
       level,
       category,
       message,
@@ -103,6 +120,18 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       rawLine: normalizeDiagnosticLine(item.rawLine),
       contextLine: normalizeDiagnosticLine(item.contextLine),
     };
+    if (item.code !== undefined && item.code !== null && String(item.code).trim() !== '') {
+      normalized.code = String(item.code).trim();
+    }
+    if (item.source !== undefined && item.source !== null && String(item.source).trim() !== '') {
+      normalized.source = String(item.source).trim();
+    } else if (item.source === null) {
+      normalized.source = null;
+    }
+    if (item.sourceRef !== undefined) {
+      normalized.sourceRef = item.sourceRef;
+    }
+    return normalized;
   };
 
   const normalizeDiagnosticWarningDetails = (input) => (
@@ -111,52 +140,164 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       : []
   );
 
-  const normalizeValidationReportDetails = (reportObj) => {
+  const formatArrayValues = (arr) => {
+    if (!Array.isArray(arr)) return '';
+    const clean = arr
+      .map((x) => (typeof x === 'string' ? x.trim() : typeof x === 'number' && Number.isFinite(x) ? String(x) : ''))
+      .filter(Boolean);
+    return clean.join('、');
+  };
+
+  const normalizeValidationReportDetails = (reportObj, options = {}) => {
     if (!reportObj || typeof reportObj !== 'object') return [];
+    const source = ['job_output', 'shared_file'].includes(options?.source) ? options.source : null;
     const details = [];
 
-    const formatEntryMessage = (item, defaultCategory) => {
+    const formatEntryMessage = (item, defaultCategory, sectionKey) => {
       if (!item) return null;
       if (typeof item === 'string') {
         const msg = item.trim();
-        return msg ? { level: 'warn', category: defaultCategory, message: msg, displayText: `[WARN] ${msg}` } : null;
+        return msg ? { level: 'warn', category: defaultCategory, message: msg, displayText: `[WARN] ${msg}`, source } : null;
       }
       if (typeof item === 'object') {
-        if (item.message) {
+        // Special course input errors: prior to generic message check, build neutral Chinese description
+        if (sectionKey === 'special_course_input_errors') {
+          const innerCode = typeof item.code === 'string' ? item.code.trim() : '';
+          const sharedEventId = typeof item.sharedEventId === 'string' ? item.sharedEventId.trim() : '';
+          const entitiesStr = formatArrayValues(item.entities);
+          let message = '特殊課輸入資料有待檢查問題，具體類型尚未確認';
+          if (innerCode === 'INVALID_SHARED_EVENT_MIXED_ENTITIES') {
+            const parts = ['特殊課共同事件的實體資料不一致'];
+            if (sharedEventId) parts.push(`共同事件識別: ${sharedEventId}`);
+            if (entitiesStr) parts.push(`涉及實體: ${entitiesStr}`);
+            message = parts.join(' - ');
+          } else {
+            const parts = [message];
+            if (sharedEventId) parts.push(`共同事件識別: ${sharedEventId}`);
+            if (entitiesStr) parts.push(`涉及實體: ${entitiesStr}`);
+            message = parts.join(' - ');
+          }
+          return {
+            ...item,
+            level: 'error',
+            category: 'SPECIAL_COURSE_INPUT',
+            message,
+            displayText: `[ERROR] ${message}`,
+            source,
+            rawLine: typeof item.message === 'string' ? item.message : undefined,
+          };
+        }
+
+        if (item.message && !sectionKey) {
           const level = (item.level || 'warn').toLowerCase();
           return {
+            ...item,
             level,
             category: item.category || defaultCategory,
             message: item.message,
             displayText: item.displayText || `[${level.toUpperCase()}] ${item.message}`,
-            ...item,
+            source,
           };
         }
-        if (item.displayText) {
+        if (item.displayText && !sectionKey) {
           return {
+            ...item,
             level: 'warn',
             category: defaultCategory,
             message: item.displayText,
             displayText: item.displayText,
-            ...item,
+            source,
           };
         }
+
         const parts = [];
-        if (item.className || item.class_id) parts.push(`班級: ${item.className || item.class_id}`);
-        if (item.teacher || item.teacher_name) parts.push(`教師: ${item.teacher || item.teacher_name}`);
-        if (item.subject || item.subject_name) parts.push(`科目: ${item.subject || item.subject_name}`);
-        if (item.room || item.room_name) parts.push(`教室: ${item.room || item.room_name}`);
-        if (item.day && item.period) parts.push(`時段: 星期${item.day}第${item.period}節`);
+        const className = item.className || item.classId || item.class_id;
+        if (className) parts.push(`班級: ${className}`);
+
+        const teacherName = item.teacherName || item.teacher || item.teacher_name;
+        if (teacherName) parts.push(`教師: ${teacherName}`);
+
+        const teachersStr = formatArrayValues(item.teacherNames);
+        if (teachersStr) parts.push(`教師: ${teachersStr}`);
+
+        const classroomName = item.classroomName || item.room || item.room_name || item.classroomId;
+        if (classroomName) parts.push(`教室: ${classroomName}`);
+
+        const subjectName = item.canonicalSubject || item.subject || item.subject_name;
+        if (subjectName) parts.push(`科目: ${subjectName}`);
+
+        const subjectsStr = formatArrayValues(item.subjects);
+        if (subjectsStr && (!subjectName || subjectsStr !== subjectName)) {
+          parts.push(`科目明細: ${subjectsStr}`);
+        }
+
+        const classesStr = formatArrayValues(item.classes);
+        if (classesStr) parts.push(`班級清單: ${classesStr}`);
+
+        if (item.grade !== undefined && item.grade !== null) {
+          parts.push(`年級: ${item.grade}年級`);
+        }
+
+        const allowedGradesStr = Array.isArray(item.allowedGrades)
+          ? item.allowedGrades.filter(g => typeof g === 'number').map(g => `${g}年級`).join('、')
+          : '';
+        if (allowedGradesStr) parts.push(`允許年級: ${allowedGradesStr}`);
+
+        if (item.day && item.period) {
+          parts.push(`時段: 星期${item.day}第${item.period}節`);
+        } else if (item.day) {
+          parts.push(`星期: 星期${item.day}`);
+        }
+
+        const periodsStr = Array.isArray(item.periods) ? item.periods.join('、') : '';
+        if (periodsStr) parts.push(`節次: 第${periodsStr}節`);
+
+        if (item.used !== undefined && item.capacity !== undefined) {
+          parts.push(`使用量/容量: ${item.used}/${item.capacity}`);
+        } else if (item.used !== undefined) {
+          parts.push(`使用量: ${item.used}`);
+        } else if (item.capacity !== undefined) {
+          parts.push(`容量: ${item.capacity}`);
+        }
+
+        if (item.count !== undefined && item.count !== null) {
+          parts.push(`同日節數: ${item.count}節`);
+        }
+
+        if (Array.isArray(item.entries)) {
+          const entryParts = [];
+          for (const sc of item.entries) {
+            if (!sc || typeof sc !== 'object') continue;
+            const scSub = [];
+            if (sc.scName) scSub.push(sc.scName);
+            if (sc.teacher) scSub.push(`教師:${sc.teacher}`);
+            if (sc.originalTargetSubject) scSub.push(`原科目:${sc.originalTargetSubject}`);
+            if (sc.effectiveScheduleSubject) scSub.push(`有效科目:${sc.effectiveScheduleSubject}`);
+            if (scSub.length > 0) entryParts.push(scSub.join(' '));
+          }
+          if (entryParts.length > 0) {
+            parts.push(`特殊課明細: [${entryParts.join('；')}]`);
+          }
+        }
+
+        if (item.disposition) parts.push(`處置: ${item.disposition}`);
         if (item.reason) parts.push(`原因: ${item.reason}`);
         if (item.issue || item.description) parts.push(item.issue || item.description);
 
+        if (parts.length === 0 && item.message) {
+          parts.push(item.message);
+        }
+
         const composed = parts.join(' - ');
         if (composed) {
+          const level = (item.level || 'warn').toLowerCase();
           return {
-            level: 'warn',
-            category: defaultCategory,
+            ...item,
+            level,
+            category: item.category || defaultCategory,
             message: composed,
-            displayText: `[WARN] ${composed}`,
+            displayText: `[${level.toUpperCase()}] ${composed}`,
+            source,
           };
         }
       }
@@ -164,18 +305,23 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     };
 
     const categoriesMap = [
-      { key: 'unassigned_special_rooms', category: 'SPECIAL_ROOM' },
-      { key: 'room_conflicts', category: 'ROOM_OVERLOAD' },
-      { key: 'room_overloads', category: 'ROOM_OVERLOAD' },
-      { key: 'teacher_conflicts', category: 'TEACHER_CONFLICT' },
       { key: 'class_slot_conflicts', category: 'CLASS_CONFLICT' },
+      { key: 'teacher_conflicts', category: 'TEACHER_CONFLICT' },
+      { key: 'room_conflicts', category: 'ROOM_CONFLICT' },
+      { key: 'room_overloads', category: 'ROOM_OVERLOAD' },
+      { key: 'unassigned_special_rooms', category: 'SPECIAL_ROOM' },
+      { key: 'grade_subject_issues', category: 'GRADE_SUBJECT' },
+      { key: 'special_course_overlap_conflicts', category: 'SPECIAL_COURSE_OVERLAP' },
+      { key: 'science_same_day_shape_issues', category: 'SCIENCE_SAME_DAY' },
+      { key: 'subject_day_spread_issues', category: 'SUBJECT_DAY_SPREAD' },
+      { key: 'special_course_input_errors', category: 'SPECIAL_COURSE_INPUT' },
     ];
 
     categoriesMap.forEach(({ key, category }) => {
       const list = reportObj[key];
       if (Array.isArray(list)) {
         list.forEach((item) => {
-          const entry = formatEntryMessage(item, category);
+          const entry = formatEntryMessage(item, category, key);
           if (entry) details.push(entry);
         });
       }
@@ -361,6 +507,14 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   const engineJobId = ref(null);
   const engineErrorMessage = ref('');
   const engineResult = ref(null);
+
+  // 🆕 R16 W5 refs
+  const engineErrorCode = ref(null);
+  const engineStatusDetail = ref(null);
+  const engineErrorCodes = ref([]);
+  const engineGradeTimeRuleIssues = ref([]);
+  const engineErrorCodesPresent = ref(false);
+
   // 🔍 AI 診斷分析結果
   const engineAiAnalysis = ref([]);
   const engineDiagnosticWarningDetails = ref([]);
@@ -1126,6 +1280,25 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
       // 🚀 關鍵修復：如果後端回傳失敗 (如 500 錯誤)，強制拋出異常！
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        if (
+          errorData.error === 'GRADE_TIME_RULE_MIGRATION_FAILED' ||
+          (Array.isArray(errorData.issues) && errorData.issues.some((i) => i.code === 'GRADE_TIME_RULE_MIGRATION_FAILED'))
+        ) {
+          const rawIssue = Array.isArray(errorData.issues)
+            ? errorData.issues.find((i) => i.code === 'GRADE_TIME_RULE_MIGRATION_FAILED') || errorData.issues[0]
+            : { code: 'GRADE_TIME_RULE_MIGRATION_FAILED', message: errorData.error };
+          const rendered = renderGtrIssuePresentation(rawIssue, {
+            source: 'server_internal',
+            authorityData: GTR_CODES,
+            presentationsData: GTR_PRESENTATIONS,
+          });
+          const nextStepStr = (rendered.nextSteps || []).join('；');
+          const errorMsg = `${rendered.userMessage}${nextStepStr ? `\n建議下一步：${nextStepStr}` : ''}\n（技術細節：${rawIssue.message || errorData.error}）`;
+          const err = new Error(errorMsg);
+          err.code = 'GRADE_TIME_RULE_MIGRATION_FAILED';
+          err.issues = errorData.issues;
+          throw err;
+        }
         throw new Error(errorData.details || errorData.error || `HTTP 錯誤碼: ${response.status}`);
       }
 
@@ -1488,10 +1661,22 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     return `${Math.floor(seconds / 3600)}時${Math.floor((seconds % 3600) / 60)}分${seconds % 60}秒`;
   };
 
+  // 內部：清空排課錯誤與診斷 refs (避免不同 job 間殘留)
+  const clearEngineErrorRefs = () => {
+    engineErrorCode.value = null;
+    engineStatusDetail.value = null;
+    engineErrorCodes.value = [];
+    engineGradeTimeRuleIssues.value = [];
+    engineErrorCodesPresent.value = false;
+    engineAiAnalysis.value = [];
+    engineDiagnosticWarningDetails.value = [];
+  };
+
   // 內部：終止輪詢並設為 ERROR 狀態
   const _terminalErrorHandle = (rejectFn, errorMsg) => {
     stopPolling();
     clearActiveJob();
+    clearEngineErrorRefs();
     engineStatus.value = 'ERROR';
     enginePhase.value = enginePhase.value || 'FAILED';
     engineErrorMessage.value = errorMsg;
@@ -1564,21 +1749,83 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
           engineStatus.value = 'ERROR';
           enginePhase.value = 'FAILED';
 
+          // 每次處理新結果前清空五個新 refs 及舊診斷
+          clearEngineErrorRefs();
+
+          // 在 default [] 前判斷原欄位是否存在
+          const hasErrorCodesProp = Boolean(resultObj && Object.prototype.hasOwnProperty.call(resultObj, 'errorCodes'));
+          engineErrorCodesPresent.value = hasErrorCodesProp;
+
+          if (resultObj?.errorCode !== undefined && resultObj?.errorCode !== null) {
+            engineErrorCode.value = String(resultObj.errorCode).trim();
+          }
+          if (resultObj?.statusDetail && typeof resultObj.statusDetail === 'object') {
+            engineStatusDetail.value = resultObj.statusDetail;
+          }
+          if (Array.isArray(resultObj?.gradeTimeRuleIssues)) {
+            engineGradeTimeRuleIssues.value = resultObj.gradeTimeRuleIssues;
+          }
+
+          if (hasErrorCodesProp) {
+            if (Array.isArray(resultObj.errorCodes)) {
+              engineErrorCodes.value = resultObj.errorCodes;
+            } else {
+              // 欄位存在但不是 array 時保守處理
+              engineErrorCodes.value = [{
+                code: 'UNKNOWN_FORMAT',
+                severity: 'unknown',
+                confidence: 'unknown',
+                source: null,
+                sourceRef: { kind: 'unknown', section: null, index: 0 },
+                userMessage: '診斷資料格式無法辨識',
+                evidence: [],
+                nextSteps: ['保存本次任務紀錄，交由系統維護者比對診斷格式。']
+              }];
+            }
+          }
+
+          // 判斷 validationReport 來源
+          const reportSource = resultObj?.validationReportSource !== undefined && resultObj?.validationReportSource !== null
+            ? String(resultObj.validationReportSource).trim()
+            : null;
+
           if (solverStatus === 'INVALID_INPUT') {
             engineErrorMessage.value = resultObj?.error || resultObj?.message || '輸入資料超載，請檢查班級總節數是否超過年級上限';
 
-            if (resultObj?.classLoadTrace) {
+            if (resultObj?.classLoadTrace && Array.isArray(resultObj.classLoadTrace)) {
               engineDiagnosticWarningDetails.value = resultObj.classLoadTrace
-                .filter((t) => t.validationError)
-                .map((t) => ({
-                  category: 'CLASS_LOAD',
-                  className: t.className,
-                  grade: t.grade,
-                  totalPeriods: t.totalPeriods,
-                  capacity: t.capacity ?? t.gradeMaxPeriods,
-                  periodExcess: t.periodExcess,
-                  message: `${t.className}: 總節數 ${t.totalPeriods} > 容量 ${t.capacity ?? t.gradeMaxPeriods} (超限 ${t.periodExcess})`,
-                }));
+                .filter((t) => t && t.validationError)
+                .map((t) => {
+                  if (t.validationError === 'INVALID_INPUT_LOCK_CONSERVATION') {
+                    const conservationError = t.conservationError || resultObj?.error || '某科目的鎖定節數超過需求；須核對鎖定與需求一致性。';
+                    const msg = t.className ? `${t.className}: ${conservationError}` : conservationError;
+                    return {
+                      category: 'LOCK_CONSERVATION',
+                      code: 'SCHE_INPUT_LOCKED_PERIODS_EXCEED_REQUIREMENT',
+                      className: t.className,
+                      message: msg,
+                      displayText: `[WARN] ${msg}`,
+                      source: 'job_output',
+                      ...t,
+                    };
+                  }
+                  // CLASS_LOAD
+                  const cap = t.capacity ?? t.gradeMaxPeriods;
+                  const msg = `${t.className}: 總節數 ${t.totalPeriods} > 容量 ${cap} (超限 ${t.periodExcess})`;
+                  return {
+                    category: 'CLASS_LOAD',
+                    code: 'SCHE_INPUT_CLASS_LOAD_OVER_CAPACITY',
+                    className: t.className,
+                    grade: t.grade,
+                    totalPeriods: t.totalPeriods,
+                    capacity: cap,
+                    periodExcess: t.periodExcess,
+                    message: msg,
+                    displayText: `[WARN] ${msg}`,
+                    source: 'job_output',
+                    ...t,
+                  };
+                });
             }
 
             if (resultObj?.gradeCapacityMap && typeof resultObj.gradeCapacityMap === 'object') {
@@ -1601,14 +1848,15 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
 
             let details = [];
             if (resultObj?.validationReport && typeof resultObj.validationReport === 'object') {
-              details = normalizeValidationReportDetails(resultObj.validationReport);
+              details = normalizeValidationReportDetails(resultObj.validationReport, { source: reportSource });
             }
-            if (details.length === 0) {
+            // legacy fallback: 僅在 errorCodes 屬性缺失、!resultObj?.validationReport 且非 identity 拒收時，才保留 validation report fetch
+            if (!hasErrorCodesProp && !resultObj?.validationReport && engineErrorCode.value !== 'SCHE_ENGINE_ERROR') {
               try {
                 const valResp = await fetch(`${API_BASE}/debug/validation-report`);
                 if (valResp.ok) {
                   const valReport = await valResp.json();
-                  details = normalizeValidationReportDetails(valReport);
+                  details = normalizeValidationReportDetails(valReport, { source: 'shared_file' });
                 }
               } catch (_) {
                 // 靜默失敗
@@ -1630,8 +1878,20 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
               engineAiAnalysis.value = resultObj.aiAnalysis;
             }
 
-            if (engineDiagnosticWarnings.value.length === 0) {
+            // 只有 INFEASIBLE 且缺少 errorCodes 時，才在警示為空時 fetch 共用 infeasible 報告
+            if (!hasErrorCodesProp && engineDiagnosticWarnings.value.length === 0) {
               engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
+            }
+          } else if (solverStatus === 'INVALID_GRADE_TIME_RULE_CONFIGURATION') {
+            engineErrorMessage.value = resultObj?.message || resultObj?.error || '年級時段規則設定有誤';
+
+            // 若為 legacy 缺少 errorCodes，但有 gradeTimeRuleIssues，使用同一 GTR renderer 在 client 轉換
+            if (!hasErrorCodesProp && Array.isArray(resultObj?.gradeTimeRuleIssues) && resultObj.gradeTimeRuleIssues.length > 0) {
+              engineErrorCodes.value = renderGtrIssuesToErrorCodes(resultObj.gradeTimeRuleIssues, {
+                source: null,
+                authorityData: GTR_CODES,
+                presentationsData: GTR_PRESENTATIONS,
+              });
             }
           } else {
             engineErrorMessage.value = resultObj?.error || resultObj?.message || fallbackMsg || '排課引擎執行失敗';
@@ -1640,10 +1900,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             if (resultObj && Array.isArray(resultObj.aiAnalysis)) {
               engineAiAnalysis.value = resultObj.aiAnalysis;
             }
-
-            if (engineDiagnosticWarnings.value.length === 0) {
-              engineAiAnalysis.value = await loadDiagnosticWarningsFromReport();
-            }
+            // else 分支不再 fetch infeasible 報告
           }
 
           if (dataObj?.startedAt && dataObj?.finishedAt) {
@@ -1692,6 +1949,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             'UNKNOWN_TIMEOUT',
             'INFEASIBLE',
             'MODEL_INVALID',
+            'MODEL_EVALUATOR_MISMATCH',
             'INVALID_GRADE_TIME_RULE_CONFIGURATION',
             'ERROR',
           ].includes(solverStatus) || (!solverStatus && scheduleEmpty);
@@ -1701,6 +1959,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
             reject(new Error(engineErrorMessage.value));
           } else {
             // ✅ 真正完成
+            clearEngineErrorRefs();
             engineStatus.value = 'COMPLETED';
             await loadFromDB(true);
             if (data.startedAt && data.finishedAt) {
@@ -1765,6 +2024,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     stopPolling();
     clearActiveJob();
     resetGradeTimeRuleWarningConfirmation();
+    clearEngineErrorRefs();
 
     engineStatus.value = 'PROCESSING';
     engineErrorMessage.value = '';
@@ -1828,6 +2088,7 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
   const resetEngineState = () => {
     stopPolling();
     clearActiveJob();
+    clearEngineErrorRefs();
     engineStatus.value = 'IDLE';
     engineJobId.value = null;
     engineErrorMessage.value = '';
@@ -1840,8 +2101,6 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     engineLastUpdated.value = null;
     enginePollingActive.value = false;
     engineNetworkRetry.value = 0;
-    engineAiAnalysis.value = [];
-    engineDiagnosticWarningDetails.value = [];
   };
 
   // 🚀 新增：根據 gradeSettings 同步 Class 記錄
@@ -2120,6 +2379,8 @@ export const useScheduleStore = defineStore('simpleSchedule', () => {
     schoolInfo, syncStatus, lastSavedTime, teachers, classes, specialCourses, classrooms, standardDomainSettings, allAvailableSubjects,
     teacherQuotas,
     engineStatus, engineJobId, engineErrorMessage, engineResult, engineAiAnalysis, engineDiagnosticWarnings, engineDiagnosticWarningDetails,
+    // 🆕 R16 W5 refs
+    engineErrorCode, engineStatusDetail, engineErrorCodes, engineGradeTimeRuleIssues, engineErrorCodesPresent,
     // 新增：進度狀態欄位
     enginePhase, engineMessage, engineStartedAt, engineFinishedAt,
     engineElapsedSeconds, engineLastUpdated, enginePollingActive, engineNetworkRetry,

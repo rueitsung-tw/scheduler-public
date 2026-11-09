@@ -156,6 +156,20 @@ export function parseImportFile(text) {
     aiSettings: payload.aiSettings,
   })
 
+  // 遇 blocking migration issue 時停止匯入並拋出帶 code/issues 的結構化錯誤
+  const blockingMigrationIssue = (prepared.migrationIssues || []).find(
+    (issue) => issue && issue.severity === 'blocking'
+  )
+  if (blockingMigrationIssue) {
+    const error = new Error(
+      blockingMigrationIssue.message || '舊版年級時段設定轉換失敗，新規則內容尚待確認。'
+    )
+    error.code = blockingMigrationIssue.code || 'GRADE_TIME_RULE_MIGRATION_FAILED'
+    error.issue = blockingMigrationIssue
+    error.issues = prepared.migrationIssues
+    throw error
+  }
+
   // Normalize with defaults for missing fields
   return {
     schoolInfo: normalizeSchoolInfo(payload.schoolInfo, prepared.gradeTimeRulesSettings),

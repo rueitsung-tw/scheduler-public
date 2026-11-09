@@ -64,8 +64,9 @@ These files are maintained directly in `F:\scheduler-public` and are preserved v
 
 - Local runtime and secrets: `.env`, `dev.db`, `*.local`
 - Build and cache output: `node_modules/`, `dist/`, `.venv/`, `venv/`, `__pycache__/`, `.pytest_cache/`
-- Assistant/tooling folders: `.agent/`, `.agents/`, `.claude/`, `.cline/`, `.continue/`, `.github/`, `.vscode/`
-- Debug and diagnostics: `debug_*`, `input_*.json`, `output*.json`, `fresh_db_dump.json`, `solver_log.txt`, `debug_lock_audit.txt`
+- Assistant/tooling folders: `.agent/`, `.agents/`, `.agy-runs/`, `.claude/`, `.cline/`, `.continue/`, `.github/`, `.vscode/`
+- Private planning: `.superpowers/`
+- Debug and diagnostics: `.tmp-ui-simulation/`, `debug_*`, `input_*.json`, `output*.json`, `fresh_db_dump.json`, `solver_log.txt`, `debug_lock_audit.txt`
 - Helper scripts and backups: `analyze_payload.py`, `repair_agent.py`, `diagnose_*`, `verify_*`, `*_backup.py`, `cleanup_db.*`, `check_db.mjs`, `fetch_all_db.mjs`, `export_solver_input.mjs`
 - Private docs/history: most other files under `docs/`
 

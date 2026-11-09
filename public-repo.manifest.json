@@ -38,7 +38,9 @@
     "constraints/utils.py",
     "grade_time_rules.py",
     "grade_time_rule_diagnostics.py",
-    "contracts/grade_time_rule_issue_codes.json"
+    "contracts/grade_time_rule_issue_codes.json",
+    "contracts/grade_time_rule_issue_presentations.json",
+    "contracts/scheduler_error_codes.json"
   ],
   "includeDocFiles": [],
   "targetOnlyRoots": ["tests", "docs", "agy-mcp-server", "node_modules", ".pytest_cache", "__pycache__"],
@@ -52,6 +54,9 @@
   ],
   "ignoredRoots": [
     ".codex-orchestration",
+    ".agy-runs",
+    ".superpowers",
+    ".tmp-ui-simulation",
     "agy-mcp-server",
     ".cmp",
     ".agent",

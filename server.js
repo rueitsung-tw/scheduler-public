@@ -21,7 +21,20 @@ import { buildScheduleAiReport } from './src/utils/scheduleAiReport.js';
 import { validateRepairHardConstraints } from './src/utils/repairHardConstraints.js';
 import { buildAiTuningPromptBundle } from './src/services/aiTuningPrompt.js';
 import { buildInfeasibleAnalysisBundle } from './src/services/aiInfeasibleAnalysisBundle.js';
-import { buildAiInfeasibleAnalysisPrompt, validateAiInfeasibleAnalysisResponse } from './src/services/aiInfeasibleAnalysisPrompt.js';
+import {
+    buildAiInfeasibleAnalysisPrompt,
+    buildAiInfeasibleAnalysisSystemPrompt,
+    validateAiInfeasibleAnalysisResponse,
+} from './src/services/aiInfeasibleAnalysisPrompt.js';
+import {
+    buildGenericInfeasibleWarnings,
+    normalizeDiagnosticReportLine,
+    parseInfeasibleDiagnosticReport,
+} from './src/services/diagnosticWarningParser.js';
+import {
+    assembleFailedSolverResult,
+    resolveStatusDetail,
+} from './src/services/diagnosticErrorCodes.js';
 import { normalizeTeacherClassProgressAiSettings, validateTeacherClassProgress } from './src/utils/teacherClassProgressSettings.js';
 import {
     buildAiErrorDetails,
@@ -1056,8 +1069,15 @@ function createAiHttpError(status, code, message, details = '') {
     return error;
 }
 
-async function resolveAiRuntimeSettings(clientConnectionSettings = {}) {
-    const systemSetting = await prisma.systemSetting.findUnique({ where: { id: 1 } });
+async function resolveAiRuntimeSettings(clientConnectionSettings = {}, prismaImpl = prisma) {
+    let systemSetting = null;
+    if (prismaImpl?.systemSetting?.findUnique) {
+        try {
+            systemSetting = await prismaImpl.systemSetting.findUnique({ where: { id: 1 } });
+        } catch {
+            systemSetting = null;
+        }
+    }
     const aiSystemSettings = systemSetting && systemSetting.aiSystemSettings
         ? JSON.parse(systemSetting.aiSystemSettings)
         : {
@@ -1125,6 +1145,7 @@ async function invokeAiJsonEndpoint({
     maxOutputTokens,
     temperature,
     abortSignal = null,
+    deps = {},
 }) {
     let finalSystemPrompt = systemPrompt;
     let finalUserPrompt = userPrompt;
@@ -1169,8 +1190,9 @@ async function invokeAiJsonEndpoint({
     }
     const upstreamTimer = setTimeout(() => upstreamController.abort(), AI_TUNING_TIMEOUT_MS);
     let upstreamResponse;
+    const fetchImpl = deps?.fetch || globalThis.fetch;
     try {
-        upstreamResponse = await fetch(targetUrl, {
+        upstreamResponse = await fetchImpl(targetUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(upstreamPayload),
@@ -1801,6 +1823,7 @@ async function executeAiTimetableAnalysis({
     connectionSettings: clientConnectionSettings = {},
     tuningContext = {},
     abortSignal = null,
+    deps = {},
 }) {
     const sourceEntries = Array.isArray(scheduleEntries)
         ? scheduleEntries
@@ -1840,7 +1863,7 @@ async function executeAiTimetableAnalysis({
         disableThinking,
         maxOutputTokens,
         temperature,
-    } = await resolveAiRuntimeSettings(clientConnectionSettings);
+    } = await resolveAiRuntimeSettings(clientConnectionSettings, deps.prisma || prisma);
 
     const systemPrompt = [
         resolvedAiSettings.systemPrompt,
@@ -1901,6 +1924,7 @@ async function executeAiTimetableAnalysis({
         maxOutputTokens,
         temperature,
         abortSignal,
+        deps,
     });
     const maxMovesPerRound = Number.parseInt(tuningContext?.maxMovesPerRound, 10);
     const parsedMoves = Array.isArray(parsed.selectedMoves) ? parsed.selectedMoves : [];
@@ -2056,28 +2080,41 @@ async function executeAiTimetableAnalysis({
     };
 }
 
-async function executeAiInfeasibleAnalysis({
+export async function executeAiInfeasibleAnalysis({
     bundle = null,
     jobId = '',
     connectionSettings: clientConnectionSettings = {},
     maxPromptChars = 120000,
     abortSignal = null,
-}) {
-    const normalizedJobId = normalizeDiagnosticReportLine(jobId);
-    const effectiveBundle = bundle && typeof bundle === 'object'
-        ? bundle
-        : buildInfeasibleAnalysisBundleFromArtifacts({
-            jobId: normalizedJobId,
-            reportPath: path.join(__dirname, 'debug_infeasible_report.txt'),
-            payloadPath: normalizedJobId && fs.existsSync(path.join(__dirname, `input_${normalizedJobId}.json`))
-                ? path.join(__dirname, `input_${normalizedJobId}.json`)
-                : (fs.existsSync(path.join(__dirname, 'debug_payload.json'))
-                    ? path.join(__dirname, 'debug_payload.json')
-                    : ''),
-            diagnosticJsonPath: normalizedJobId && fs.existsSync(path.join(__dirname, `debug_schedule_diagnostic_${normalizedJobId}.json`))
-                ? path.join(__dirname, `debug_schedule_diagnostic_${normalizedJobId}.json`)
-                : findLatestArtifactPath('debug_schedule_diagnostic_'),
+}, deps = {}) {
+    const normalizedJobId = normalizeDiagnosticReportLine(jobId || bundle?.job?.jobId || '');
+    let effectiveBundle = null;
+
+    if (normalizedJobId) {
+        const resolved = await resolveJobScopedInfeasibleBundle(normalizedJobId, deps);
+        effectiveBundle = resolved?.bundle || null;
+    } else if (bundle && typeof bundle === 'object' && bundle.kind === 'infeasible_analysis') {
+        effectiveBundle = sanitizeBundleForSolverStatus(
+            bundle,
+            bundle?.job?.solverStatus || 'ERROR'
+        );
+    } else {
+        const baseDir = deps.baseDir || __dirname;
+        const fsImpl = deps.fs || fs;
+        const diagPath = findLatestArtifactPath('debug_schedule_diagnostic_', '.json', baseDir, fsImpl);
+        const diagJson = tryReadJsonFile(diagPath, fsImpl);
+        const inferredStatus = diagJson?.solverStatus || 'ERROR';
+        effectiveBundle = buildInfeasibleAnalysisBundleFromArtifacts({
+            jobId: diagJson?.jobId || '',
+            solverStatus: inferredStatus,
+            reportPath: inferredStatus === 'INFEASIBLE' ? path.join(baseDir, 'debug_infeasible_report.txt') : '',
+            payloadPath: fsImpl.existsSync(path.join(baseDir, 'debug_payload.json'))
+                ? path.join(baseDir, 'debug_payload.json')
+                : '',
+            diagnosticJsonPath: diagPath,
+            fsImpl,
         });
+    }
 
     if (!effectiveBundle || typeof effectiveBundle !== 'object' || effectiveBundle.kind !== 'infeasible_analysis') {
         throw createAiHttpError(400, 'AI_INFEASIBLE_BUNDLE_MISSING', '缺少有效的 infeasible analysis bundle');
@@ -2091,7 +2128,7 @@ async function executeAiInfeasibleAnalysis({
         disableThinking,
         maxOutputTokens,
         temperature,
-    } = await resolveAiRuntimeSettings(clientConnectionSettings);
+    } = await resolveAiRuntimeSettings(clientConnectionSettings, deps.prisma || prisma);
 
     const promptResult = buildAiInfeasibleAnalysisPrompt(effectiveBundle, {
         maxPromptChars: Number.isFinite(Number(maxPromptChars)) && Number(maxPromptChars) > 0
@@ -2108,13 +2145,9 @@ async function executeAiInfeasibleAnalysis({
         );
     }
 
-    const systemPrompt = [
-        resolvedAiSettings.systemPrompt,
-        '你是排課引擎 INFEASIBLE 診斷分析器，請只回傳 JSON。',
-        '你的任務是根據 bundle 中的警示、payload 與診斷資料，找出最可能的硬衝突根因。',
-        '不要只重述所有警示，要排序並指出最值得先修的問題。',
-        '嚴格遵守 user prompt 中提供的 schema。',
-    ].filter(Boolean).join('\n\n');
+    const systemPrompt = buildAiInfeasibleAnalysisSystemPrompt(effectiveBundle, {
+        baseSystemPrompt: resolvedAiSettings.systemPrompt,
+    });
 
     const {
         parsed,
@@ -2129,6 +2162,7 @@ async function executeAiInfeasibleAnalysis({
         maxOutputTokens,
         temperature,
         abortSignal,
+        deps,
     });
 
     let analysis;
@@ -3222,61 +3256,255 @@ app.get('/api/debug/validation-report', async (req, res) => {
     }
 });
 
+export const OUTPUT_IDENTITY_REJECTED_ERROR_MESSAGE =
+    '排課輸出身分驗證失敗：jobId 缺失或與目前工作不符，已拒收 solver output。';
+
+export function isValidOutputJobIdentity(outputJson, workerJobId) {
+    if (!outputJson || typeof outputJson !== 'object' || Array.isArray(outputJson)) {
+        return false;
+    }
+    if (typeof outputJson.jobId !== 'string' || outputJson.jobId.trim() === '') {
+        return false;
+    }
+    return outputJson.jobId === String(workerJobId);
+}
+
+export function sanitizeBundleForSolverStatus(bundle, actualSolverStatus) {
+    if (!bundle || typeof bundle !== 'object') {
+        return bundle;
+    }
+    const effectiveStatus = actualSolverStatus || bundle?.job?.solverStatus || 'ERROR';
+    if (effectiveStatus === 'INFEASIBLE') {
+        return bundle;
+    }
+    return {
+        ...bundle,
+        job: {
+            ...(bundle.job || {}),
+            solverStatus: effectiveStatus,
+        },
+        reportText: '',
+        reportWarningLines: [],
+        diagnosticWarnings: [],
+        aiAnalysis: [],
+    };
+}
+
+export async function resolveJobScopedInfeasibleBundle(requestedJobId, deps = {}) {
+    const normalizedJobId = normalizeDiagnosticReportLine(requestedJobId);
+    if (!normalizedJobId) {
+        return null;
+    }
+
+    const baseDir = deps.baseDir || __dirname;
+    const fsImpl = deps.fs || fs;
+    const prismaImpl = deps.prisma || prisma;
+
+    let jobRecord = null;
+    if (prismaImpl?.scheduleJob?.findUnique) {
+        try {
+            jobRecord = await prismaImpl.scheduleJob.findUnique({ where: { id: normalizedJobId } });
+        } catch {
+            jobRecord = null;
+        }
+    }
+
+    let parsedResult = null;
+    if (jobRecord?.result) {
+        try {
+            parsedResult = JSON.parse(jobRecord.result);
+        } catch {
+            parsedResult = null;
+        }
+    }
+
+    let parsedDbPayload = null;
+    if (jobRecord?.payload) {
+        try {
+            parsedDbPayload = JSON.parse(jobRecord.payload);
+        } catch {
+            parsedDbPayload = null;
+        }
+    }
+
+    if (parsedResult?.error === OUTPUT_IDENTITY_REJECTED_ERROR_MESSAGE) {
+        return null;
+    }
+
+    const diagCandidatePath = path.join(baseDir, `debug_schedule_diagnostic_${normalizedJobId}.json`);
+    const rawDiagJson = tryReadJsonFile(diagCandidatePath, fsImpl);
+    const dbSolverStatus = parsedResult?.solverStatus || parsedResult?.status || null;
+    const hasDbErrorCodes = Boolean(parsedResult && typeof parsedResult === 'object' &&
+        Object.prototype.hasOwnProperty.call(parsedResult, 'errorCodes'));
+    const verifiedDiagJson =
+        rawDiagJson && String(rawDiagJson.jobId || '') === normalizedJobId &&
+        (!jobRecord?.status || rawDiagJson.status === jobRecord.status) &&
+        (!dbSolverStatus || rawDiagJson.solverStatus === dbSolverStatus)
+            ? rawDiagJson : null;
+
+    const authoritativeSolverStatus =
+        dbSolverStatus ||
+        verifiedDiagJson?.solverStatus ||
+        null;
+
+    const bundleCandidatePath = path.join(baseDir, `debug_infeasible_bundle_${normalizedJobId}.json`);
+    if (fsImpl.existsSync(bundleCandidatePath)) {
+        const cachedBundle = tryReadJsonFile(bundleCandidatePath, fsImpl);
+        const cachedJobId = cachedBundle?.job?.jobId;
+        const cachedSolverStatus = cachedBundle?.job?.solverStatus;
+        const cachedJobStatus = cachedBundle?.job?.jobStatus;
+        const isIdentityValid =
+            cachedBundle &&
+            cachedBundle.kind === 'infeasible_analysis' &&
+            String(cachedJobId || '') === normalizedJobId;
+        const isSolverStatusConsistent =
+            !authoritativeSolverStatus || cachedSolverStatus === authoritativeSolverStatus;
+        const isJobStatusConsistent =
+            !jobRecord?.status || cachedJobStatus === jobRecord.status;
+        const hasAuthoritativeContext = Boolean(jobRecord || verifiedDiagJson);
+
+        if (isIdentityValid && isSolverStatusConsistent && isJobStatusConsistent && hasAuthoritativeContext && !hasDbErrorCodes) {
+            const effectiveStatus = authoritativeSolverStatus || cachedSolverStatus || 'ERROR';
+            return {
+                source: 'bundle_file',
+                bundlePath: path.basename(bundleCandidatePath),
+                bundle: sanitizeBundleForSolverStatus(cachedBundle, effectiveStatus),
+            };
+        }
+    }
+
+    if (!jobRecord && !verifiedDiagJson) {
+        return null;
+    }
+
+    const effectiveSolverStatus = authoritativeSolverStatus || 'ERROR';
+    const inputCandidatePath = path.join(baseDir, `input_${normalizedJobId}.json`);
+    let verifiedInputPath = '';
+    if (!parsedDbPayload && fsImpl.existsSync(inputCandidatePath)) {
+        const inputJson = tryReadJsonFile(inputCandidatePath, fsImpl);
+        if (inputJson && typeof inputJson.jobId === 'string' && inputJson.jobId.trim() === normalizedJobId) {
+            verifiedInputPath = inputCandidatePath;
+        }
+    }
+
+    const reportPath =
+        effectiveSolverStatus === 'INFEASIBLE'
+            ? path.join(baseDir, 'debug_infeasible_report.txt')
+            : '';
+
+    const mergedDiagJson = {
+        ...(verifiedDiagJson || {}),
+        jobId: normalizedJobId,
+        status: jobRecord?.status || verifiedDiagJson?.status || 'FAILED',
+        solverStatus: effectiveSolverStatus,
+        error: parsedResult?.error || verifiedDiagJson?.error || '',
+        errorCode: parsedResult?.errorCode || verifiedDiagJson?.errorCode || undefined,
+        statusDetail: parsedResult?.statusDetail || verifiedDiagJson?.statusDetail || undefined,
+        errorCodes: hasDbErrorCodes
+            ? parsedResult.errorCodes
+            : verifiedDiagJson?.errorCodes,
+        gradeTimeRuleIssues: Array.isArray(parsedResult?.gradeTimeRuleIssues)
+            ? parsedResult.gradeTimeRuleIssues
+            : verifiedDiagJson?.gradeTimeRuleIssues,
+        validationReport: parsedResult?.validationReport ?? verifiedDiagJson?.validationReport ?? undefined,
+        validationReportSource:
+            parsedResult?.validationReportSource ?? verifiedDiagJson?.validationReportSource ?? null,
+        classLoadTrace: parsedResult?.classLoadTrace ?? verifiedDiagJson?.classLoadTrace ?? undefined,
+        gradeCapacityMap: parsedResult?.gradeCapacityMap ?? verifiedDiagJson?.gradeCapacityMap ?? undefined,
+        diagnosticWarnings:
+            effectiveSolverStatus === 'INFEASIBLE'
+                ? (Array.isArray(parsedResult?.diagnosticWarnings)
+                    ? parsedResult.diagnosticWarnings
+                    : verifiedDiagJson?.diagnosticWarnings || [])
+                : [],
+        aiAnalysis:
+            effectiveSolverStatus === 'INFEASIBLE'
+                ? (Array.isArray(parsedResult?.aiAnalysis)
+                    ? parsedResult.aiAnalysis
+                    : verifiedDiagJson?.aiAnalysis || [])
+                : [],
+    };
+
+    const bundle = buildInfeasibleAnalysisBundleFromArtifacts({
+        jobId: normalizedJobId,
+        errorMsg: mergedDiagJson.error,
+        solverStatus: effectiveSolverStatus,
+        reportPath,
+        payloadPath: verifiedInputPath,
+        payloadOverride: parsedDbPayload,
+        diagnosticJsonPath: verifiedDiagJson ? diagCandidatePath : '',
+        diagnosticJsonOverride: mergedDiagJson,
+        diagnosticWarnings: mergedDiagJson.diagnosticWarnings,
+        fsImpl,
+    });
+
+    return {
+        source: 'rebuilt_from_artifacts',
+        bundle: sanitizeBundleForSolverStatus(bundle, effectiveSolverStatus),
+    };
+}
+
 app.get('/api/ai-infeasible-analysis-bundle', async (req, res) => {
     try {
         const requestedJobId = normalizeDiagnosticReportLine(req.query?.jobId);
-        const bundlePath = requestedJobId
-            ? path.join(__dirname, `debug_infeasible_bundle_${requestedJobId}.json`)
-            : findLatestArtifactPath('debug_infeasible_bundle_');
+        if (requestedJobId) {
+            const resolved = await resolveJobScopedInfeasibleBundle(requestedJobId);
+            if (!resolved || !resolved.bundle) {
+                return res.status(404).json({
+                    ok: false,
+                    error: '找不到該任務的可信 AI 診斷資料',
+                });
+            }
+            return res.json({
+                ok: true,
+                source: resolved.source,
+                ...(resolved.bundlePath ? { bundlePath: resolved.bundlePath } : {}),
+                bundle: resolved.bundle,
+            });
+        }
 
+        const bundlePath = findLatestArtifactPath('debug_infeasible_bundle_');
         if (bundlePath && fs.existsSync(bundlePath)) {
             const bundle = tryReadJsonFile(bundlePath);
             if (bundle) {
+                const sanitized = sanitizeBundleForSolverStatus(
+                    bundle,
+                    bundle?.job?.solverStatus || 'ERROR'
+                );
                 return res.json({
                     ok: true,
                     source: 'bundle_file',
                     bundlePath: path.basename(bundlePath),
-                    bundle,
+                    bundle: sanitized,
                 });
             }
         }
 
-        let jobRecord = null;
-        if (requestedJobId) {
-            jobRecord = await prisma.scheduleJob.findUnique({ where: { id: requestedJobId } });
-        }
-
-        let parsedResult = {};
-        try {
-            parsedResult = jobRecord?.result ? JSON.parse(jobRecord.result) : {};
-        } catch {
-            parsedResult = {};
-        }
-
-        const reportPath = path.join(__dirname, 'debug_infeasible_report.txt');
-        const payloadPath = requestedJobId && fs.existsSync(path.join(__dirname, `input_${requestedJobId}.json`))
-            ? path.join(__dirname, `input_${requestedJobId}.json`)
-            : (fs.existsSync(path.join(__dirname, 'debug_payload.json'))
-                ? path.join(__dirname, 'debug_payload.json')
-                : '');
-        const diagnosticJsonPath = requestedJobId && fs.existsSync(path.join(__dirname, `debug_schedule_diagnostic_${requestedJobId}.json`))
-            ? path.join(__dirname, `debug_schedule_diagnostic_${requestedJobId}.json`)
-            : findLatestArtifactPath('debug_schedule_diagnostic_');
+        const diagnosticJsonPath = findLatestArtifactPath('debug_schedule_diagnostic_');
+        const diagJson = tryReadJsonFile(diagnosticJsonPath);
+        const inferredStatus = diagJson?.solverStatus || 'ERROR';
+        const reportPath =
+            inferredStatus === 'INFEASIBLE'
+                ? path.join(__dirname, 'debug_infeasible_report.txt')
+                : '';
+        const payloadPath = fs.existsSync(path.join(__dirname, 'debug_payload.json'))
+            ? path.join(__dirname, 'debug_payload.json')
+            : '';
 
         const bundle = buildInfeasibleAnalysisBundleFromArtifacts({
-            jobId: requestedJobId || parsedResult?.jobId || '',
-            errorMsg: parsedResult?.error || '',
-            solverStatus: parsedResult?.solverStatus || 'INFEASIBLE',
+            jobId: diagJson?.jobId || '',
+            errorMsg: diagJson?.error || '',
+            solverStatus: inferredStatus,
             reportPath,
             payloadPath,
             diagnosticJsonPath,
-            diagnosticWarnings: parsedResult?.diagnosticWarnings || [],
+            diagnosticWarnings: inferredStatus === 'INFEASIBLE' ? (diagJson?.diagnosticWarnings || []) : [],
         });
 
         return res.json({
             ok: true,
             source: 'rebuilt_from_artifacts',
-            bundle,
+            bundle: sanitizeBundleForSolverStatus(bundle, inferredStatus),
         });
     } catch (error) {
         console.error('[AI Infeasible Bundle] 讀取失敗:', error);
@@ -3349,208 +3577,28 @@ function generateRecommendation(pre, post) {
     return tips.join(' | ');
 }
 
-function normalizeDiagnosticReportLine(line) {
-    return String(line || '').replace(/\r/g, '').trim();
-}
-
-function createDiagnosticWarning({ level = 'WARN', category = 'generic_infeasible', message = '', rawLine = '', contextLine = '' } = {}) {
-    const normalizedLevel = String(level || 'WARN').trim().toLowerCase();
-    const normalizedMessage = normalizeDiagnosticReportLine(message);
-    const detail = {
-        level: normalizedLevel || 'warn',
-        category: String(category || 'generic_infeasible').trim() || 'generic_infeasible',
-        message: normalizedMessage,
-        displayText: `[${(normalizedLevel || 'warn').toUpperCase()}] ${normalizedMessage}`,
-    };
-    const normalizedRawLine = normalizeDiagnosticReportLine(rawLine);
-    const normalizedContextLine = normalizeDiagnosticReportLine(contextLine);
-    if (normalizedRawLine) detail.rawLine = normalizedRawLine;
-    if (normalizedContextLine) detail.contextLine = normalizedContextLine;
-    return detail;
-}
-
-function getDiagnosticReportLevel(line) {
-    const normalized = normalizeDiagnosticReportLine(line);
-    const match = normalized.match(/\[(WARN|ERROR|ALERT)\]/i);
-    if (match) return match[1].toUpperCase();
-    if (normalized.includes('❌')) return 'ERROR';
-    if (normalized.includes('⚠️')) return 'WARN';
-    return '';
-}
-
-function findPreviousDiagnosticContext(lines, index) {
-    for (let i = index - 1; i >= 0; i -= 1) {
-        const candidate = normalizeDiagnosticReportLine(lines[i]);
-        if (!candidate) continue;
-        if (candidate.startsWith('[DEBUG]')) break;
-        return candidate;
-    }
-    return '';
-}
-
 function buildGenericInfeasibleAnalysis() {
     return ['[WARN] 排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。'];
 }
 
-function buildGenericInfeasibleWarnings() {
-    return [
-        createDiagnosticWarning({
-            level: 'WARN',
-            category: 'generic_infeasible',
-            message: '排課引擎無法找到可行解，建議檢查班級課程需求、教師配額、教室容量是否平衡。',
-        }),
-    ];
-}
-
-function diagnosticWarningsToAiAnalysis(diagnosticWarnings) {
-    return (Array.isArray(diagnosticWarnings) ? diagnosticWarnings : [])
-        .map((warning) => normalizeDiagnosticReportLine(
-            warning?.displayText
-            || (warning?.message ? `[${String(warning.level || 'warn').toUpperCase()}] ${warning.message}` : '')
-        ))
-        .filter(Boolean);
-}
-
-function formatGenericDiagnosticAnalysisLine(level, line) {
-    const normalized = normalizeDiagnosticReportLine(line);
-    const withoutBullet = normalized.replace(/^-\s*/, '');
-    const withoutLevelTag = withoutBullet.replace(/\[(WARN|ERROR|ALERT)\]\s*/i, '').trim();
-    return `[${level}] ${withoutLevelTag || withoutBullet}`;
-}
-
-function buildDiagnosticWarningDetail({ level, line, contextLine }) {
-    const normalized = normalizeDiagnosticReportLine(line);
-
-    if (level === 'ALERT' && normalized.includes('診斷報告')) {
-        return null;
-    }
-
-    const classOverloadMatch = normalized.match(/^-\s*(.+?):\s*共需排\s*(\d+)\s*節課\s*\(該年級上限:\s*(\d+)\s*節\)\s*\[ERROR\]/i);
-    if (classOverloadMatch) {
-        const [, className, needed, limit] = classOverloadMatch;
-        return createDiagnosticWarning({
-            level: 'ERROR',
-            category: 'class_overload',
-            message: `【班級節數超限】${className} 需排 ${needed} 節，超過年級上限 ${limit} 節。`,
-            rawLine: normalized,
-            contextLine,
-        });
-    }
-
-    const periodMatch = normalized.match(/^-\s*(.+?):\s*科任需求\s*(\d+)\s*節\s*\/\s*有效時段\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
-    if (periodMatch) {
-        const [, className, needed, available] = periodMatch;
-        return createDiagnosticWarning({
-            level,
-            category: 'period_shortage',
-            message: `【有效時段不足】${className} 科任需求 ${needed} 節，高於有效時段 ${available} 節。`,
-            rawLine: normalized,
-            contextLine,
-        });
-    }
-
-    const capacityMatch = normalized.match(/^-\s*(.+?):\s*容量\s*(\d+)\s*間\s*\(週容量=?\s*(\d+)節\)\s*\/\s*總需求\s*(\d+)\s*節\s*\[(WARN|ERROR)\]/i);
-    if (capacityMatch) {
-        const [, subject, roomCount, weeklyCapacity, needed] = capacityMatch;
-        return createDiagnosticWarning({
-            level,
-            category: 'room_capacity_shortage',
-            message: `【教室容量不足】${subject} 總需求 ${needed} 節，高於 ${roomCount} 間教室的週容量 ${weeklyCapacity} 節。`,
-            rawLine: normalized,
-            contextLine,
-        });
-    }
-
-    if (normalized.includes('交替班級')) {
-        const teacherContextMatch = normalizeDiagnosticReportLine(contextLine).match(/^-\s*(.+?):\s*負責\s*(\d+)\s*個交替班級(?:\s*\((.+)\))?/);
-        if (teacherContextMatch) {
-            const [, teacher, classCount] = teacherContextMatch;
-            const limitMatch = normalized.match(/最多只能上\s*(\d+)\s*個交替班級/i);
-            const limit = limitMatch ? limitMatch[1] : '2';
-            return createDiagnosticWarning({
-                level: 'WARN',
-                category: 'alternating_conflict',
-                message: `【交替課衝突】${teacher} 負責 ${classCount} 個交替班級，同一時段上限 ${limit} 個，可能導致衝突。`,
-                rawLine: normalized,
-                contextLine,
-            });
-        }
-        return createDiagnosticWarning({
-            level: 'WARN',
-            category: 'alternating_conflict',
-            message: `【交替課衝突】${normalized.replace(/\[WARN\]\s*/i, '').trim()}`,
-            rawLine: normalized,
-            contextLine,
-        });
-    }
-
-    const swimmingMatch = normalized.match(/游泳班數\((\d+)\)\s*>\s*泳池數\((\d+)\)/i);
-    if (swimmingMatch) {
-        const [, classCount, poolCount] = swimmingMatch;
-        return createDiagnosticWarning({
-            level: 'WARN',
-            category: 'swimming_resource_pressure',
-            message: `【游泳資源壓力】游泳班數 ${classCount} 高於泳池數 ${poolCount}，目前僅靠軟懲罰吸收衝突。`,
-            rawLine: normalized,
-            contextLine,
-        });
-    }
-
-    return createDiagnosticWarning({
-        level,
-        category: level === 'ALERT' ? 'report_alert' : 'generic_warning',
-        message: formatGenericDiagnosticAnalysisLine(level, normalized).replace(/^\[(WARN|ERROR|ALERT)\]\s*/i, ''),
-        rawLine: normalized,
-        contextLine,
-    });
-}
-
-function parseInfeasibleDiagnosticReport(reportContent) {
-    const rawLines = String(reportContent || '').split('\n');
-    const diagnosticWarnings = [];
-    const seen = new Set();
-
-    rawLines.forEach((line, index) => {
-        const normalized = normalizeDiagnosticReportLine(line);
-        const level = getDiagnosticReportLevel(normalized);
-        if (!level) return;
-
-        const detail = buildDiagnosticWarningDetail({
-            level,
-            line: normalized,
-            contextLine: findPreviousDiagnosticContext(rawLines, index),
-        });
-        const key = detail ? `${detail.level}|${detail.category}|${detail.message}` : '';
-        if (!detail || !key || seen.has(key)) return;
-        seen.add(key);
-        diagnosticWarnings.push(detail);
-    });
-
-    const finalizedWarnings = diagnosticWarnings.length > 0 ? diagnosticWarnings : buildGenericInfeasibleWarnings();
-    return {
-        diagnosticWarnings: finalizedWarnings,
-        aiAnalysis: diagnosticWarningsToAiAnalysis(finalizedWarnings),
-    };
-}
-
-function tryReadJsonFile(filePath) {
-    if (!filePath || !fs.existsSync(filePath)) return null;
+function tryReadJsonFile(filePath, fsImpl = fs) {
+    if (!filePath || !fsImpl.existsSync(filePath)) return null;
     try {
-        return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        return JSON.parse(fsImpl.readFileSync(filePath, 'utf-8'));
     } catch (error) {
         console.warn(`[Diagnostic Bundle] JSON 讀取失敗: ${filePath}`, error);
         return null;
     }
 }
 
-function findLatestArtifactPath(prefix, suffix = '.json') {
+function findLatestArtifactPath(prefix, suffix = '.json', baseDir = __dirname, fsImpl = fs) {
     try {
-        const candidates = fs.readdirSync(__dirname)
+        const candidates = fsImpl.readdirSync(baseDir)
             .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
             .map((name) => ({
                 name,
-                fullPath: path.join(__dirname, name),
-                mtimeMs: fs.statSync(path.join(__dirname, name)).mtimeMs,
+                fullPath: path.join(baseDir, name),
+                mtimeMs: fsImpl.statSync(path.join(baseDir, name)).mtimeMs,
             }))
             .sort((a, b) => b.mtimeMs - a.mtimeMs);
         return candidates[0]?.fullPath || '';
@@ -3563,7 +3611,7 @@ function findLatestArtifactPath(prefix, suffix = '.json') {
  * 持久化求解失敗分析工件
  * 適用於: INFEASIBLE, INVALID_INPUT, INVALID_VALIDATION, ERROR, UNKNOWN_TIMEOUT
  */
-function persistInfeasibleAnalysisArtifacts({
+export function persistInfeasibleAnalysisArtifacts({
     jobId,
     errorMsg,
     solverStatus = 'INFEASIBLE',
@@ -3572,42 +3620,72 @@ function persistInfeasibleAnalysisArtifacts({
     payloadPath = '',
     diagnosticWarnings = [],
     aiAnalysis = [],
+    errorCode = undefined,
+    statusDetail = undefined,
+    errorCodes = undefined,
+    gradeTimeRuleIssues = undefined,
+    validationReport = undefined,
+    validationReportSource = undefined,
+    classLoadTrace = undefined,
+    gradeCapacityMap = undefined,
+    baseDir = __dirname,
+    fsImpl = fs,
 }) {
     const generatedAt = new Date().toISOString();
+    const isInfeasible = solverStatus === 'INFEASIBLE';
+    const effectiveWarnings = isInfeasible && Array.isArray(diagnosticWarnings) ? diagnosticWarnings : [];
+    const effectiveAiAnalysis = isInfeasible && Array.isArray(aiAnalysis) ? aiAnalysis : [];
+    const effectiveReportContent = isInfeasible ? reportContent : '';
+    const effectiveReportPath = isInfeasible ? reportPath : '';
+
     const diagnosticReport = {
         jobId,
         status: 'FAILED',
         solverStatus,
+        ...(errorCode ? { errorCode } : {}),
+        ...(statusDetail ? { statusDetail } : {}),
         error: errorMsg,
         generatedAt,
-        reportWarningCount: Array.isArray(diagnosticWarnings) ? diagnosticWarnings.length : 0,
-        diagnosticWarnings,
-        aiAnalysis,
+        reportWarningCount: effectiveWarnings.length,
+        diagnosticWarnings: effectiveWarnings,
+        aiAnalysis: effectiveAiAnalysis,
+        ...(Array.isArray(errorCodes) ? { errorCodes } : {}),
+        ...(solverStatus === 'INVALID_GRADE_TIME_RULE_CONFIGURATION' && Array.isArray(gradeTimeRuleIssues)
+            ? { gradeTimeRuleIssues }
+            : {}),
+        ...(validationReport ? { validationReport, validationReportSource: validationReportSource ?? null } : {}),
+        ...(classLoadTrace ? { classLoadTrace } : {}),
+        ...(gradeCapacityMap ? { gradeCapacityMap } : {}),
     };
     const diagnosticFileName = `debug_schedule_diagnostic_${jobId}.json`;
-    const diagnosticFilePath = path.join(__dirname, diagnosticFileName);
-    fs.writeFileSync(diagnosticFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
+    const diagnosticFilePath = path.join(baseDir, diagnosticFileName);
+    fsImpl.writeFileSync(diagnosticFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
 
-    const payload = tryReadJsonFile(payloadPath);
+    const payload = tryReadJsonFile(payloadPath, fsImpl);
     const bundle = buildInfeasibleAnalysisBundle({
         jobId,
         jobStatus: 'FAILED',
         solverStatus,
         error: errorMsg,
-        reportText: reportContent,
-        diagnosticWarnings,
+        statusDetail,
+        errorCodes,
+        gradeTimeRuleIssues,
+        validationReport,
+        validationReportSource,
+        reportText: effectiveReportContent,
+        diagnosticWarnings: effectiveWarnings,
         payload,
         diagnosticJson: diagnosticReport,
         artifactPaths: {
-            reportPath,
+            reportPath: effectiveReportPath,
             payloadPath,
             diagnosticJsonPath: diagnosticFilePath,
         },
         generatedAt,
     });
     const bundleFileName = `debug_infeasible_bundle_${jobId}.json`;
-    const bundleFilePath = path.join(__dirname, bundleFileName);
-    fs.writeFileSync(bundleFilePath, JSON.stringify(bundle, null, 2), 'utf-8');
+    const bundleFilePath = path.join(baseDir, bundleFileName);
+    fsImpl.writeFileSync(bundleFilePath, JSON.stringify(bundle, null, 2), 'utf-8');
 
     return {
         diagnosticReport,
@@ -3619,43 +3697,89 @@ function persistInfeasibleAnalysisArtifacts({
     };
 }
 
-function buildInfeasibleAnalysisBundleFromArtifacts({
+export function buildInfeasibleAnalysisBundleFromArtifacts({
     jobId = '',
     errorMsg = '',
-    solverStatus = 'INFEASIBLE',
+    solverStatus = '',
     reportPath = '',
     payloadPath = '',
+    payloadOverride = null,
     diagnosticJsonPath = '',
+    diagnosticJsonOverride = null,
     diagnosticWarnings = [],
+    fsImpl = fs,
 }) {
-    const reportContent = reportPath && fs.existsSync(reportPath)
-        ? fs.readFileSync(reportPath, 'utf-8')
-        : '';
-    const diagnosticJson = tryReadJsonFile(diagnosticJsonPath);
-    const payload = tryReadJsonFile(payloadPath);
+    const diagnosticJson = diagnosticJsonOverride || tryReadJsonFile(diagnosticJsonPath, fsImpl);
+    const effectiveSolverStatus = diagnosticJson?.solverStatus || solverStatus || 'ERROR';
+    const isInfeasible = effectiveSolverStatus === 'INFEASIBLE';
+
+    const reportContent =
+        isInfeasible && reportPath && fsImpl.existsSync(reportPath)
+            ? fsImpl.readFileSync(reportPath, 'utf-8')
+            : '';
+    const payload = payloadOverride || tryReadJsonFile(payloadPath, fsImpl);
+    const effectiveWarnings = isInfeasible
+        ? (Array.isArray(diagnosticWarnings) && diagnosticWarnings.length > 0
+            ? diagnosticWarnings
+            : (diagnosticJson?.diagnosticWarnings || []))
+        : [];
 
     return buildInfeasibleAnalysisBundle({
         jobId,
         jobStatus: diagnosticJson?.status || 'FAILED',
-        solverStatus: diagnosticJson?.solverStatus || solverStatus,
+        solverStatus: effectiveSolverStatus,
         error: diagnosticJson?.error || errorMsg,
+        statusDetail: diagnosticJson?.statusDetail,
+        errorCodes: diagnosticJson?.errorCodes,
+        gradeTimeRuleIssues: diagnosticJson?.gradeTimeRuleIssues,
+        validationReport: diagnosticJson?.validationReport,
+        validationReportSource: diagnosticJson?.validationReportSource,
         reportText: reportContent,
-        diagnosticWarnings: Array.isArray(diagnosticWarnings) && diagnosticWarnings.length > 0
-            ? diagnosticWarnings
-            : (diagnosticJson?.diagnosticWarnings || []),
+        diagnosticWarnings: effectiveWarnings,
         payload,
         diagnosticJson,
         artifactPaths: {
-            reportPath,
+            reportPath: isInfeasible ? reportPath : '',
             payloadPath,
             diagnosticJsonPath,
         },
     });
 }
 
-async function runSchedulingWorker(jobId, payload) {
+/**
+ * W4b：worker 例外路徑（finalize catch／外層 worker catch）的結構化失敗結果。
+ * SCHE_ENGINE_ERROR 是頂層狀態而非候選子因，因此 errorCodes 固定為 []；
+ * statusDetail 取自已載入索引條目，例外根因 confidence 固定為 unknown。
+ * 結果契約未定義 source 欄位，故不在此新增來源欄位。
+ */
+function buildWorkerExceptionFailedResult(error, extra = {}) {
+    const rawMessage = error && typeof error.message === 'string' ? error.message : String(error);
+    const { errorCode, statusDetail } = resolveStatusDetail('ERROR');
+    return {
+        ...extra,
+        status: 'ERROR',
+        solverStatus: 'ERROR',
+        errorCode,
+        statusDetail,
+        error: `後端處理錯誤：${rawMessage}`,
+        errorCodes: [],
+        diagnosticWarnings: [],
+    };
+}
+
+export async function runSchedulingWorker(jobId, payload, deps = {}) {
+    const prismaImpl = deps.prisma || prisma;
+    const fsImpl = deps.fs || fs;
+    const spawnPythonImpl = deps.spawnPython || spawnPython;
+    const runDiagnosticStatsImpl = deps.runDiagnosticStats || runDiagnosticStats;
+    const validateRepairHardConstraintsImpl =
+        deps.validateRepairHardConstraints || validateRepairHardConstraints;
+    const persistArtifactsImpl =
+        deps.persistInfeasibleAnalysisArtifacts || persistInfeasibleAnalysisArtifacts;
+    const baseDir = deps.baseDir || __dirname;
+
     try {
-        await prisma.scheduleJob.update({
+        await prismaImpl.scheduleJob.update({
             where: { id: jobId },
             data: {
               status: 'PROCESSING',
@@ -3665,12 +3789,16 @@ async function runSchedulingWorker(jobId, payload) {
             }
         });
 
-        const inputPath = path.join(__dirname, `input_${jobId}.json`);
-        const outputPath = path.join(__dirname, `output_${jobId}.json`);
-        fs.writeFileSync(inputPath, JSON.stringify(payload, null, 2));
+        const inputPath = path.join(baseDir, `input_${jobId}.json`);
+        const outputPath = path.join(baseDir, `output_${jobId}.json`);
+        const workerPayload = {
+            ...(payload && typeof payload === 'object' ? payload : {}),
+            jobId: String(jobId),
+        };
+        fsImpl.writeFileSync(inputPath, JSON.stringify(workerPayload, null, 2));
 
         // 寫入完成，進入求解階段
-        await prisma.scheduleJob.update({
+        await prismaImpl.scheduleJob.update({
             where: { id: jobId },
             data: {
               progressPhase: 'SOLVING',
@@ -3679,7 +3807,7 @@ async function runSchedulingWorker(jobId, payload) {
         });
 
         let pythonStderr = '';
-        const pythonProcess = spawnPython('solver.py', [inputPath, outputPath], 'Solver');
+        const pythonProcess = spawnPythonImpl('solver.py', [inputPath, outputPath], 'Solver');
         pythonProcess.stdout.on('data', (data) => console.log(`[Python 輸出]: ${data}`));
         pythonProcess.stderr.on('data', (data) => {
             const str = data.toString();
@@ -3690,371 +3818,500 @@ async function runSchedulingWorker(jobId, payload) {
             }
         });
 
-        pythonProcess.on('close', async (code) => {
-            try {
-                // 進入最終化階段
-                await prisma.scheduleJob.update({
-                    where: { id: jobId },
-                    data: {
-                      progressPhase: 'FINALIZING',
-                      progressMessage: '讀取排課結果...'
-                    }
-                });
-
-                let isSuccess = false;
-                let actualSolverStatus = null;
-                let outputJson = null;
-
-                if (code === 0 && fs.existsSync(outputPath)) {
-                    try {
-                        outputJson = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
-                        actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
-                        if (actualSolverStatus === 'OPTIMAL' || actualSolverStatus === 'FEASIBLE') {
-                            isSuccess = true;
-                        }
-                    } catch (e) {
-                        console.warn(`[Solver Status] 無法解析 output JSON: ${e.message}`);
-                    }
-                }
-
-                if (isSuccess) {
-                    // [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
-                    let preRepairStats = null;
-                    try {
-                        preRepairStats = await runDiagnosticStats(inputPath, outputPath);
-                        console.log(`[Diagnostic] preRepair stats:`, JSON.stringify(preRepairStats));
-                    } catch (e) {
-                        console.error(`[Diagnostic] preRepair 統計失敗:`, e);
-                    }
-
-                    // ==========================================================================
-                    // [Task 05] Sub-task 05.5: REPAIR_ENABLED Switch
-                    // ==========================================================================
-                    const REPAIR_ENABLED = process.env.REPAIR_ENABLED !== 'false'; // default: true
-
-                    let repairStatus = 'skipped';
-                    let postRepairStats = null;
-                    let resultData;
-
-                    if (!REPAIR_ENABLED) {
-                        repairStatus = 'disabled';
-                        let rawResultData = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
-                        // [Task 05] Sub-task 05.3: When repair disabled, inject null markers per output contract
-                        rawResultData.repairAccepted = null;
-                        rawResultData.repairRejectedReasons = [];
-                        rawResultData.postRepairValidation = null;
-                        rawResultData.preRepairValidation = null;
-                        resultData = JSON.stringify(rawResultData, null, 2);
-                        console.log(`[INFO] [Repair Agent] REPAIR_ENABLED=false, skipping repair. Using solver output.`);
-                    } else {
-                        // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
-                        await prisma.scheduleJob.update({
-                            where: { id: jobId },
-                            data: {
-                              progressPhase: 'REPAIRING',
-                              progressMessage: '模擬退火優化中... (Repair Agent)'
-                            }
-                        });
-
-                        const repairOutputPath = path.join(__dirname, `output_repaired_${jobId}.json`);
-                        const repairResultPromise = new Promise((resolve, _reject) => {
-                            const repair = spawnPython('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
-                            let repairLog = '';
-                            repair.stdout.on('data', (d) => {
-                                const msg = d;
-                                console.log(`[Repair Agent]: ${msg}`);
-                                repairLog += msg;
-                            });
-                            repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d}`));
-                            repair.on('close', (rc) => {
-                                if (rc === 0 && fs.existsSync(repairOutputPath)) {
-                                    resolve('repaired');
-                                } else {
-                                    resolve('original');
-                                }
-                            });
-                        });
-
-                        repairStatus = await repairResultPromise;
-
-                        if (repairStatus === 'repaired') {
-                            const repairedContent = fs.readFileSync(repairOutputPath, 'utf-8');
-                            const repairedObj = JSON.parse(repairedContent);
-                            const scheduleEntries = repairedObj.schedule || [];
-                            const buildSolverResultWithRepairMetadata = (accepted, reasons = []) => {
-                                const solverObj = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
-                                solverObj.repaired = false;
-                                solverObj.repairAccepted = accepted;
-                                solverObj.repairRejectedReasons = reasons;
-                                solverObj.preRepairValidation = repairedObj.preRepairValidation ?? null;
-                                solverObj.postRepairValidation = repairedObj.postRepairValidation ?? null;
-                                solverObj.repairAttemptValidation = repairedObj.repairAttemptValidation ?? repairedObj.postRepairValidation ?? null;
-                                solverObj.repairAttemptPenalty = repairedObj.repair_penalty ?? null;
-                                return JSON.stringify(solverObj, null, 2);
-                            };
-
-                            // ==========================================================================
-                            // [Task 05] Sub-task 05.3: Python Gate 優先，JS gate 為 fallback
-                            // ==========================================================================
-                            const pythonRepairAccepted = repairedObj.repairAccepted;
-                            const pythonRejectedReasons = repairedObj.repairRejectedReasons || [];
-
-                            if (pythonRepairAccepted === false) {
-                                // Python gate 已拒絕 — 使用原始 solver output
-                                resultData = buildSolverResultWithRepairMetadata(false, pythonRejectedReasons);
-                                postRepairStats = preRepairStats;
-                                console.warn(`[Repair] Python gate rejected repair: ${pythonRejectedReasons.join('; ')}. Using solver output.`);
-                            } else {
-                                // [Phase 0 止血] JS 層額外驗證 repair 結果（雙重防線）
-                                const validationErrors = validateRepairHardConstraints(scheduleEntries, payload);
-                                if (validationErrors.length > 0) {
-                                    console.warn(`[Repair] JS gate violation: ${validationErrors.join('; ')}. Falling back to solver output.`);
-                                    resultData = buildSolverResultWithRepairMetadata(
-                                        false,
-                                        validationErrors.map((error) => `js_gate: ${error}`)
-                                    );
-                                    postRepairStats = preRepairStats;
-                                    console.log(`[WARN] [Repair Agent] JS 驗證失敗，回退使用原始 solver 結果`);
-                                } else {
-                                    resultData = repairedContent;
-                                    // Post-repair diagnostic stats for the accepted repaired schedule
-                                    try {
-                                        postRepairStats = await runDiagnosticStats(inputPath, repairOutputPath);
-                                        console.log(`[Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
-                                    } catch (e) {
-                                        console.error(`[Diagnostic] postRepair 統計失敗:`, e);
-                                    }
-                                    console.log(`[OK] [Repair Agent] 優化成功且通過硬約束驗證，使用修復後結果`);
-                                }
-                            }
-                            if (fs.existsSync(repairOutputPath)) fs.unlinkSync(repairOutputPath);
-                        } else {
-                            resultData = fs.readFileSync(outputPath, 'utf-8');
-                            console.log(`[WARN] [Repair Agent] 優化失敗或跳過，使用原始結果`);
-                            postRepairStats = preRepairStats;
-                        }
-                    }
-
-                    // [Diagnostic] Step 3: 組合報表並儲存
-                    try {
-                        if (preRepairStats && postRepairStats) {
-                            const round2 = (v) => Math.round(v * 100) / 100;
-                            const delta = {
-                                primaryTeacherHitRateDiff: round2(postRepairStats.primaryTeacherHitRate - preRepairStats.primaryTeacherHitRate),
-                                gradePreferenceHitRateDiff: round2(postRepairStats.gradePreferenceHitRate - preRepairStats.gradePreferenceHitRate),
-                                capacityOverloadDiff: postRepairStats.capacityOverloadCount - preRepairStats.capacityOverloadCount,
-                            };
-                            const recommendation = generateRecommendation(preRepairStats, postRepairStats);
-                            const diagnosticReport = {
-                                jobId,
-                                status: 'COMPLETED',
-                                preRepair: preRepairStats,
-                                postRepair: postRepairStats,
-                                delta,
-                                recommendation,
-                            };
-                            const diagFileName = `debug_schedule_diagnostic_${jobId}.json`;
-                            const diagFilePath = path.join(__dirname, diagFileName);
-                            fs.writeFileSync(diagFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
-                            console.log(`[Diagnostic] 報表已儲存至 ${diagFilePath}`);
-                        }
-                    } catch (diagErr) {
-                        console.error(`[Diagnostic] 報表儲存失敗:`, diagErr);
-                    }
-
-                    await prisma.scheduleJob.update({
+        await new Promise((resolveWorker, rejectWorker) => {
+            let workerSettled = false;
+            pythonProcess.once('error', (error) => {
+                if (workerSettled) return;
+                workerSettled = true;
+                rejectWorker(error);
+            });
+            pythonProcess.once('close', async (code) => {
+                if (workerSettled) return;
+                workerSettled = true;
+                try {
+                    // 進入最終化階段
+                    await prismaImpl.scheduleJob.update({
                         where: { id: jobId },
                         data: {
-                          status: 'COMPLETED',
-                          result: resultData,
-                          progressPhase: 'COMPLETED',
-                          progressMessage: '排課完成！',
-                          finishedAt: new Date()
+                          progressPhase: 'FINALIZING',
+                          progressMessage: '讀取排課結果...'
                         }
                     });
-                    fs.unlinkSync(outputPath);
-                } else {
-                    // 🚨 [狀態分類] 先嘗試從 Python output JSON 讀取真實 solverStatus
-                    // 🛡️ 優先讀 solverStatus（solver.py C5 確保所有路徑都有此欄位）
-                    //    其次讀 status，最後才 fallback 到 null（表示完全沒有輸出）
-                    let classLoadTrace = null;
-                    let gradeCapacityMap = null;
-                    let validationReport = null;
-                    let solverMetadata = {};
-                    if (outputJson) {
-                        classLoadTrace = outputJson?.classLoadTrace || null;
-                        gradeCapacityMap = outputJson?.gradeCapacityMap || null;
-                        validationReport = outputJson?.validationReport || null;
-                        solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
-                        solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
-                        solverMetadata.solvePass = outputJson?.solvePass || null;
-                        console.log(`[Solver Status] 從 output JSON 讀取到 solverStatus=${actualSolverStatus}, status=${outputJson?.status}`);
-                    } else if (fs.existsSync(outputPath)) {
+
+                    let isSuccess = false;
+                    let actualSolverStatus = null;
+                    let outputJson = null;
+                    let outputIdentityRejected = false;
+
+                    if (code === 0 && fsImpl.existsSync(outputPath)) {
                         try {
-                            outputJson = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
-                            // solverStatus > status > null
-                            actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
-                            classLoadTrace = outputJson?.classLoadTrace || null;
-                            // 🔧 修復 B (RC-CONF-01 輔因)：讀取 gradeCapacityMap 過渡方案
-                            gradeCapacityMap = outputJson?.gradeCapacityMap || null;
-                            validationReport = outputJson?.validationReport || null;
-                            solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
-                            solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
-                            solverMetadata.solvePass = outputJson?.solvePass || null;
-                            console.log(`[Solver Status] 從 output JSON 讀取到 solverStatus=${actualSolverStatus}, status=${outputJson?.status}`);
-                        } catch (parseErr) {
-                            console.warn(`[Solver Status] 無法解析 output JSON: ${parseErr.message}，actualSolverStatus 保持 null`);
+                            const parsedOutput = JSON.parse(fsImpl.readFileSync(outputPath, 'utf-8'));
+                            if (!isValidOutputJobIdentity(parsedOutput, jobId)) {
+                                outputIdentityRejected = true;
+                                outputJson = null;
+                                actualSolverStatus = 'ERROR';
+                                isSuccess = false;
+                                console.warn(
+                                    `[Solver Output Identity] 零退出輸出身分驗證失敗: expected jobId=${jobId}, got=${String(parsedOutput?.jobId)}`
+                                );
+                            } else {
+                                outputJson = parsedOutput;
+                                actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
+                                if (actualSolverStatus === 'OPTIMAL' || actualSolverStatus === 'FEASIBLE') {
+                                    isSuccess = true;
+                                }
+                            }
+                        } catch (e) {
+                            console.warn(`[Solver Status] 無法解析 output JSON: ${e.message}`);
                         }
                     }
 
-                    if (!validationReport) {
-                        const valReportPath = path.join(__dirname, 'debug_schedule_validation_report.json');
-                        if (fs.existsSync(valReportPath)) {
-                            try {
-                                validationReport = tryReadJsonFile(valReportPath);
-                            } catch (e) {
-                                console.warn(`[Validation Report] 無法解析 debug_schedule_validation_report.json: ${e.message}`);
+                    if (isSuccess) {
+                        // [Diagnostic] Step 1: 對 solver 原始結果做診斷統計 (pre-repair)
+                        let preRepairStats = null;
+                        try {
+                            preRepairStats = await runDiagnosticStatsImpl(inputPath, outputPath);
+                            console.log(`[Diagnostic] preRepair stats:`, JSON.stringify(preRepairStats));
+                        } catch (e) {
+                            console.error(`[Diagnostic] preRepair 統計失敗:`, e);
+                        }
+
+                        // ==========================================================================
+                        // [Task 05] Sub-task 05.5: REPAIR_ENABLED Switch
+                        // ==========================================================================
+                        const REPAIR_ENABLED = process.env.REPAIR_ENABLED !== 'false'; // default: true
+
+                        let repairStatus = 'skipped';
+                        let postRepairStats = null;
+                        let resultData;
+
+                        if (!REPAIR_ENABLED) {
+                            repairStatus = 'disabled';
+                            let rawResultData = JSON.parse(fsImpl.readFileSync(outputPath, 'utf-8'));
+                            // [Task 05] Sub-task 05.3: When repair disabled, inject null markers per output contract
+                            rawResultData.repairAccepted = null;
+                            rawResultData.repairRejectedReasons = [];
+                            rawResultData.postRepairValidation = null;
+                            rawResultData.preRepairValidation = null;
+                            resultData = JSON.stringify(rawResultData, null, 2);
+                            console.log(`[INFO] [Repair Agent] REPAIR_ENABLED=false, skipping repair. Using solver output.`);
+                        } else {
+                            // [Repair Agent] 在 solver 成功后，自動啟動模擬退火後處理優化
+                            await prismaImpl.scheduleJob.update({
+                                where: { id: jobId },
+                                data: {
+                                  progressPhase: 'REPAIRING',
+                                  progressMessage: '模擬退火優化中... (Repair Agent)'
+                                }
+                            });
+
+                            const repairOutputPath = path.join(baseDir, `output_repaired_${jobId}.json`);
+                            const repairResultPromise = new Promise((resolve, _reject) => {
+                                const repair = spawnPythonImpl('repair_agent.py', [inputPath, outputPath, repairOutputPath], 'Repair Agent');
+                                let repairLog = '';
+                                repair.stdout.on('data', (d) => {
+                                    const msg = d;
+                                    console.log(`[Repair Agent]: ${msg}`);
+                                    repairLog += msg;
+                                });
+                                repair.stderr.on('data', (d) => console.error(`[Repair Error]: ${d}`));
+                                repair.on('close', (rc) => {
+                                    if (rc === 0 && fsImpl.existsSync(repairOutputPath)) {
+                                        resolve('repaired');
+                                    } else {
+                                        resolve('original');
+                                    }
+                                });
+                            });
+
+                            repairStatus = await repairResultPromise;
+
+                            if (repairStatus === 'repaired') {
+                                const repairedContent = fsImpl.readFileSync(repairOutputPath, 'utf-8');
+                                const repairedObj = JSON.parse(repairedContent);
+                                const scheduleEntries = repairedObj.schedule || [];
+                                const buildSolverResultWithRepairMetadata = (accepted, reasons = []) => {
+                                    const solverObj = JSON.parse(fsImpl.readFileSync(outputPath, 'utf-8'));
+                                    solverObj.repaired = false;
+                                    solverObj.repairAccepted = accepted;
+                                    solverObj.repairRejectedReasons = reasons;
+                                    solverObj.preRepairValidation = repairedObj.preRepairValidation ?? null;
+                                    solverObj.postRepairValidation = repairedObj.postRepairValidation ?? null;
+                                    solverObj.repairAttemptValidation = repairedObj.repairAttemptValidation ?? repairedObj.postRepairValidation ?? null;
+                                    solverObj.repairAttemptPenalty = repairedObj.repair_penalty ?? null;
+                                    return JSON.stringify(solverObj, null, 2);
+                                };
+
+                                // ==========================================================================
+                                // [Task 05] Sub-task 05.3: Python Gate 優先，JS gate 為 fallback
+                                // ==========================================================================
+                                const pythonRepairAccepted = repairedObj.repairAccepted;
+                                const pythonRejectedReasons = repairedObj.repairRejectedReasons || [];
+
+                                if (pythonRepairAccepted === false) {
+                                    // Python gate 已拒絕 — 使用原始 solver output
+                                    resultData = buildSolverResultWithRepairMetadata(false, pythonRejectedReasons);
+                                    postRepairStats = preRepairStats;
+                                    console.warn(`[Repair] Python gate rejected repair: ${pythonRejectedReasons.join('; ')}. Using solver output.`);
+                                } else {
+                                    // [Phase 0 止血] JS 層額外驗證 repair 結果（雙重防線）
+                                    const validationErrors = validateRepairHardConstraintsImpl(scheduleEntries, workerPayload);
+                                    if (validationErrors.length > 0) {
+                                        console.warn(`[Repair] JS gate violation: ${validationErrors.join('; ')}. Falling back to solver output.`);
+                                        resultData = buildSolverResultWithRepairMetadata(
+                                            false,
+                                            validationErrors.map((error) => `js_gate: ${error}`)
+                                        );
+                                        postRepairStats = preRepairStats;
+                                        console.log(`[WARN] [Repair Agent] JS 驗證失敗，回退使用原始 solver 結果`);
+                                    } else {
+                                        resultData = repairedContent;
+                                        // Post-repair diagnostic stats for the accepted repaired schedule
+                                        try {
+                                            postRepairStats = await runDiagnosticStatsImpl(inputPath, repairOutputPath);
+                                            console.log(`[Diagnostic] postRepair stats:`, JSON.stringify(postRepairStats));
+                                        } catch (e) {
+                                            console.error(`[Diagnostic] postRepair 統計失敗:`, e);
+                                        }
+                                        console.log(`[OK] [Repair Agent] 優化成功且通過硬約束驗證，使用修復後結果`);
+                                    }
+                                }
+                                if (fsImpl.existsSync(repairOutputPath)) fsImpl.unlinkSync(repairOutputPath);
+                            } else {
+                                resultData = fsImpl.readFileSync(outputPath, 'utf-8');
+                                console.log(`[WARN] [Repair Agent] 優化失敗或跳過，使用原始結果`);
+                                postRepairStats = preRepairStats;
                             }
                         }
-                    }
 
-                    const statusMessageMap = {
-                        TIMEOUT_NO_SOLUTION: '求解逾時，未找到任何可行解',
-                        UNKNOWN_TIMEOUT: '求解逾時，未找到可接受的可行解',
-                        INFEASIBLE: '無法產出符合條件的課表',
-                        INVALID_VALIDATION: '求解結果未通過硬限制驗證',
-                        MODEL_INVALID: '模型構建錯誤',
-                        INVALID_INPUT: '輸入資料驗證失敗',
-                        INVALID_GRADE_TIME_RULE_CONFIGURATION: '年級時間規則設定無效，請檢查共備時段或彈性節次配置',
-                        MODEL_EVALUATOR_MISMATCH: '求解模型與評測器結果不一致，請檢查教師班級進度診斷',
-                    };
-
-                    const rawErrMsg = (typeof outputJson?.error === 'string' && outputJson.error.trim())
-                        ? outputJson.error.trim()
-                        : (typeof outputJson?.message === 'string' && outputJson.message.trim())
-                            ? outputJson.message.trim()
-                            : statusMessageMap[actualSolverStatus] || null;
-
-                    let errorMsg = rawErrMsg;
-                    if (!errorMsg) {
-                        if (code === null) {
-                            errorMsg = 'Python 進程被強制終止';
-                        } else if (code === 0) {
-                            errorMsg = '排課引擎異常結束但未產出結果檔案';
-                        } else {
-                            const stderrLines = pythonStderr ? pythonStderr.trim().split('\n').filter(l => l.trim()) : [];
-                            const lastStderr = stderrLines.length > 0 ? stderrLines[stderrLines.length - 1].trim() : '';
-                            errorMsg = lastStderr ? `排課引擎異常終止 (Exit code ${code}): ${lastStderr}` : `Exit code ${code}`;
+                        // [Diagnostic] Step 3: 組合報表並儲存
+                        try {
+                            if (preRepairStats && postRepairStats) {
+                                const round2 = (v) => Math.round(v * 100) / 100;
+                                const delta = {
+                                    primaryTeacherHitRateDiff: round2(postRepairStats.primaryTeacherHitRate - preRepairStats.primaryTeacherHitRate),
+                                    gradePreferenceHitRateDiff: round2(postRepairStats.gradePreferenceHitRate - preRepairStats.gradePreferenceHitRate),
+                                    capacityOverloadDiff: postRepairStats.capacityOverloadCount - preRepairStats.capacityOverloadCount,
+                                };
+                                const recommendation = generateRecommendation(preRepairStats, postRepairStats);
+                                const diagnosticReport = {
+                                    jobId,
+                                    status: 'COMPLETED',
+                                    preRepair: preRepairStats,
+                                    postRepair: postRepairStats,
+                                    delta,
+                                    recommendation,
+                                };
+                                const diagFileName = `debug_schedule_diagnostic_${jobId}.json`;
+                                const diagFilePath = path.join(baseDir, diagFileName);
+                                fsImpl.writeFileSync(diagFilePath, JSON.stringify(diagnosticReport, null, 2), 'utf-8');
+                                console.log(`[Diagnostic] 報表已儲存至 ${diagFilePath}`);
+                            }
+                        } catch (diagErr) {
+                            console.error(`[Diagnostic] 報表儲存失敗:`, diagErr);
                         }
-                    }
 
-                    // 規則式診斷分析：讀取 debug_infeasible_report.txt 並萃取警示摘要
-                    let aiAnalysis = buildGenericInfeasibleAnalysis();
-                    let diagnosticWarnings = buildGenericInfeasibleWarnings();
-                    let analysisBundlePath = '';
-                    // 🛡️ P2-A: effectiveSolverStatus — 確保傳入 persistInfeasibleAnalysisArtifacts 的狀態不為 null
-                    const effectiveSolverStatus = actualSolverStatus ?? 'ERROR';
-                    try {
-                        const reportPath = path.join(__dirname, 'debug_infeasible_report.txt');
-                        let reportContent = '';
-                        if (fs.existsSync(reportPath)) {
-                            reportContent = fs.readFileSync(reportPath, 'utf-8');
-                            const parsedDiagnostics = parseInfeasibleDiagnosticReport(reportContent);
-                            aiAnalysis = parsedDiagnostics.aiAnalysis;
-                            diagnosticWarnings = parsedDiagnostics.diagnosticWarnings;
-                        }
-                        const artifactResult = persistInfeasibleAnalysisArtifacts({
-                            jobId,
-                            errorMsg,
-                            solverStatus: effectiveSolverStatus,
-                            reportContent,
-                            reportPath,
-                            payloadPath: inputPath,
-                            diagnosticWarnings,
-                            aiAnalysis,
+                        await prismaImpl.scheduleJob.update({
+                            where: { id: jobId },
+                            data: {
+                              status: 'COMPLETED',
+                              result: resultData,
+                              progressPhase: 'COMPLETED',
+                              progressMessage: '排課完成！',
+                              finishedAt: new Date()
+                            }
                         });
-                        analysisBundlePath = artifactResult.bundleFileName;
-                    } catch (parseError) {
-                        console.error('診斷報告解析失敗:', parseError);
-                    }
-
-                    const failedResult = {
-                        error: errorMsg,
-                        aiAnalysis,
-                        diagnosticWarnings,
-                        analysisBundlePath,
-                        ...solverMetadata
-                    };
-
-                    if (validationReport) {
-                        failedResult.validationReport = validationReport;
-                    }
-
-                    const validStatuses = [
-                        'INVALID_INPUT',
-                        'INVALID_VALIDATION',
-                        'INFEASIBLE',
-                        'UNKNOWN_TIMEOUT',
-                        'TIMEOUT_NO_SOLUTION',
-                        'MODEL_INVALID',
-                        'INVALID_GRADE_TIME_RULE_CONFIGURATION',
-                        'MODEL_EVALUATOR_MISMATCH'
-                    ];
-                    if (validStatuses.includes(effectiveSolverStatus)) {
-                        failedResult.status = effectiveSolverStatus;
-                        failedResult.solverStatus = effectiveSolverStatus;
-                        if (effectiveSolverStatus === 'INVALID_INPUT' && classLoadTrace) {
-                            failedResult.classLoadTrace = classLoadTrace;
-                        }
+                        if (fsImpl.existsSync(outputPath)) fsImpl.unlinkSync(outputPath);
                     } else {
-                        // effectiveSolverStatus 已保證不為 null（預設 'ERROR'），故只剩 ERROR
-                        failedResult.status = 'ERROR';
-                        failedResult.solverStatus = 'ERROR';
-                    }
+                        // 🚨 [狀態分類] 先嘗試從 Python output JSON 讀取真實 solverStatus
+                        let classLoadTrace = null;
+                        let invalidClasses = null;
+                        let gradeCapacityMap = null;
+                        let validationReport = null;
+                        let validationReportSource = null;
+                        let gradeTimeRuleIssues = [];
+                        let degradationReasons = undefined;
+                        let outputSchemaVersion = undefined;
+                        let solverMetadata = {};
 
-                    // 🔧 修復 B (RC-CONF-01 輔因)：透傳 gradeCapacityMap 過渡方案
-                    // 移到所有狀態分支之外，確保所有 solver 狀態都能拿到容量資訊
-                    if (gradeCapacityMap) {
-                        failedResult.gradeCapacityMap = gradeCapacityMap;
-                    }
+                        if (!outputIdentityRejected) {
+                            if (!outputJson && fsImpl.existsSync(outputPath)) {
+                                try {
+                                    const parsedOutput = JSON.parse(fsImpl.readFileSync(outputPath, 'utf-8'));
+                                    if (!isValidOutputJobIdentity(parsedOutput, jobId)) {
+                                        outputIdentityRejected = true;
+                                        outputJson = null;
+                                        actualSolverStatus = 'ERROR';
+                                        console.warn(
+                                            `[Solver Output Identity] 非零退出輸出身分驗證失敗: expected jobId=${jobId}, got=${String(parsedOutput?.jobId)}`
+                                        );
+                                    } else {
+                                        outputJson = parsedOutput;
+                                        actualSolverStatus = outputJson?.solverStatus || outputJson?.status || null;
+                                    }
+                                } catch (parseErr) {
+                                    console.warn(`[Solver Status] 無法解析 output JSON: ${parseErr.message}，actualSolverStatus 保持 null`);
+                                }
+                            }
 
-                    await prisma.scheduleJob.update({
+                            if (outputJson) {
+                                outputSchemaVersion = outputJson.outputSchemaVersion;
+                                classLoadTrace = outputJson?.classLoadTrace || null;
+                                invalidClasses = outputJson?.invalidClasses || null;
+                                gradeCapacityMap = outputJson?.gradeCapacityMap || null;
+                                if (
+                                    outputJson?.validationReport &&
+                                    typeof outputJson.validationReport === 'object' &&
+                                    !Array.isArray(outputJson.validationReport)
+                                ) {
+                                    validationReport = outputJson.validationReport;
+                                    validationReportSource = 'job_output';
+                                }
+                                if (Array.isArray(outputJson?.gradeTimeRuleIssues)) {
+                                    gradeTimeRuleIssues = outputJson.gradeTimeRuleIssues;
+                                }
+                                degradationReasons = outputJson?.degradationReasons;
+                                solverMetadata.timeoutStage = outputJson?.timeoutStage || null;
+                                solverMetadata.hadFeasibleCandidate = outputJson?.hadFeasibleCandidate || false;
+                                solverMetadata.solvePass = outputJson?.solvePass || null;
+                                console.log(`[Solver Status] 從 output JSON 讀取到 solverStatus=${actualSolverStatus}, status=${outputJson?.status}`);
+                            }
+
+                            const hasExplicitNonNullValidationReportProp = Boolean(
+                                outputJson &&
+                                Object.prototype.hasOwnProperty.call(outputJson, 'validationReport') &&
+                                outputJson.validationReport !== null &&
+                                outputJson.validationReport !== undefined
+                            );
+
+                            if (!outputIdentityRejected && !validationReport && !hasExplicitNonNullValidationReportProp) {
+                                const valReportPath = path.join(baseDir, 'debug_schedule_validation_report.json');
+                                if (fsImpl.existsSync(valReportPath)) {
+                                    try {
+                                        const sharedReport = tryReadJsonFile(valReportPath, fsImpl);
+                                        if (sharedReport && typeof sharedReport === 'object' && !Array.isArray(sharedReport)) {
+                                            validationReport = sharedReport;
+                                            validationReportSource = 'shared_file';
+                                        }
+                                    } catch (e) {
+                                        console.warn(`[Validation Report] 無法解析 debug_schedule_validation_report.json: ${e.message}`);
+                                    }
+                                }
+                            }
+                        }
+
+                        const statusMessageMap = {
+                            TIMEOUT_NO_SOLUTION: '求解逾時，未找到任何可行解',
+                            UNKNOWN_TIMEOUT: '求解逾時，未找到可接受的可行解',
+                            INFEASIBLE: '無法產出符合條件的課表',
+                            INVALID_VALIDATION: '求解結果未通過硬限制驗證',
+                            MODEL_INVALID: '模型構建錯誤',
+                            INVALID_INPUT: '輸入資料驗證失敗',
+                            INVALID_GRADE_TIME_RULE_CONFIGURATION: '年級時間規則設定無效，請檢查共備時段或彈性節次配置',
+                            MODEL_EVALUATOR_MISMATCH: '求解模型與評測器結果不一致，請檢查教師班級進度診斷',
+                        };
+
+                        let errorMsg;
+                        if (outputIdentityRejected) {
+                            errorMsg = OUTPUT_IDENTITY_REJECTED_ERROR_MESSAGE;
+                        } else {
+                            const rawErrMsg = (typeof outputJson?.error === 'string' && outputJson.error.trim())
+                                ? outputJson.error.trim()
+                                : (typeof outputJson?.message === 'string' && outputJson.message.trim())
+                                    ? outputJson.message.trim()
+                                    : statusMessageMap[actualSolverStatus] || null;
+
+                            errorMsg = rawErrMsg;
+                            if (!errorMsg) {
+                                if (code === null) {
+                                    errorMsg = 'Python 進程被強制終止';
+                                } else if (code === 0) {
+                                    errorMsg = '排課引擎異常結束但未產出結果檔案';
+                                } else {
+                                    const stderrLines = pythonStderr ? pythonStderr.trim().split('\n').filter(l => l.trim()) : [];
+                                    const lastStderr = stderrLines.length > 0 ? stderrLines[stderrLines.length - 1].trim() : '';
+                                    errorMsg = lastStderr ? `排課引擎異常終止 (Exit code ${code}): ${lastStderr}` : `Exit code ${code}`;
+                                }
+                            }
+                        }
+
+                        const validStatuses = [
+                            'INVALID_INPUT',
+                            'INVALID_VALIDATION',
+                            'INFEASIBLE',
+                            'UNKNOWN_TIMEOUT',
+                            'TIMEOUT_NO_SOLUTION',
+                            'MODEL_INVALID',
+                            'INVALID_GRADE_TIME_RULE_CONFIGURATION',
+                            'MODEL_EVALUATOR_MISMATCH'
+                        ];
+                        const normalizedSolverStatus =
+                            !outputIdentityRejected && validStatuses.includes(actualSolverStatus)
+                                ? actualSolverStatus
+                                : 'ERROR';
+
+                        // 規則式診斷分析：僅在 !outputIdentityRejected && normalizedSolverStatus === 'INFEASIBLE' 時讀取 debug_infeasible_report.txt
+                        let aiAnalysis = [];
+                        let rawDiagnosticWarnings = [];
+                        let analysisBundlePath = '';
+                        let reportContent = '';
+                        const reportPath = path.join(baseDir, 'debug_infeasible_report.txt');
+
+                        if (!outputIdentityRejected && normalizedSolverStatus === 'INFEASIBLE') {
+                            aiAnalysis = buildGenericInfeasibleAnalysis();
+                            rawDiagnosticWarnings = buildGenericInfeasibleWarnings();
+                            try {
+                                if (fsImpl.existsSync(reportPath)) {
+                                    reportContent = fsImpl.readFileSync(reportPath, 'utf-8');
+                                    const parsedDiagnostics = parseInfeasibleDiagnosticReport(reportContent);
+                                    aiAnalysis = parsedDiagnostics.aiAnalysis;
+                                    rawDiagnosticWarnings = parsedDiagnostics.diagnosticWarnings;
+                                }
+                            } catch (parseError) {
+                                console.error('診斷報告解析失敗:', parseError);
+                            }
+                        }
+
+                        const assembled = assembleFailedSolverResult({
+                            solverStatus: normalizedSolverStatus,
+                            outputStatus: outputJson?.status,
+                            outputSolverStatus: outputJson?.solverStatus,
+                            outputIdentityRejected,
+                            diagnosticWarnings: rawDiagnosticWarnings,
+                            classLoadTrace,
+                            invalidClasses,
+                            validationReport,
+                            validationReportSource,
+                            degradationReasons,
+                            gradeTimeRuleIssues,
+                            outputSchemaVersion,
+                        });
+
+                        const effectiveSolverStatus = assembled.effectiveSolverStatus;
+                        const diagnosticWarnings = assembled.diagnosticWarnings;
+
+                        if (!outputIdentityRejected) {
+                            try {
+                                const artifactResult = persistArtifactsImpl({
+                                    jobId,
+                                    errorMsg,
+                                    solverStatus: effectiveSolverStatus,
+                                    reportContent: effectiveSolverStatus === 'INFEASIBLE' ? reportContent : '',
+                                    reportPath: effectiveSolverStatus === 'INFEASIBLE' ? reportPath : '',
+                                    payloadPath: inputPath,
+                                    diagnosticWarnings,
+                                    aiAnalysis,
+                                    errorCode: assembled.errorCode,
+                                    statusDetail: assembled.statusDetail,
+                                    errorCodes: assembled.errorCodes,
+                                    gradeTimeRuleIssues: assembled.gradeTimeRuleIssues,
+                                    validationReport: assembled.validationReport,
+                                    validationReportSource: assembled.validationReportSource,
+                                    classLoadTrace: effectiveSolverStatus === 'INVALID_INPUT' ? classLoadTrace : null,
+                                    gradeCapacityMap,
+                                    baseDir,
+                                    fsImpl,
+                                });
+                                analysisBundlePath = artifactResult?.bundleFileName || '';
+                            } catch (persistError) {
+                                console.error('診斷工件持久化失敗:', persistError);
+                            }
+                        }
+
+                        const failedResult = {
+                            status: effectiveSolverStatus,
+                            solverStatus: effectiveSolverStatus,
+                            errorCode: assembled.errorCode,
+                            statusDetail: assembled.statusDetail,
+                            error: errorMsg,
+                            aiAnalysis: outputIdentityRejected ? [] : aiAnalysis,
+                            diagnosticWarnings: outputIdentityRejected ? [] : diagnosticWarnings,
+                            errorCodes: assembled.errorCodes,
+                            analysisBundlePath: outputIdentityRejected ? '' : analysisBundlePath,
+                            ...(outputIdentityRejected ? {} : solverMetadata)
+                        };
+
+                        if (outputIdentityRejected) {
+                            failedResult.validationReport = null;
+                            failedResult.validationReportSource = null;
+                            failedResult.gradeTimeRuleIssues = [];
+                        } else {
+                            if (assembled.validationReport) {
+                                failedResult.validationReport = assembled.validationReport;
+                                failedResult.validationReportSource = assembled.validationReportSource;
+                            } else {
+                                failedResult.validationReportSource = null;
+                            }
+
+                            if (
+                                effectiveSolverStatus === 'INVALID_GRADE_TIME_RULE_CONFIGURATION' &&
+                                Array.isArray(assembled.gradeTimeRuleIssues)
+                            ) {
+                                failedResult.gradeTimeRuleIssues = assembled.gradeTimeRuleIssues;
+                            }
+
+                            if (effectiveSolverStatus === 'INVALID_INPUT' && classLoadTrace) {
+                                failedResult.classLoadTrace = classLoadTrace;
+                            }
+
+                            if (gradeCapacityMap) {
+                                failedResult.gradeCapacityMap = gradeCapacityMap;
+                            }
+                        }
+
+                        await prismaImpl.scheduleJob.update({
+                            where: { id: jobId },
+                            data: {
+                              status: 'FAILED',
+                              result: JSON.stringify(failedResult),
+                              progressPhase: 'FAILED',
+                              progressMessage: `排課失敗：${errorMsg}`,
+                              finishedAt: new Date()
+                            }
+                        });
+                        if (fsImpl.existsSync(outputPath)) fsImpl.unlinkSync(outputPath);
+                    }
+                    if (fsImpl.existsSync(inputPath)) fsImpl.unlinkSync(inputPath);
+                } catch (error) {
+                    console.error("排課任務處理失敗:", error);
+                    // W4b finalize catch：寫入結構化失敗結果。若此 DB update 本身失敗，
+                    // 只保證程序不崩潰；job 會停在最後一次成功持久化的狀態（常見但不保證為
+                    // PROCESSING），不保證本次 result/errorCode 已寫入（計畫 §10.1 R9）。
+                    const failedResult = buildWorkerExceptionFailedResult(error);
+                    await prismaImpl.scheduleJob.update({
                         where: { id: jobId },
                         data: {
                           status: 'FAILED',
                           result: JSON.stringify(failedResult),
                           progressPhase: 'FAILED',
-                          progressMessage: `排課失敗：${errorMsg}`,
+                          progressMessage: failedResult.error,
                           finishedAt: new Date()
                         }
-                    });
+                    }).catch(() => {});
+                } finally {
+                    resolveWorker();
                 }
-                if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            } catch (error) {
-                console.error("排課任務處理失敗:", error);
-                await prisma.scheduleJob.update({
-                    where: { id: jobId },
-                    data: {
-                      status: 'FAILED',
-                      progressPhase: 'FAILED',
-                      progressMessage: `後端處理錯誤：${error.message}`,
-                      finishedAt: new Date()
-                    }
-                }).catch(() => {});
-            }
+            });
         });
 
     } catch (error) {
         console.error(`[Worker Error Job ${jobId}]:`, error);
-        await prisma.scheduleJob.update({
+        // W4b 外層 worker catch：與 finalize catch 同形狀，另保留 jobId。
+        // DB update 失敗時必須吞下 rejection（生產端未 await 此 worker），避免 unhandled
+        // rejection；此時 job 停在最後成功持久化的狀態，不保證失敗結果已寫入（§10.1 R9）。
+        const rawMessage = error && typeof error.message === 'string' ? error.message : String(error);
+        const failedResult = buildWorkerExceptionFailedResult(error, { jobId: String(jobId) });
+        await prismaImpl.scheduleJob.update({
             where: { id: jobId },
             data: {
                 status: 'FAILED',
-                result: JSON.stringify({ error: error.message }),
+                result: JSON.stringify(failedResult),
                 progressPhase: 'FAILED',
-                progressMessage: `排課失敗：${error.message}`,
+                progressMessage: `排課失敗：${rawMessage}`,
                 finishedAt: new Date()
             }
+        }).catch((persistError) => {
+            console.error(`[Worker Error Job ${jobId}] 失敗狀態持久化失敗:`, persistError);
         });
     }
 }
@@ -4122,10 +4379,20 @@ app.get('/api/schedule/:jobId', async (req, res) => {
     }
 });
 
+export { app, buildAiInfeasibleAnalysisSystemPrompt };
+
 // eslint-disable-next-line no-undef
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
-    console.log(`[INFO] 智慧排課引擎 (API + OR-Tools) 已啟動於 http://localhost:${PORT}`);
-});
-// [Blueprint_Extend_Timeout] 設定 Server 層級超時為 1800000ms (30 分鐘)，防止 HTTP 連線中斷
-server.setTimeout(1800000);
+const isMainModule =
+    typeof process !== 'undefined' &&
+    Array.isArray(process.argv) &&
+    process.argv[1] &&
+    path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (isMainModule) {
+    const server = app.listen(PORT, () => {
+        console.log(`[INFO] 智慧排課引擎 (API + OR-Tools) 已啟動於 http://localhost:${PORT}`);
+    });
+    // [Blueprint_Extend_Timeout] 設定 Server 層級超時為 1800000ms (30 分鐘)，防止 HTTP 連線中斷
+    server.setTimeout(1800000);
+}

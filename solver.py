@@ -1597,6 +1597,25 @@ def run_grade_time_rules_preflight(data: dict) -> dict:
     return None
 
 
+def _build_solver_output_envelope(payload, job_id):
+    envelope = dict(payload or {})
+    envelope["outputSchemaVersion"] = 1
+    normalized_job_id = str(job_id).strip() if job_id is not None else ""
+    envelope["jobId"] = normalized_job_id or "UNKNOWN"
+    status_val = str(envelope.get("status") or envelope.get("solverStatus") or "ERROR").strip()
+    solver_status_val = str(envelope.get("solverStatus") or status_val or "ERROR").strip()
+    envelope["status"] = status_val or "ERROR"
+    envelope["solverStatus"] = solver_status_val or "ERROR"
+    return envelope
+
+
+def _write_solver_output_envelope(output_path, payload, job_id):
+    envelope = _build_solver_output_envelope(payload, job_id)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(envelope, f, ensure_ascii=False, indent=2)
+    return envelope
+
+
 def main():
     import faulthandler; faulthandler.enable()
     print("[PHASE] main 開始執行, 已掛載 faulthandler", flush=True)
@@ -1662,8 +1681,7 @@ def main():
     gtr_preflight_result = run_grade_time_rules_preflight(data)
     if gtr_preflight_result is not None:
         print(f"\n[ERROR] [Preflight] Grade time rules validation failed: {gtr_preflight_result['error']}")
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(gtr_preflight_result, f, ensure_ascii=False, indent=2)
+        _write_solver_output_envelope(output_path, gtr_preflight_result, job_id)
         sys.exit(0)
 
     # ==========================================
@@ -1771,8 +1789,7 @@ def main():
             elif ic.get("validationError") == "INVALID_INPUT_LOCK_CONSERVATION":
                 print(f"  - {ic['className']}: {ic['conservationError']}")
 
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+        _write_solver_output_envelope(output_path, result, job_id)
         sys.exit(0)
 
     # 收集班级名稱與老師名稱
@@ -2997,14 +3014,14 @@ def main():
         result["phaseHistory"] = phase_history
         result["terminalReason"] = result.get("status", "UNKNOWN")
 
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+        _write_solver_output_envelope(output_path, result, job_id)
 
     except Exception as e:
         import traceback
         error_msg = f"演算法崩潰: {str(e)}\n{traceback.format_exc()}"
         print(f"[ERROR] 嚴重錯誤: \n{error_msg}")
 
+        user_error_text = f"系統錯誤，請聯絡管理員。\n{str(e)}"
         error_result = {
             "jobId": job_id,
             "status": "ERROR",
@@ -3012,10 +3029,10 @@ def main():
             "time_seconds": 0,
             "total_penalty": 0,
             "schedule": [],
-            "message": f"系統錯誤，請聯絡管理員。\n{str(e)}"
+            "error": user_error_text,
+            "message": user_error_text,
         }
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(error_result, f, ensure_ascii=False, indent=2)
+        _write_solver_output_envelope(output_path, error_result, job_id)
 
         sys.exit(1)
 

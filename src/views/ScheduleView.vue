@@ -58,9 +58,22 @@
 
     <!-- 錯誤狀態區塊 -->
     <div v-if="dataStore.engineStatus === 'ERROR'" class="error-panel">
-      <h3>❌ 排課失敗</h3>
+      <h3>❌ 排課狀態</h3>
       <div class="error-details">
-        <p><strong>錯誤原因：</strong>{{ dataStore.engineErrorMessage }}</p>
+        <p v-if="dataStore.engineErrorCode">
+          <strong>狀態代碼：</strong>
+          <span class="engine-error-code-badge">{{ dataStore.engineErrorCode }}</span>
+        </p>
+        <p>
+          <strong>狀態說明：</strong>
+          {{ dataStore.engineStatusDetail?.userMessage || dataStore.engineErrorMessage }}
+        </p>
+        <div v-if="dataStore.engineStatusDetail?.nextSteps && dataStore.engineStatusDetail.nextSteps.length > 0" class="status-next-steps">
+          <strong>建議下一步：</strong>
+          <ul>
+            <li v-for="(step, sIdx) in dataStore.engineStatusDetail.nextSteps" :key="sIdx">{{ step }}</li>
+          </ul>
+        </div>
         <p v-if="dataStore.enginePhase"><strong>失敗階段：</strong>{{ dataStore.enginePhase }}</p>
         <p v-if="dataStore.engineStartedAt">
           <strong>已運行：</strong>{{ dataStore.formatElapsed(dataStore.engineElapsedSeconds) }}
@@ -70,8 +83,8 @@
         </p>
       </div>
       <div class="error-actions">
-        <button v-if="hasEngineDiagnosticWarnings" @click="showAiModal = true" class="ai-diagnosis-btn">💡 查看排課警示摘要</button>
-        <button v-if="hasEngineDiagnosticWarnings" @click="openAiDiagnosisModal" class="ai-deep-analysis-btn" :disabled="isAiInfeasibleAnalyzing">
+        <button v-if="canOpenDiagnosticModal" @click="showAiModal = true" class="ai-diagnosis-btn">💡 查看排課診斷摘要</button>
+        <button v-if="canOpenDiagnosticModal" @click="openAiDiagnosisModal" class="ai-deep-analysis-btn" :disabled="isAiInfeasibleAnalyzing">
           {{ isAiInfeasibleAnalyzing ? 'AI 深度分析中…' : '🧠 執行 AI 深度分析' }}
         </button>
         <button @click="resetState" class="retry-btn">🔄 重置後重試</button>
@@ -86,12 +99,46 @@
           <button class="modal-close-btn" @click="showAiModal = false">✕</button>
         </div>
         <div class="ai-modal-body">
-          <p class="ai-modal-intro">以下僅顯示系統從失敗診斷中辨識出的警示訊息：</p>
-          <ul class="ai-analysis-list">
-            <li v-for="(item, index) in dataStore.engineDiagnosticWarnings" :key="index">{{ item }}</li>
-          </ul>
-          <p v-if="!hasEngineDiagnosticWarnings" class="ai-empty">
-            目前沒有可辨識的診斷警示。
+          <p class="ai-modal-intro">以下顯示排課引擎產出之診斷清單：</p>
+          <div v-if="normalizedDiagnosticErrorCodes.length > 0" class="diagnostic-error-codes-list">
+            <section v-for="group in diagnosticConfidenceGroups" :key="group.key" class="diagnostic-confidence-group">
+              <h4>{{ group.label }}</h4>
+            <div
+              v-for="(item, index) in group.items"
+              :key="`${item.code}-${index}`"
+              :class="['error-code-item', `severity-${item.severity}`]"
+            >
+              <div class="item-header">
+                <span v-if="!item.isFallback" class="code-badge">{{ item.code }}</span>
+                <span class="confidence-tag">
+                  {{ item.confidence === 'determined' ? '已確認' : item.confidence === 'possible' ? '可能相關' : '未定位／證據不足' }}
+                </span>
+                <span class="source-tag">
+                  來源: {{ item.source === 'job_output' ? '工作輸出檔' : item.source === 'shared_file' ? '共用驗證報告檔' : item.source === 'report_file' ? '文字診斷報告檔' : item.source === 'server_fallback' ? '伺服器通用提示' : item.source === 'server_internal' ? '伺服器內部事件' : item.source === 'client_rule_check' ? '用戶端規則檢查' : '來源未確認' }}
+                </span>
+              </div>
+              <p class="item-user-message"><strong>{{ item.userMessage }}</strong></p>
+              <div v-if="item.evidence && item.evidence.length > 0" class="item-evidence">
+                <ul>
+                  <li v-for="(ev, evIdx) in item.evidence" :key="evIdx">{{ ev }}</li>
+                </ul>
+              </div>
+              <div v-if="item.nextSteps && item.nextSteps.length > 0" class="item-next-steps">
+                <strong>👉 建議下一步：</strong>
+                <ul>
+                  <li v-for="(step, sIdx) in item.nextSteps" :key="sIdx">{{ step }}</li>
+                </ul>
+              </div>
+              <details v-if="item.rawLine || item.isFallback" class="item-raw-details">
+                <summary>技術細節</summary>
+                <p v-if="item.isFallback">代碼：{{ item.code }}</p>
+                <pre>{{ item.rawLine }}</pre>
+              </details>
+            </div>
+            </section>
+          </div>
+          <p v-else class="ai-empty">
+            目前沒有可辨識的診斷項目。
           </p>
 
           <div class="ai-deep-analysis-panel">
@@ -133,8 +180,8 @@
               <div class="ai-deep-analysis-summary">
                 <strong>{{ aiInfeasibleAnalysis.summary?.text || 'AI 已完成分析' }}</strong>
                 <p>
-                  信心：{{ aiInfeasibleAnalysis.summary?.confidence || '-' }}
-                  ｜主分類：{{ aiInfeasibleAnalysis.summary?.primaryCategory || '-' }}
+                  信心：{{ aiInfeasibleAnalysis.summary?.confidence === 'low' ? '未定位／證據不足 (low)' : (aiInfeasibleAnalysis.summary?.confidence || '-') }}
+                  ｜主分類：{{ aiInfeasibleAnalysis.summary?.primaryCategory === 'unknown' ? '未定位／證據不足 (unknown)' : (aiInfeasibleAnalysis.summary?.primaryCategory || '-') }}
                 </p>
                 <p v-if="aiInfeasibleAnalysis.summary?.nextStep">建議先做：{{ aiInfeasibleAnalysis.summary.nextStep }}</p>
               </div>
@@ -142,13 +189,20 @@
               <div class="ai-deep-analysis-section">
                 <h5>可能根因</h5>
                 <ul class="ai-deep-analysis-items">
-                  <li v-for="(item, index) in aiInfeasibleAnalysis.rootCauses || []" :key="`cause-${index}`">
-                    <strong>{{ item.category }}</strong>
-                    <span>｜信心 {{ item.confidence }}</span>
+                  <li v-for="(item, index) in locatedAiCauses" :key="`cause-${index}`">
+                    <strong>{{ item.category === 'unknown' ? '未定位／證據不足' : item.category }}</strong>
+                    <span>｜信心 {{ item.confidence === 'low' ? '未定位／證據不足 (low)' : item.confidence }}</span>
                     <p>{{ item.message }}</p>
                     <p v-if="item.evidence?.length" class="ai-deep-analysis-evidence">證據：{{ item.evidence.join('；') }}</p>
                   </li>
                 </ul>
+              </div>
+              <div v-if="unlocatedAiCauses.length" class="ai-deep-analysis-section ai-unlocated">
+                <h5>未定位／證據不足</h5>
+                <ul><li v-for="(item, index) in unlocatedAiCauses" :key="`unlocated-${index}`">
+                  <p>{{ item.message }}</p>
+                  <p v-if="item.evidence?.length">證據：{{ item.evidence.join('；') }}</p>
+                </li></ul>
               </div>
 
               <div class="ai-deep-analysis-section">
@@ -468,6 +522,9 @@ import { useAiStore } from '../stores/aiSettings';
 import { useScheduleStore } from '../stores/schedule';
 import { useRouter } from 'vue-router';
 import { isSubjectApplicableToGrade } from '../utils/gradeSubjectUtils';
+import GTR_PRESENTATIONS from '../../contracts/grade_time_rule_issue_presentations.json' with { type: 'json' };
+import GTR_CODES from '../../contracts/grade_time_rule_issue_codes.json' with { type: 'json' };
+import { renderGtrIssuesToErrorCodes } from '../utils/gtrIssuePresentation.js';
 import {
   buildScheduleAiReport,
 } from '../utils/scheduleAiReport.js';
@@ -589,7 +646,134 @@ const aiTuningFocusStrategy = ref('resource_first');
 
 const hasAiTuningError = computed(() => Boolean(aiTuningError.value?.message));
 const hasEngineDiagnosticWarnings = computed(() => dataStore.engineDiagnosticWarnings.length > 0);
+const canOpenDiagnosticModal = computed(() => {
+  return (
+    dataStore.engineDiagnosticWarnings.length > 0 ||
+    dataStore.engineErrorCodesPresent ||
+    (Array.isArray(dataStore.engineErrorCodes) && dataStore.engineErrorCodes.length > 0) ||
+    (Array.isArray(dataStore.engineGradeTimeRuleIssues) && dataStore.engineGradeTimeRuleIssues.length > 0) ||
+    Boolean(dataStore.engineErrorCode) ||
+    Boolean(dataStore.engineStatusDetail)
+  );
+});
 const hasAiInfeasibleError = computed(() => Boolean(aiInfeasibleError.value?.message));
+const unlocatedAiCauses = computed(() => (aiInfeasibleAnalysis.value?.rootCauses || [])
+  .filter(item => item.category === 'unknown' || item.confidence === 'low'));
+const locatedAiCauses = computed(() => (aiInfeasibleAnalysis.value?.rootCauses || [])
+  .filter(item => item.category !== 'unknown' && item.confidence !== 'low'));
+
+const nonEmptyString = value => typeof value === 'string' && value.trim().length > 0;
+const stringArray = value => Array.isArray(value) && value.every(nonEmptyString);
+const validSources = [null, 'job_output', 'shared_file', 'report_file', 'server_fallback', 'server_internal', 'client_rule_check'];
+const completeDiagnosticItem = item => item && typeof item === 'object' && !Array.isArray(item)
+  && nonEmptyString(item.code) && ['blocking', 'warning', 'unknown'].includes(item.severity)
+  && ['determined', 'possible', 'unknown'].includes(item.confidence)
+  && validSources.includes(item.source) && nonEmptyString(item.userMessage)
+  && stringArray(item.evidence) && stringArray(item.nextSteps) && item.nextSteps.length > 0
+  && item.sourceRef && typeof item.sourceRef === 'object' && !Array.isArray(item.sourceRef)
+  && nonEmptyString(item.sourceRef.kind) && (item.sourceRef.section === null || typeof item.sourceRef.section === 'string')
+  && Number.isInteger(item.sourceRef.index) && item.sourceRef.index >= 0;
+
+// 🆕 W5 唯一主要診斷清單
+const normalizedDiagnosticErrorCodes = computed(() => {
+  if (dataStore.engineErrorCodesPresent) {
+    if (Array.isArray(dataStore.engineErrorCodes)) {
+      return dataStore.engineErrorCodes.map((item, idx) => {
+        if (!completeDiagnosticItem(item)) {
+          return {
+            code: nonEmptyString(item?.code) ? item.code : 'UNKNOWN_DIAGNOSTIC_ITEM',
+            severity: 'unknown',
+            confidence: 'unknown',
+            source: null,
+            sourceRef: { kind: 'unknown', section: null, index: idx },
+            userMessage: '此記錄含未識別的診斷代碼，目前無法確認具體原因',
+            evidence: [],
+            nextSteps: ['保存本次任務紀錄，交由系統維護者比對診斷格式。'],
+            isFallback: true,
+          };
+        }
+        return {
+          code: item.code || 'UNKNOWN_CODE',
+          severity: item.severity || 'unknown',
+          confidence: item.confidence || 'unknown',
+          source: item.source !== undefined ? item.source : null,
+          sourceRef: item.sourceRef || null,
+          userMessage: item.userMessage || '此記錄含未識別的診斷代碼，目前無法確認具體原因',
+          evidence: Array.isArray(item.evidence) ? item.evidence : [],
+          nextSteps: Array.isArray(item.nextSteps) && item.nextSteps.length > 0
+            ? item.nextSteps
+            : ['保存任務編號與時間，對照本次設定和程式版本，再交管理者檢查記錄'],
+          rawLine: item.rawLine || null,
+        };
+      });
+    }
+    // 存在但非陣列
+    return [{
+      code: 'UNKNOWN_FORMAT',
+      severity: 'unknown',
+      confidence: 'unknown',
+      source: null,
+      sourceRef: { kind: 'unknown', section: null, index: 0 },
+      userMessage: '診斷資料格式無法辨識',
+      evidence: [],
+      nextSteps: ['保存本次任務紀錄，交由系統維護者比對診斷格式。'],
+    }];
+  }
+
+  // 完全缺少 errorCodes 欄位時走 legacy fallback
+  const fallbackItems = [];
+
+  // 1. 若有 gradeTimeRuleIssues，使用共用 GTR 說明表
+  if (Array.isArray(dataStore.engineGradeTimeRuleIssues) && dataStore.engineGradeTimeRuleIssues.length > 0) {
+    const rendered = renderGtrIssuesToErrorCodes(dataStore.engineGradeTimeRuleIssues, {
+      source: null,
+      authorityData: GTR_CODES,
+      presentationsData: GTR_PRESENTATIONS,
+    });
+    fallbackItems.push(...rendered);
+  }
+
+  // 2. 既有 diagnosticWarningDetails / diagnosticWarnings
+  if (dataStore.engineDiagnosticWarningDetails && dataStore.engineDiagnosticWarningDetails.length > 0) {
+    dataStore.engineDiagnosticWarningDetails.forEach((detail, idx) => {
+      fallbackItems.push({
+        code: detail.code || 'LEGACY_DIAGNOSTIC_WARNING',
+        severity: detail.level === 'error' ? 'blocking' : 'warning',
+        confidence: 'unknown',
+        source: detail.source !== undefined ? detail.source : null,
+        sourceRef: detail.sourceRef || null,
+        userMessage: detail.message || detail.displayText || '排課診斷警示',
+        // Raw legacy report text can contain an English solver message. Keep it
+        // in the optional technical details, not in the user-facing evidence.
+        evidence: [],
+        nextSteps: ['核對相關班級、教師或規則設定。'],
+        rawLine: detail.rawLine || null,
+      });
+    });
+  } else if (dataStore.engineDiagnosticWarnings && dataStore.engineDiagnosticWarnings.length > 0) {
+    dataStore.engineDiagnosticWarnings.forEach((warn, idx) => {
+      fallbackItems.push({
+        code: 'LEGACY_DIAGNOSTIC_WARNING',
+        severity: 'warning',
+        confidence: 'unknown',
+        source: null,
+        sourceRef: null,
+        userMessage: warn,
+        evidence: [],
+        nextSteps: ['核對相關排課設定。'],
+        rawLine: warn,
+      });
+    });
+  }
+
+  return fallbackItems;
+});
+const diagnosticConfidenceGroups = computed(() => [
+  { key: 'determined', label: '已確認' },
+  { key: 'possible', label: '可能相關' },
+  { key: 'unknown', label: '未定位／證據不足' },
+].map(group => ({ ...group, items: normalizedDiagnosticErrorCodes.value.filter(item => item.confidence === group.key) }))
+  .filter(group => group.items.length > 0));
 const aiTuningFocusLabel = computed(() => (
   aiTuningFocusStrategy.value === 'class_first'
     ? '目前策略：單班優先，先從問題最多的班級開始。'

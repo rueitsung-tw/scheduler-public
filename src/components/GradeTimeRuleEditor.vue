@@ -45,6 +45,44 @@
       </button>
     </div>
 
+    <!-- 🆕 全陣列規則問題清單 (Deterministic GTR Issues List) -->
+    <div v-if="presentedIssues.length > 0" class="gtr-issues-summary-panel" data-testid="gtr-issues-list">
+      <div class="gtr-issues-header">
+        <h4>📋 規則診斷問題明細 (共 {{ presentedIssues.length }} 項)</h4>
+      </div>
+      <div class="gtr-issues-items">
+        <div
+          v-for="(issue, idx) in presentedIssues"
+          :key="`${issue.code}-${idx}`"
+          :class="['gtr-issue-card', `severity-${issue.severity}`]"
+          :data-testid="`gtr-issue-item-${idx}`"
+        >
+          <div class="gtr-issue-top">
+            <span :class="['gtr-badge', `badge-${issue.severity}`]">
+              {{ issue.severity === 'blocking' ? '❌ 阻斷' : '⚠️ 警告' }}
+            </span>
+            <span class="gtr-code-badge">{{ issue.code }}</span>
+            <span class="gtr-source-tag">來源: {{ issue.source || 'client_rule_check' }}</span>
+            <span class="gtr-confidence-tag">信心: {{ issue.confidence === 'determined' ? '已確認' : issue.confidence === 'possible' ? '可能相關' : '未定位' }}</span>
+          </div>
+          <div class="gtr-issue-message">
+            <strong>{{ issue.userMessage }}</strong>
+          </div>
+          <div v-if="issue.evidence && issue.evidence.length > 0" class="gtr-issue-evidence">
+            <ul>
+              <li v-for="(ev, evIdx) in issue.evidence" :key="evIdx">{{ ev }}</li>
+            </ul>
+          </div>
+          <div v-if="issue.nextSteps && issue.nextSteps.length > 0" class="gtr-issue-next-steps">
+            <span class="next-step-label">👉 建議下一步：</span>
+            <ul>
+              <li v-for="(step, sIdx) in issue.nextSteps" :key="sIdx">{{ step }}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Tab Navigation -->
     <div class="tab-nav">
       <button
@@ -408,6 +446,9 @@ import {
   forceBlockingRulesToDraft,
   stripTransientRuleFields
 } from '../utils/gradeTimeRules.js'
+import GTR_PRESENTATIONS from '../../contracts/grade_time_rule_issue_presentations.json' with { type: 'json' }
+import GTR_CODES from '../../contracts/grade_time_rule_issue_codes.json' with { type: 'json' }
+import { renderGtrIssuePresentation } from '../utils/gtrIssuePresentation.js'
 
 const props = defineProps({
   settings: {
@@ -443,6 +484,19 @@ const canonicalSettings = computed(() => {
 const computedIssues = computed(() => {
   if (props.issues && props.issues.length > 0) return props.issues
   return detectDeterministicGradeTimeRuleIssues(canonicalSettings.value)
+})
+
+// 全陣列格式化呈現（注入共用 GTR 說明契約與權威資料）
+const presentedIssues = computed(() => {
+  const issues = computedIssues.value || []
+  return issues.map((issue, index) => {
+    return renderGtrIssuePresentation(issue, {
+      index,
+      source: 'client_rule_check',
+      authorityData: GTR_CODES,
+      presentationsData: GTR_PRESENTATIONS,
+    })
+  })
 })
 
 const hasWarnings = computed(() => {
